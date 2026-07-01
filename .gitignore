@@ -1,0 +1,101 @@
+# =============================================================================
+# Intelligent Cognitive Alarm Platform — .gitignore
+# =============================================================================
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# ----- Environment Variables -----
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+
+# ----- Database -----
+*.db
+*.sqlite3
+*.sqlite
+
+# ----- Testing -----
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.tox/
+.nox/
+
+# ----- IDE / Editors -----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ----- OS Generated -----
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ----- Logs -----
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pip-log.txt
+
+# ----- Node.js / Frontend -----
+node_modules/
+.next/
+out/
+.nuxt/
+.cache/
+.parcel-cache/
+
+# ----- Frontend Build -----
+frontend/dist/
+frontend/build/
+frontend/.next/
+
+# ----- Docker -----
+docker-volumes/
+*.tar
+
+# ----- Alembic -----
+# Keep versions directory but ignore auto-generated stamps
+# (versions/*.py files should be committed)
+
+# ----- Misc -----
+*.bak
+*.tmp
+*.temp
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
