@@ -1,0 +1,37 @@
+{
+  "name": "icap-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.24.0",
+    "react-scripts": "5.0.1",
+    "axios": "^1.7.2",
+    "react-icons": "^5.2.1",
+    "react-hot-toast": "^2.4.1",
+    "date-fns": "^3.6.0",
+    "zustand": "^4.5.4",
+    "jwt-decode": "^4.0.0",
+    "react-hook-form": "^7.52.0",
+    "framer-motion": "^11.2.12",
+    "chart.js": "^4.4.3",
+    "react-chartjs-2": "^5.2.0",
+    "recharts": "^2.12.7"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "browserslist": {
+    "production": [">0.2%", "not dead", "not op_mini all"],
+    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.4",
+    "postcss": "^8.4.38",
+    "autoprefixer": "^10.4.19"
+  }
+}

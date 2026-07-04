@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+.env
+
+# Node
+node_modules/
+npm-debug.log
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+*.log
+
+# Frontend build
+frontend/build/
+
+# ML models
+backend/app/ai/models/*.pkl
+backend/app/ai/models/*.joblib
+backend/app/ai/models/*.h5
