@@ -1,91 +1,22 @@
-version: '3.9'
+version: '3.8'
 
 services:
-  # ─── PostgreSQL (Primary Database) ───
-  postgres:
-    image: postgres:15-alpine
-    container_name: icap_postgres
-    environment:
-      POSTGRES_USER: alarm_user
-      POSTGRES_PASSWORD: alarm_pass_2024
-      POSTGRES_DB: cognitive_alarm_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U alarm_user -d cognitive_alarm_db"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ─── MongoDB (Challenge & Document Store) ───
-  mongodb:
-    image: mongo:7
-    container_name: icap_mongodb
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodata:/data/db
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ─── Redis (Cache, Sessions, Leaderboards) ───
-  redis:
-    image: redis:7-alpine
-    container_name: icap_redis
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ─── FastAPI Backend ───
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: icap_backend
-    ports:
-      - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    env_file:
-      - .env
-    volumes:
-      - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-  # ─── React Frontend ───
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: icap_frontend
+    build: ./frontend
     ports:
       - "3000:3000"
-    depends_on:
-      - backend
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - REACT_APP_API_URL=http://localhost:8000/api/v1
 
-volumes:
-  pgdata:
-  mongodata:
-  redisdata:
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    depends_on:
+      - database
+
+  database:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: cognitive_alarm
+    ports:
+      - "3307:3306"
