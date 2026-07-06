@@ -16,7 +16,7 @@ from app.config import settings
 from app.database import init_postgres, init_mongodb, close_mongodb, init_redis, close_redis
 
 # Import routers
-from app.routers import auth, users, alarms
+from app.routers import auth, users, alarms, admin, coach
 
 
 # Rate Limiter
@@ -78,6 +78,8 @@ API_PREFIX = "/api/v1"
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(users.router, prefix=API_PREFIX)
 app.include_router(alarms.router, prefix=API_PREFIX)
+app.include_router(admin.router, prefix=API_PREFIX)
+app.include_router(coach.router, prefix=API_PREFIX)
 
 
 # Root Endpoint
