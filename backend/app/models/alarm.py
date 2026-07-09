@@ -114,6 +114,7 @@ class Alarm(Base):
 
     # ── Relationships ─────────────────────────────────────────────────
     user = relationship("User", back_populates="alarms")
+    challenge_logs = relationship("AlarmChallengeLog", back_populates="alarm", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         """Return a developer-friendly string representation."""
@@ -121,3 +122,33 @@ class Alarm(Base):
             f"<Alarm(id={self.id}, title='{self.title}', "
             f"time={self.alarm_time}, active={self.is_active})>"
         )
+
+
+class AlarmChallengeLog(Base):
+    """
+    SQLAlchemy model representing a specific challenge attempt event.
+    
+    Attributes:
+        id: Auto-incrementing primary key.
+        alarm_id: Foreign key to the parent Alarm.
+        user_id: Foreign key to the User (for easy analytics grouping).
+        challenge_type: The type of puzzle presented.
+        time_taken_seconds: How long it took the user to successfully solve.
+        failed_attempts: How many times the user got it wrong before succeeding.
+        created_at: When the challenge was solved.
+    """
+    __tablename__ = "alarm_challenge_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    alarm_id = Column(Integer, ForeignKey("alarms.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    challenge_type = Column(String(50), nullable=False)
+    time_taken_seconds = Column(Integer, nullable=False, default=0)
+    failed_attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    
+    # Relationships
+    alarm = relationship("Alarm", back_populates="challenge_logs")
+
