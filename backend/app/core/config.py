@@ -74,9 +74,10 @@ class Settings(BaseSettings):
             "CORS_ORIGINS must be a JSON list string or comma-separated string"
         )
 
-    # ── OAuth2 (Optional) ────────────────────────────────────────────
+    # ── External APIs ─────────────────────────────────────────────────
     OAUTH2_GOOGLE_CLIENT_ID: Optional[str] = None
     OAUTH2_GOOGLE_CLIENT_SECRET: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
 
 
 # Singleton settings instance used across the application

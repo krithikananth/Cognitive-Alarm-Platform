@@ -41,9 +41,79 @@ class ChallengeService:
         elif challenge_type == ChallengeType.MEMORY:
             return ChallengeService._generate_memory()
         elif challenge_type == ChallengeType.RIDDLE:
+            return ChallengeService._generate_ai_challenge(challenge_type)
+        else:
+            # Fallback for Logic, Word Game, Quiz
+            return ChallengeService._generate_ai_challenge(challenge_type)
+
+    @staticmethod
+    def _generate_ai_challenge(challenge_type: ChallengeType) -> Dict[str, Any]:
+        """Generate a challenge dynamically using Google Gemini AI, with fallback to hardcoded logic."""
+        from app.core.config import settings
+        import json
+        
+        # If API key is missing, fallback immediately
+        if not settings.GEMINI_API_KEY:
+            return ChallengeService._fallback_challenge(challenge_type)
+            
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            
+            # Use gemini-1.5-flash for fast responses
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            
+            prompt = f"""
+            Generate a completely original cognitive puzzle of type: {challenge_type.value}.
+            The puzzle must be solvable but challenging enough to wake someone up.
+            
+            You must return a raw JSON object with NO markdown formatting, NO backticks, and NO extra text.
+            The JSON object must have exactly these keys:
+            - "prompt": The question or puzzle text.
+            - "answer": The correct answer (string).
+            - "options": A list of exactly 4 strings. One must be the exact correct answer, and 3 must be plausible but incorrect.
+
+            Example format:
+            {{"prompt": "What has keys but no locks?", "answer": "Piano", "options": ["Piano", "Door", "Map", "Computer"]}}
+            """
+            
+            response = model.generate_content(prompt)
+            text = response.text.strip()
+            
+            # Clean up markdown formatting if the model accidentally included it
+            if text.startswith('```json'):
+                text = text[7:]
+            if text.startswith('```'):
+                text = text[3:]
+            if text.endswith('```'):
+                text = text[:-3]
+                
+            data = json.loads(text.strip())
+            
+            # Validate structure
+            if "prompt" not in data or "answer" not in data or "options" not in data:
+                raise ValueError("Missing required keys in AI response")
+                
+            # Ensure options are randomized so answer isn't always at same index
+            random.shuffle(data["options"])
+                
+            return {
+                "type": challenge_type.value.upper(),
+                "prompt": data["prompt"],
+                "answer": str(data["answer"]),
+                "options": [str(o) for o in data["options"]]
+            }
+            
+        except Exception as e:
+            print(f"⚠️ AI Generation Failed: {e}. Falling back to procedurally generated puzzle.")
+            return ChallengeService._fallback_challenge(challenge_type)
+
+    @staticmethod
+    def _fallback_challenge(challenge_type: ChallengeType) -> Dict[str, Any]:
+        """Fallback to algorithmic generation if AI fails or key is missing."""
+        if challenge_type == ChallengeType.RIDDLE:
             return ChallengeService._generate_riddle()
         else:
-            # Fallback for Logic, Word Game, Quiz to simple math for MVP
             return ChallengeService._generate_math()
 
     @staticmethod
