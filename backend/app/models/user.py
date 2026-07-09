@@ -1,67 +1,84 @@
 """
-User and UserProfile SQLAlchemy models.
-Compatible with both PostgreSQL and SQLite.
+User ORM model.
+
+Defines the ``users`` table with authentication fields, role-based access
+control, optional OAuth provider details, and relationships to dependent
+models (profile, alarms).
 """
 
-import uuid
-from datetime import datetime
+import enum
+from datetime import datetime, timezone
 
-from sqlalchemy import (
-    Column, String, Boolean, DateTime, Float, Text, ForeignKey, Time
-)
+from sqlalchemy import Boolean, Column, DateTime, Enum, Integer, String
 from sqlalchemy.orm import relationship
 
-from app.database import Base
+from app.db.base import Base
 
 
-def generate_uuid():
-    return str(uuid.uuid4())
+class UserRole(str, enum.Enum):
+    """Enumeration of supported user roles for RBAC."""
+
+    USER = "user"
+    WELLNESS_COACH = "wellness_coach"
+    ADMIN = "admin"
 
 
 class User(Base):
-    """Core user account table."""
+    """
+    SQLAlchemy model representing an application user.
+
+    Attributes:
+        id: Auto-incrementing primary key.
+        email: Unique, indexed email address used for authentication.
+        username: Unique, indexed display name.
+        hashed_password: Bcrypt-hashed password string.
+        full_name: Optional full name for display purposes.
+        role: RBAC role (user, wellness_coach, admin).
+        is_active: Soft-delete / deactivation flag.
+        is_verified: Whether the user's email has been verified.
+        oauth_provider: Name of the OAuth provider (e.g. 'google').
+        oauth_id: External user ID from the OAuth provider.
+        created_at: Timestamp of record creation (UTC).
+        updated_at: Timestamp of last update (UTC).
+        profile: One-to-one relationship with ``UserProfile``.
+        alarms: One-to-many relationship with ``Alarm``.
+    """
+
     __tablename__ = "users"
 
-    id = Column(String(36), primary_key=True, default=generate_uuid)
-    email = Column(String(255), unique=True, nullable=False, index=True)
-    username = Column(String(100), unique=True, nullable=False, index=True)
-    hashed_password = Column(String(255), nullable=True)  # nullable for OAuth users
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    username = Column(String(100), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=True)
-    role = Column(String(20), default="user", nullable=False)  # user, wellness_coach, admin
-    is_active = Column(Boolean, default=True)
-    is_verified = Column(Boolean, default=False)
-    oauth_provider = Column(String(50), nullable=True)  # google, github
+    role = Column(Enum(UserRole), default=UserRole.USER, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    is_verified = Column(Boolean, default=False, nullable=False)
+    oauth_provider = Column(String(50), nullable=True)
     oauth_id = Column(String(255), nullable=True)
-    avatar_url = Column(Text, nullable=True)
-    timezone = Column(String(50), default="UTC")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
-    # Relationships
-    profile = relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
-    alarms = relationship("Alarm", back_populates="user", cascade="all, delete-orphan")
-    alarm_events = relationship("AlarmEvent", back_populates="user", cascade="all, delete-orphan")
-    habit_scores = relationship("HabitScore", back_populates="user", cascade="all, delete-orphan")
-    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
-    recommendations = relationship("Recommendation", back_populates="user", cascade="all, delete-orphan")
+    # ── Relationships ─────────────────────────────────────────────────
+    profile = relationship(
+        "UserProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    alarms = relationship(
+        "Alarm",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
-
-class UserProfile(Base):
-    """Extended user profile with sleep/habit preferences."""
-    __tablename__ = "user_profiles"
-
-    id = Column(String(36), primary_key=True, default=generate_uuid)
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
-    preferred_wakeup_time = Column(String(10), nullable=True)  # Store as "HH:MM" string
-    sleep_duration_hours = Column(Float, default=8.0)
-    difficulty_preference = Column(String(20), default="medium")  # beginner, easy, medium, hard, expert
-    productivity_goals = Column(Text, nullable=True)
-    habit_preferences = Column(Text, default="{}")  # JSON string
-    notification_enabled = Column(Boolean, default=True)
-    sound_preference = Column(String(100), default="default")
-    preferred_challenge_types = Column(Text, default='["math","logic"]')  # JSON string
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    user = relationship("User", back_populates="profile")
+    def __repr__(self) -> str:
+        """Return a developer-friendly string representation."""
+        return f"<User(id={self.id}, email='{self.email}', role='{self.role}')>"

@@ -1,22 +1,39 @@
 version: '3.8'
 
 services:
-  frontend:
-    build: ./frontend
+  db:
+    image: postgres:16-alpine
+    container_name: icap-postgres
+    environment:
+      POSTGRES_DB: icap_db
+      POSTGRES_USER: icap_user
+      POSTGRES_PASSWORD: icap_password
     ports:
-      - "3000:3000"
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U icap_user -d icap_db']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   backend:
     build: ./backend
+    container_name: icap-backend
     ports:
-      - "8000:8000"
-    depends_on:
-      - database
-
-  database:
-    image: mysql:8.0
+      - '8000:8000'
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: cognitive_alarm
-    ports:
-      - "3307:3306"
+      - DATABASE_URL=postgresql://icap_user:icap_password@db:5432/icap_db
+      - SECRET_KEY=your-production-secret-key
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

@@ -6,7 +6,14 @@ import { authAPI, userAPI } from '../services/api';
 
 const useAuthStore = create((set, get) => ({
   // State
-  user: JSON.parse(localStorage.getItem('user') || 'null'),
+  user: (() => {
+    try {
+      const stored = localStorage.getItem('user');
+      return stored && stored !== 'undefined' ? JSON.parse(stored) : null;
+    } catch (e) {
+      return null;
+    }
+  })(),
   profile: null,
   isAuthenticated: !!localStorage.getItem('access_token'),
   isLoading: false,
@@ -20,7 +27,13 @@ const useAuthStore = create((set, get) => ({
       set({ isLoading: false });
       return { success: true };
     } catch (err) {
-      const message = err.response?.data?.detail || 'Registration failed';
+      let message = 'Registration failed';
+      const detail = err.response?.data?.detail;
+      if (Array.isArray(detail)) {
+        message = detail.map(d => d.msg).join(', ');
+      } else if (typeof detail === 'string') {
+        message = detail;
+      }
       set({ error: message, isLoading: false });
       return { success: false, error: message };
     }
@@ -38,7 +51,13 @@ const useAuthStore = create((set, get) => ({
       set({ user, isAuthenticated: true, isLoading: false });
       return { success: true };
     } catch (err) {
-      const message = err.response?.data?.detail || 'Login failed';
+      let message = 'Login failed';
+      const detail = err.response?.data?.detail;
+      if (Array.isArray(detail)) {
+        message = detail.map(d => d.msg).join(', ');
+      } else if (typeof detail === 'string') {
+        message = detail;
+      }
       set({ error: message, isLoading: false });
       return { success: false, error: message };
     }

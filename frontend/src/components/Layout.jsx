@@ -7,20 +7,26 @@ import {
   HiOutlineBell, HiOutlineCog6Tooth, HiOutlineSquares2X2,
   HiOutlineClock, HiOutlineUser, HiOutlineArrowRightOnRectangle,
   HiOutlineBars3, HiOutlineXMark, HiOutlinePuzzlePiece,
-  HiOutlineChartBar, HiOutlineTrophy,
+  HiOutlineChartBar, HiOutlineTrophy, HiOutlineShieldCheck,
 } from 'react-icons/hi2';
 import useAuthStore from '../store/authStore';
 
-const navItems = [
-  { to: '/dashboard', icon: HiOutlineSquares2X2, label: 'Dashboard' },
-  { to: '/alarms', icon: HiOutlineClock, label: 'Alarms' },
-  { to: '/profile', icon: HiOutlineUser, label: 'Profile' },
-];
+
 
 export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { user, logout } = useAuthStore();
   const navigate = useNavigate();
+
+  const navItems = user?.role === 'admin'
+    ? [
+        { to: '/admin', icon: HiOutlineShieldCheck, label: 'Admin Panel' }
+      ]
+    : [
+        { to: '/dashboard', icon: HiOutlineSquares2X2, label: 'Dashboard' },
+        { to: '/alarms', icon: HiOutlineClock, label: 'Alarms' },
+        { to: '/profile', icon: HiOutlineUser, label: 'Profile' },
+      ];
 
   const handleLogout = async () => {
     await logout();
@@ -126,13 +132,17 @@ export default function Layout() {
           <div className="hidden lg:block" />
 
           <div className="flex items-center gap-3">
-            <button className="p-2.5 rounded-xl hover:bg-surface-800 transition relative">
-              <HiOutlineBell className="w-5 h-5 text-slate-300" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-primary-500" />
-            </button>
-            <button className="p-2.5 rounded-xl hover:bg-surface-800 transition">
-              <HiOutlineCog6Tooth className="w-5 h-5 text-slate-300" />
-            </button>
+            {user?.role !== 'admin' && (
+              <>
+                <button onClick={() => navigate('/alarms')} className="p-2.5 rounded-xl hover:bg-surface-800 transition relative">
+                  <HiOutlineBell className="w-5 h-5 text-slate-300" />
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-primary-500" />
+                </button>
+                <button onClick={() => navigate('/profile')} className="p-2.5 rounded-xl hover:bg-surface-800 transition">
+                  <HiOutlineCog6Tooth className="w-5 h-5 text-slate-300" />
+                </button>
+              </>
+            )}
           </div>
         </header>
 

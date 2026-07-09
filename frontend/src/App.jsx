@@ -12,7 +12,12 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import AlarmManager from './pages/AlarmManager';
 import Profile from './pages/Profile';
+import AdminDashboard from './pages/AdminDashboard';
 import Layout from './components/Layout';
+
+import ActiveAlarmModal from './components/ActiveAlarmModal';
+import useAlarmStore from './store/alarmStore';
+import useActiveAlarmStore from './store/activeAlarmStore';
 
 // Protected Route wrapper
 function ProtectedRoute({ children }) {
@@ -24,13 +29,55 @@ function ProtectedRoute({ children }) {
 // Guest Route wrapper (redirect logged-in users)
 function GuestRoute({ children }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  if (isAuthenticated) return <Navigate to="/dashboard" replace />;
+  const user = useAuthStore((s) => s.user);
+  if (isAuthenticated) {
+    return <Navigate to={user?.role === 'admin' ? '/admin' : '/dashboard'} replace />;
+  }
   return children;
+}
+
+// Component to watch time and trigger alarms
+function AlarmWatcher() {
+  const { alarms, fetchAlarms } = useAlarmStore();
+  const { triggerAlarm, isRinging } = useActiveAlarmStore();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  
+  // Fetch alarms initially
+  React.useEffect(() => {
+    if (isAuthenticated) fetchAlarms();
+  }, [isAuthenticated, fetchAlarms]);
+  
+  // Check every 10 seconds if any alarm should ring
+  React.useEffect(() => {
+    if (!isAuthenticated || isRinging) return;
+    
+    const interval = setInterval(() => {
+      const now = new Date();
+      
+      for (const alarm of alarms) {
+        if (!alarm.is_active || !alarm.next_trigger_at) continue;
+        
+        const triggerTime = new Date(alarm.next_trigger_at);
+        // If current time is past the trigger time (within 60 seconds to avoid stale triggers)
+        const diffMs = now - triggerTime;
+        if (diffMs >= 0 && diffMs < 60000) {
+          triggerAlarm(alarm.id);
+          break; // Only trigger one alarm at a time
+        }
+      }
+    }, 10000);
+    
+    return () => clearInterval(interval);
+  }, [alarms, isAuthenticated, isRinging, triggerAlarm]);
+  
+  return null;
 }
 
 function App() {
   return (
     <Router>
+      <AlarmWatcher />
+      <ActiveAlarmModal />
       <Toaster
         position="top-right"
         toastOptions={{
@@ -56,6 +103,7 @@ function App() {
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="alarms" element={<AlarmManager />} />
           <Route path="profile" element={<Profile />} />
+          <Route path="admin" element={<AdminDashboard />} />
         </Route>
 
         {/* Fallback */}

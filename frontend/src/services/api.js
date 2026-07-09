@@ -29,7 +29,12 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config;
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (
+      error.response?.status === 401 &&
+      !originalRequest._retry &&
+      !originalRequest.url.includes('/auth/login') &&
+      !originalRequest.url.includes('/auth/register')
+    ) {
       originalRequest._retry = true;
 
       try {
@@ -85,18 +90,22 @@ export const userAPI = {
 
 // ─── Alarm API ───
 export const alarmAPI = {
-  create: (data) => api.post('/alarms', data),
-  list: (activeOnly = false) => api.get('/alarms', { params: { active_only: activeOnly } }),
+  create: (data) => api.post('/alarms/', data),
+  list: (activeOnly = false) => api.get('/alarms/', { params: { is_active: activeOnly === true ? true : undefined } }),
   get: (id) => api.get(`/alarms/${id}`),
   update: (id, data) => api.put(`/alarms/${id}`, data),
   delete: (id) => api.delete(`/alarms/${id}`),
   toggle: (id, isActive) => api.patch(`/alarms/${id}/toggle`, { is_active: isActive }),
-  upcoming: (limit = 5) => api.get('/alarms/upcoming', { params: { limit } }),
-  history: (limit = 50, offset = 0) =>
-    api.get('/alarms/history', { params: { limit, offset } }),
-  trigger: (id) => api.post(`/alarms/${id}/trigger`),
-  snooze: (eventId) => api.post(`/alarms/events/${eventId}/snooze`),
-  dismiss: (eventId, data) => api.post(`/alarms/events/${eventId}/dismiss`, null, { params: data }),
+  upcoming: (hours = 24) => api.get('/alarms/upcoming', { params: { hours_ahead: hours } }),
+  snooze: (id) => api.post(`/alarms/${id}/snooze`),
+  dismiss: (id) => api.post(`/alarms/${id}/dismiss`),
+  getChallenge: (id) => api.get(`/alarms/${id}/challenge`),
+  verifyChallenge: (id, data) => api.post(`/alarms/${id}/verify`, data),
+};
+
+// ─── Admin API ───
+export const adminAPI = {
+  getDashboard: () => api.get('/admin/dashboard'),
 };
 
 export default api;

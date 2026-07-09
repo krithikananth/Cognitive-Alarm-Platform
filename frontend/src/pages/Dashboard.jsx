@@ -3,6 +3,7 @@
  */
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { motion } from 'framer-motion';
 import {
   HiOutlineClock, HiOutlineTrophy, HiOutlineFire,
@@ -211,9 +212,9 @@ export default function Dashboard() {
           </h2>
           <div className="space-y-3">
             <QuickAction icon={HiOutlinePlus} label="Create Alarm" to="/alarms" color="primary" />
-            <QuickAction icon={HiOutlinePuzzlePiece} label="Practice Challenge" to="/challenges" color="accent" />
-            <QuickAction icon={HiOutlineChartBar} label="View Analytics" to="/analytics" color="emerald" />
-            <QuickAction icon={HiOutlineTrophy} label="Habit Tracker" to="/habits" color="orange" />
+            <QuickAction icon={HiOutlinePuzzlePiece} label="Practice Challenge" onClick={() => toast.success('Practice mode coming soon!')} color="accent" />
+            <QuickAction icon={HiOutlineChartBar} label="View Analytics" to="/profile" color="emerald" />
+            <QuickAction icon={HiOutlineTrophy} label="Habit Tracker" to="/profile" color="orange" />
           </div>
 
           {/* Mini Habit Score Gauge */}
@@ -252,7 +253,7 @@ function StatCard({ icon: Icon, label, value, color }) {
   );
 }
 
-function QuickAction({ icon: Icon, label, to, color }) {
+function QuickAction({ icon: Icon, label, to, onClick, color }) {
   const colorMap = {
     primary: 'bg-primary-500/10 text-primary-400 border-primary-500/20',
     accent: 'bg-accent-500/10 text-accent-400 border-accent-500/20',
@@ -260,10 +261,21 @@ function QuickAction({ icon: Icon, label, to, color }) {
     orange: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
   };
 
+  const className = `flex items-center gap-3 p-3 rounded-xl border transition-all hover:scale-[1.02] ${colorMap[color]}`;
+
+  if (onClick) {
+    return (
+      <button onClick={onClick} className={`${className} w-full text-left`}>
+        <Icon className="w-5 h-5" />
+        <span className="text-sm font-medium text-white">{label}</span>
+      </button>
+    );
+  }
+
   return (
     <Link
       to={to}
-      className={`flex items-center gap-3 p-3 rounded-xl border transition-all hover:scale-[1.02] ${colorMap[color]}`}
+      className={className}
     >
       <Icon className="w-5 h-5" />
       <span className="text-sm font-medium text-white">{label}</span>

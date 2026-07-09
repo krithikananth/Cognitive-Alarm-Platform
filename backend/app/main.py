@@ -1,106 +1,106 @@
 """
-Intelligent Cognitive Alarm Platform - FastAPI Main Application.
+FastAPI application entry point for the Intelligent Cognitive Alarm Platform.
 
-Entry point: uvicorn app.main:app --reload
+Creates and configures the main application instance with CORS middleware,
+API routing, and database initialization on startup.
 """
-
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 
-from app.config import settings
-from app.database import init_postgres, init_mongodb, close_mongodb, init_redis, close_redis
+from app.core.config import settings
+from app.api.v1.router import api_router
+from app.db.base import Base
+from app.db.session import engine
 
-# Import routers
-from app.routers import auth, users, alarms, admin, coach
-
-
-# Rate Limiter
-limiter = Limiter(key_func=get_remote_address)
+# Import all models so they are registered with Base.metadata
+from app.models import user, profile, alarm  # noqa: F401
 
 
-# Lifespan (startup/shutdown)
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application startup and shutdown events."""
-    # Startup
-    print("[STARTUP] Starting Intelligent Cognitive Alarm Platform...")
-    await init_postgres()
-    print("   [OK] Database connected")
-    await init_mongodb()
-    print("   [OK] MongoDB step done")
-    await init_redis()
-    print("   [OK] Redis step done")
-    print(f"   [CORS] origins: {settings.cors_origins_list}")
-    print("[READY] Platform ready!")
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application."""
+    application = FastAPI(
+        title=settings.PROJECT_NAME,
+        version=settings.VERSION,
+        description=(
+            "AI-powered Intelligent Cognitive Alarm Platform that helps users "
+            "develop consistent wake-up habits through personalized cognitive "
+            "challenges including puzzles, riddles, math, and logic problems."
+        ),
+        docs_url="/docs",
+        redoc_url="/redoc",
+    )
 
-    yield
+    # CORS middleware
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-    # Shutdown
-    print("[SHUTDOWN] Shutting down...")
-    await close_mongodb()
-    await close_redis()
-    print("   Connections closed. Goodbye!")
+    # Include API v1 routes
+    application.include_router(api_router)
+
+    @application.on_event("startup")
+    def on_startup():
+        """Create database tables on application startup."""
+        Base.metadata.create_all(bind=engine)
+
+        # Seed default admin user if not present
+        from app.db.session import SessionLocal
+        from app.models.user import User, UserRole
+        from app.models.profile import UserProfile, DifficultyPreference
+        from app.utils.hashing import get_password_hash
+
+        db = SessionLocal()
+        try:
+            admin = db.query(User).filter(User.email == "23102107@rmd.ac.in").first()
+            if not admin:
+                admin = User(
+                    email="23102107@rmd.ac.in",
+                    username="admin_icap",
+                    hashed_password=get_password_hash("Admin@123"),
+                    full_name="ICAP Administrator",
+                    role=UserRole.ADMIN,
+                    is_active=True,
+                    is_verified=True,
+                )
+                db.add(admin)
+                db.flush()
+                admin_profile = UserProfile(
+                    user_id=admin.id,
+                    sleep_duration_hours=8.0,
+                    timezone="Asia/Kolkata",
+                    difficulty_preference=DifficultyPreference.MEDIUM,
+                )
+                db.add(admin_profile)
+                db.commit()
+                print("✅ Admin user seeded: 23102107@rmd.ac.in")
+        except Exception as e:
+            db.rollback()
+            print(f"⚠️ Admin seeding skipped: {e}")
+        finally:
+            db.close()
+
+    @application.get("/", tags=["Root"])
+    def root():
+        """Root endpoint with API information."""
+        return {
+            "name": settings.PROJECT_NAME,
+            "version": settings.VERSION,
+            "description": "Intelligent Cognitive Alarm Platform API",
+            "docs": "/docs",
+            "redoc": "/redoc",
+        }
+
+    @application.get("/health", tags=["Health"])
+    def health_check():
+        """Health check endpoint."""
+        return {"status": "healthy", "version": settings.VERSION}
+
+    return application
 
 
-# Create App
-app = FastAPI(
-    title=settings.APP_NAME,
-    version=settings.APP_VERSION,
-    description=(
-        "AI-powered Intelligent Cognitive Alarm Platform that helps users develop "
-        "consistent wake-up habits through personalized cognitive challenges."
-    ),
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan,
-)
-
-# Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-
-# Register Routers
-API_PREFIX = "/api/v1"
-app.include_router(auth.router, prefix=API_PREFIX)
-app.include_router(users.router, prefix=API_PREFIX)
-app.include_router(alarms.router, prefix=API_PREFIX)
-app.include_router(admin.router, prefix=API_PREFIX)
-app.include_router(coach.router, prefix=API_PREFIX)
-
-
-# Root Endpoint
-@app.get("/", tags=["Health"])
-async def root():
-    """Health check endpoint."""
-    return {
-        "name": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "status": "healthy",
-        "docs": "/docs",
-    }
-
-
-@app.get("/health", tags=["Health"])
-async def health_check():
-    """Detailed health check."""
-    return {
-        "status": "healthy",
-        "services": {
-            "api": "up",
-            "database": "connected",
-        },
-    }
+app = create_app()

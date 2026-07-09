@@ -1,201 +1,117 @@
+"""Pytest configuration and shared fixtures for the test suite.
+
+Provides:
+- In-memory SQLite test database
+- TestClient fixture with dependency overrides
+- Pre-created test user and admin user fixtures
+- JWT auth header fixtures for authenticated requests
 """
-Pytest configuration and shared fixtures for the test suite.
-
-Sets up an in-memory SQLite test database, async test client,
-and helper fixtures for creating users and auth tokens.
-"""
-
-import asyncio
-import json
-import uuid
-from datetime import datetime
-from typing import AsyncGenerator, Dict
-
 import pytest
-import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-
-from app.database import Base, get_db
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from app.main import app
-from app.models.user import User, UserProfile
-from app.utils.security import hash_password, create_access_token
+from app.db.session import get_db
+from app.db.base import Base
+from app.utils.hashing import get_password_hash
+from app.models.user import User, UserRole
+from app.models.profile import UserProfile  # noqa: F401 - ensure model is registered
+from app.models.alarm import Alarm  # noqa: F401 - ensure model is registered
+from app.core.security import create_access_token
 
+SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///./test.db"
 
-# ─── Test Database Setup ─────────────────────────────────────────────
-
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-test_engine = create_async_engine(
-    TEST_DATABASE_URL,
-    echo=False,
+engine = create_engine(
+    SQLALCHEMY_TEST_DATABASE_URL, connect_args={"check_same_thread": False}
 )
-
-TestSessionLocal = async_sessionmaker(
-    test_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-# ─── Event Loop ──────────────────────────────────────────────────────
+@pytest.fixture(scope="function")
+def db_session():
+    """Create a fresh database session for each test.
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create a single event loop for the entire test session."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-# ─── Database Session ────────────────────────────────────────────────
-
-@pytest_asyncio.fixture(scope="function")
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Create a clean database for each test function."""
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    async with TestSessionLocal() as session:
+    Sets up all tables before the test and tears them down after,
+    ensuring complete isolation between tests.
+    """
+    Base.metadata.create_all(bind=engine)
+    session = TestingSessionLocal()
+    try:
         yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(bind=engine)
 
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
 
+@pytest.fixture(scope="function")
+def client(db_session):
+    """Provide a FastAPI TestClient with the test database session injected.
 
-# ─── Test Client ─────────────────────────────────────────────────────
+    Overrides the get_db dependency so all requests use the test DB.
+    Clears overrides after the test completes.
+    """
 
-@pytest_asyncio.fixture(scope="function")
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    """Create an async test client with database override."""
-
-    async def override_get_db():
-        yield db_session
+    def override_get_db():
+        try:
+            yield db_session
+        finally:
+            pass
 
     app.dependency_overrides[get_db] = override_get_db
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
-
+    with TestClient(app) as c:
+        yield c
     app.dependency_overrides.clear()
 
 
-# ─── User Fixtures ───────────────────────────────────────────────────
-
-@pytest_asyncio.fixture
-async def test_user(db_session: AsyncSession) -> User:
-    """Create a standard test user."""
+@pytest.fixture
+def test_user(db_session):
+    """Create and return a standard test user (role=USER, active, verified)."""
     user = User(
-        id=str(uuid.uuid4()),
-        email="testuser@example.com",
+        email="test@example.com",
         username="testuser",
-        hashed_password=hash_password("TestPass123"),
+        hashed_password=get_password_hash("TestPass123"),
         full_name="Test User",
-        role="user",
+        role=UserRole.USER,
         is_active=True,
         is_verified=True,
-        timezone="UTC",
     )
     db_session.add(user)
-    await db_session.flush()
-
-    profile = UserProfile(
-        id=str(uuid.uuid4()),
-        user_id=user.id,
-        difficulty_preference="medium",
-        sleep_duration_hours=8.0,
-        preferred_challenge_types=json.dumps(["math", "logic"]),
-        habit_preferences="{}",
-    )
-    db_session.add(profile)
-    await db_session.flush()
-
+    db_session.commit()
+    db_session.refresh(user)
     return user
 
 
-@pytest_asyncio.fixture
-async def test_admin(db_session: AsyncSession) -> User:
-    """Create an admin test user."""
-    admin = User(
-        id=str(uuid.uuid4()),
+@pytest.fixture
+def admin_user(db_session):
+    """Create and return an admin test user (role=ADMIN, active, verified)."""
+    user = User(
         email="admin@example.com",
         username="adminuser",
-        hashed_password=hash_password("AdminPass123"),
+        hashed_password=get_password_hash("AdminPass123"),
         full_name="Admin User",
-        role="admin",
+        role=UserRole.ADMIN,
         is_active=True,
         is_verified=True,
-        timezone="UTC",
     )
-    db_session.add(admin)
-    await db_session.flush()
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    return user
 
-    profile = UserProfile(
-        id=str(uuid.uuid4()),
-        user_id=admin.id,
-        difficulty_preference="medium",
-        sleep_duration_hours=7.0,
-        preferred_challenge_types=json.dumps(["logic"]),
-        habit_preferences="{}",
+
+@pytest.fixture
+def auth_headers(test_user):
+    """Return Authorization headers with a valid JWT for the standard test user."""
+    token = create_access_token(
+        data={"sub": str(test_user.id), "role": test_user.role.value}
     )
-    db_session.add(profile)
-    await db_session.flush()
-
-    return admin
+    return {"Authorization": f"Bearer {token}"}
 
 
-@pytest_asyncio.fixture
-async def test_coach(db_session: AsyncSession) -> User:
-    """Create a wellness coach test user."""
-    coach = User(
-        id=str(uuid.uuid4()),
-        email="coach@example.com",
-        username="coachuser",
-        hashed_password=hash_password("CoachPass123"),
-        full_name="Coach User",
-        role="wellness_coach",
-        is_active=True,
-        is_verified=True,
-        timezone="UTC",
+@pytest.fixture
+def admin_headers(admin_user):
+    """Return Authorization headers with a valid JWT for the admin test user."""
+    token = create_access_token(
+        data={"sub": str(admin_user.id), "role": admin_user.role.value}
     )
-    db_session.add(coach)
-    await db_session.flush()
-
-    profile = UserProfile(
-        id=str(uuid.uuid4()),
-        user_id=coach.id,
-        difficulty_preference="hard",
-        sleep_duration_hours=7.5,
-        preferred_challenge_types=json.dumps(["logic", "math"]),
-        habit_preferences="{}",
-    )
-    db_session.add(profile)
-    await db_session.flush()
-
-    return coach
-
-
-# ─── Token Fixtures ──────────────────────────────────────────────────
-
-@pytest_asyncio.fixture
-async def user_token(test_user: User) -> str:
-    """Generate a valid access token for the test user."""
-    return create_access_token({"sub": test_user.id, "role": test_user.role})
-
-
-@pytest_asyncio.fixture
-async def admin_token(test_admin: User) -> str:
-    """Generate a valid access token for the admin user."""
-    return create_access_token({"sub": test_admin.id, "role": test_admin.role})
-
-
-@pytest_asyncio.fixture
-async def coach_token(test_coach: User) -> str:
-    """Generate a valid access token for the wellness coach."""
-    return create_access_token({"sub": test_coach.id, "role": test_coach.role})
-
-
-def auth_header(token: str) -> Dict[str, str]:
-    """Helper to create Authorization header dict."""
     return {"Authorization": f"Bearer {token}"}
