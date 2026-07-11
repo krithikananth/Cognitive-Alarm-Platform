@@ -99,3 +99,6 @@ docker-volumes/
 .ruff_cache/
 .dmypy.json
 dmypy.json
+
+#
+project_overview.md
