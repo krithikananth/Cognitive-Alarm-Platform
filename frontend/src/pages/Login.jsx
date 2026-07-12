@@ -1,19 +1,30 @@
 /**
- * Login page with email/password + OAuth2 buttons.
+ * Login page with email/password + Google OAuth2.
  */
-import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { motion } from 'framer-motion';
 import { HiOutlineClock, HiOutlineEnvelope, HiOutlineLockClosed, HiOutlineEye, HiOutlineEyeSlash } from 'react-icons/hi2';
 import toast from 'react-hot-toast';
 import useAuthStore from '../store/authStore';
+import { authAPI } from '../services/api';
 
 export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const { login, isLoading, error } = useAuthStore();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { register, handleSubmit, formState: { errors } } = useForm();
+
+  useEffect(() => {
+    const oauthError = searchParams.get('error');
+    if (oauthError) {
+      toast.error(oauthError.replace(/_/g, ' '));
+      searchParams.delete('error');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const onSubmit = async (data) => {
     const result = await login(data);
@@ -25,6 +36,9 @@ export default function Login() {
     }
   };
 
+  const handleGoogleLogin = () => {
+    window.location.href = authAPI.googleLoginUrl();
+  };
 
   return (
     <div className="min-h-screen gradient-surface flex items-center justify-center p-4 relative overflow-hidden">
@@ -111,6 +125,45 @@ export default function Login() {
               )}
             </button>
           </form>
+
+          <div className="relative my-6">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-slate-700/80" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase tracking-wide">
+              <span className="px-3 bg-slate-900/80 text-slate-500">Or continue with</span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleGoogleLogin}
+            disabled={isLoading}
+            className="btn-secondary w-full flex items-center justify-center gap-3"
+            id="login-google"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="#4285F4"
+                d="M21.6 12.23c0-.68-.06-1.36-.18-2H12v3.79h5.4a4.62 4.62 0 0 1-2 3.03v2.5h3.24c1.9-1.75 2.96-4.33 2.96-7.32z"
+              />
+              <path
+                fill="#34A853"
+                d="M12 22c2.7 0 4.97-.9 6.63-2.45l-3.24-2.5c-.9.6-2.05.96-3.39.96-2.61 0-4.82-1.76-5.61-4.13H3.06v2.59A10 10 0 0 0 12 22z"
+              />
+              <path
+                fill="#FBBC05"
+                d="M6.39 13.88A6.01 6.01 0 0 1 6.07 12c0-.65.11-1.29.32-1.88V7.53H3.06A10 10 0 0 0 2 12c0 1.61.39 3.14 1.06 4.47l3.33-2.59z"
+              />
+              <path
+                fill="#EA4335"
+                d="M12 5.98c1.47 0 2.79.5 3.83 1.5l2.87-2.87C16.96 2.99 14.69 2 12 2A10 10 0 0 0 3.06 7.53l3.33 2.59C7.18 7.74 9.39 5.98 12 5.98z"
+              />
+            </svg>
+            Continue with Google
+          </button>
+
+          {error && <p className="text-red-400 text-xs mt-4 text-center">{error}</p>}
         </div>
 
         {/* Register Link */}

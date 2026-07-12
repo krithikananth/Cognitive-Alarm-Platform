@@ -37,6 +37,11 @@ class UserCreate(BaseModel):
     full_name: Optional[str] = Field(
         None, max_length=255, description="Full display name"
     )
+    timezone: Optional[str] = Field(
+        default=None,
+        max_length=50,
+        description="IANA timezone (defaults to UTC)",
+    )
 
     @field_validator("username")
     @classmethod
@@ -46,6 +51,18 @@ class UserCreate(BaseModel):
             raise ValueError(
                 "Username must contain only letters, digits, and underscores"
             )
+        return v
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        try:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+            ZoneInfo(v)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Unknown timezone: {v}") from exc
         return v
 
     @field_validator("password")
@@ -94,6 +111,22 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = Field(
         None, description="Updated email address"
     )
+
+
+class AdminUserUpdate(BaseModel):
+    """
+    Schema for admin updates to any user account.
+
+    Unlike ``UserUpdate`` (used for self-service updates), this schema also
+    allows an admin to change a user's ``role`` and ``is_active`` state. It is
+    only accepted by admin-guarded endpoints, so regular users cannot use it to
+    escalate their own privileges.
+    """
+
+    full_name: Optional[str] = Field(None, max_length=255)
+    email: Optional[EmailStr] = None
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
 
 
 class UserResponse(BaseModel):

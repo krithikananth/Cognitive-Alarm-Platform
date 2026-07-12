@@ -42,6 +42,7 @@ class ChallengeType(str, enum.Enum):
     LOGIC = "logic"
     MEMORY = "memory"
     WORD_GAME = "word_game"
+    WORD = "word"  # frontend alias for WORD_GAME
     PATTERN = "pattern"
     RIDDLE = "riddle"
     QUIZ = "quiz"
@@ -133,8 +134,12 @@ class AlarmChallengeLog(Base):
         alarm_id: Foreign key to the parent Alarm.
         user_id: Foreign key to the User (for easy analytics grouping).
         challenge_type: The type of puzzle presented.
+        difficulty: Effective difficulty for this attempt.
+        challenge_prompt: The prompt shown to the user.
+        is_correct: Whether the attempt was correct (and not timed out).
         time_taken_seconds: How long it took the user to successfully solve.
         failed_attempts: How many times the user got it wrong before succeeding.
+        points_earned: Score awarded for this attempt.
         created_at: When the challenge was solved.
     """
     __tablename__ = "alarm_challenge_logs"
@@ -143,8 +148,12 @@ class AlarmChallengeLog(Base):
     alarm_id = Column(Integer, ForeignKey("alarms.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     challenge_type = Column(String(50), nullable=False)
+    difficulty = Column(String(50), nullable=True)
+    challenge_prompt = Column(Text, nullable=True)
+    is_correct = Column(Boolean, nullable=False, default=False)
     time_taken_seconds = Column(Integer, nullable=False, default=0)
     failed_attempts = Column(Integer, nullable=False, default=0)
+    points_earned = Column(Integer, nullable=False, default=0)
     created_at = Column(
         DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )

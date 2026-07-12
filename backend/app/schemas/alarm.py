@@ -4,10 +4,10 @@ Pydantic schemas for Alarm CRUD operations.
 Includes validation for ``days_of_week`` (0-6) and volume (0-100).
 """
 
-from datetime import datetime, time
+from datetime import datetime, time, date, timezone
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, field_serializer
 
 from app.models.alarm import AlarmType, ChallengeType
 
@@ -59,6 +59,9 @@ class AlarmCreate(BaseModel):
     label: Optional[str] = Field(
         None, max_length=255, description="Custom label"
     )
+    one_time_date: Optional[date] = Field(
+        None, description="Calendar date for one-time alarms (local timezone)"
+    )
 
     @field_validator("days_of_week")
     @classmethod
@@ -109,6 +112,9 @@ class AlarmUpdate(BaseModel):
     volume: Optional[int] = Field(None, ge=0, le=100)
     vibrate: Optional[bool] = None
     label: Optional[str] = Field(None, max_length=255)
+    one_time_date: Optional[date] = Field(
+        None, description="Calendar date for one-time alarms (local timezone)"
+    )
 
     @field_validator("days_of_week")
     @classmethod
@@ -157,6 +163,17 @@ class AlarmResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("next_trigger_at", "last_triggered_at", "created_at", "updated_at")
+    def serialize_utc_datetimes(self, value: Optional[datetime]) -> Optional[str]:
+        """Emit UTC ISO-8601 with explicit Z so clients parse correctly."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class AlarmListResponse(BaseModel):

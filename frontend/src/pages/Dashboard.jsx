@@ -64,25 +64,25 @@ export default function Dashboard() {
         <StatCard
           icon={HiOutlineClock}
           label="Active Alarms"
-          value={stats?.active_alarms ?? '—'}
+          value={stats?.active_alarms != null ? stats.active_alarms : '—'}
           color="from-primary-500 to-primary-700"
         />
         <StatCard
           icon={HiOutlineTrophy}
           label="Habit Score"
-          value={stats?.current_habit_score ? `${Math.round(stats.current_habit_score)}%` : '—'}
+          value={stats?.current_habit_score != null ? `${Math.round(stats.current_habit_score)}%` : '—'}
           color="from-accent-500 to-accent-700"
         />
         <StatCard
           icon={HiOutlineFire}
           label="Day Streak"
-          value={stats?.current_streak ?? '—'}
+          value={stats?.current_streak != null ? stats.current_streak : '—'}
           color="from-orange-500 to-red-600"
         />
         <StatCard
           icon={HiOutlineChartBar}
           label="Success Rate"
-          value={stats?.wakeup_success_rate ? `${Math.round(stats.wakeup_success_rate)}%` : '—'}
+          value={stats?.wakeup_success_rate != null ? `${Math.round(stats.wakeup_success_rate)}%` : '—'}
           color="from-emerald-500 to-teal-600"
         />
       </motion.div>

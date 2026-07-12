@@ -26,8 +26,10 @@ class Settings(BaseSettings):
         REFRESH_TOKEN_EXPIRE_DAYS: Lifetime of refresh tokens in days.
         DATABASE_URL: SQLAlchemy database connection string.
         CORS_ORIGINS: List of allowed CORS origins for cross-origin requests.
+        FRONTEND_URL: SPA origin used for OAuth callback redirects.
         OAUTH2_GOOGLE_CLIENT_ID: Google OAuth2 client ID for social login.
         OAUTH2_GOOGLE_CLIENT_SECRET: Google OAuth2 client secret for social login.
+        OAUTH2_GOOGLE_REDIRECT_URI: Backend callback URL registered with Google.
     """
 
     model_config = SettingsConfigDict(
@@ -74,9 +76,15 @@ class Settings(BaseSettings):
             "CORS_ORIGINS must be a JSON list string or comma-separated string"
         )
 
+    # ── Frontend ──────────────────────────────────────────────────────
+    FRONTEND_URL: str = "http://localhost:3000"
+
     # ── External APIs ─────────────────────────────────────────────────
     OAUTH2_GOOGLE_CLIENT_ID: Optional[str] = None
     OAUTH2_GOOGLE_CLIENT_SECRET: Optional[str] = None
+    OAUTH2_GOOGLE_REDIRECT_URI: str = (
+        "http://localhost:8000/api/v1/auth/oauth/google/callback"
+    )
     GEMINI_API_KEY: Optional[str] = None
 
 

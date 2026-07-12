@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.db.session import get_db
 from app.db.base import Base
@@ -17,12 +18,17 @@ from app.utils.hashing import get_password_hash
 from app.models.user import User, UserRole
 from app.models.profile import UserProfile  # noqa: F401 - ensure model is registered
 from app.models.alarm import Alarm  # noqa: F401 - ensure model is registered
+from app.models.challenge_session import ChallengeSession  # noqa: F401
 from app.core.security import create_access_token
 
-SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///./test.db"
-
+# Use a single shared in-memory SQLite database for the whole test session.
+# StaticPool keeps one connection so the schema/data are visible across the
+# test thread and the TestClient's worker thread, and nothing is persisted to
+# disk between runs (avoids stale/corrupt test.db state).
 engine = create_engine(
-    SQLALCHEMY_TEST_DATABASE_URL, connect_args={"check_same_thread": False}
+    "sqlite://",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

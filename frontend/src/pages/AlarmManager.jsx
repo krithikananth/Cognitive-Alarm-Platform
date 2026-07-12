@@ -11,6 +11,7 @@ import {
 } from 'react-icons/hi2';
 import toast from 'react-hot-toast';
 import useAlarmStore from '../store/alarmStore';
+import useActiveAlarmStore from '../store/activeAlarmStore';
 
 const ALARM_TYPES = [
   { value: 'daily', label: 'Daily', desc: 'Every day' },
@@ -24,7 +25,7 @@ const CHALLENGE_TYPES = [
   { value: 'math', label: '🔢 Math' },
   { value: 'logic', label: '🧩 Logic' },
   { value: 'memory', label: '🧠 Memory' },
-  { value: 'word', label: '📝 Word' },
+  { value: 'word_game', label: '📝 Word' },
   { value: 'pattern', label: '🔗 Pattern' },
   { value: 'riddle', label: '❓ Riddle' },
   { value: 'quiz', label: '📚 Quiz' },
@@ -40,8 +41,29 @@ const DIFFICULTY_LEVELS = [
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+const parseTimeTo12Hour = (value) => {
+  const [hours = 7, minutes = 0] = (value || '07:00').split(':').map(Number);
+  const normalizedHours = ((hours % 24) + 24) % 24;
+  const period = normalizedHours >= 12 ? 'PM' : 'AM';
+  let displayHour = normalizedHours % 12;
+  if (displayHour === 0) displayHour = 12;
+  return {
+    hour: String(displayHour),
+    minute: String(minutes).padStart(2, '0'),
+    period,
+  };
+};
+
+const formatTimeTo24Hour = ({ hour, minute, period }) => {
+  let hour24 = Number(hour);
+  if (hour24 === 12) hour24 = 0;
+  if (period === 'PM') hour24 += 12;
+  return `${String(hour24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+};
+
 export default function AlarmManager() {
   const { alarms, fetchAlarms, createAlarm, updateAlarm, deleteAlarm, toggleAlarm, isLoading } = useAlarmStore();
+  const triggerAlarm = useActiveAlarmStore((s) => s.triggerAlarm);
   const [showModal, setShowModal] = useState(false);
   const [editingAlarm, setEditingAlarm] = useState(null);
 
@@ -183,6 +205,14 @@ export default function AlarmManager() {
 
                 {/* Actions */}
                 <div className="flex justify-end gap-2 mt-3">
+                  <button
+                    onClick={() => triggerAlarm(alarm.id)}
+                    className="p-2 rounded-lg hover:bg-amber-500/10 transition"
+                    title="Test Ring"
+                    data-alarm-id={alarm.id}
+                  >
+                    <HiOutlineBell className="w-4 h-4 text-slate-400 hover:text-amber-400" />
+                  </button>
                   <button onClick={() => handleEdit(alarm)} className="p-2 rounded-lg hover:bg-surface-700 transition" title="Edit">
                     <HiOutlinePencilSquare className="w-4 h-4 text-slate-400 hover:text-primary-400" />
                   </button>
@@ -218,6 +248,7 @@ export default function AlarmManager() {
 
 function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
   const isEdit = !!alarm;
+  const [timeSelection, setTimeSelection] = useState(() => parseTimeTo12Hour(alarm?.alarm_time?.slice(0, 5) || '07:00'));
   const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm({
     defaultValues: alarm ? {
       label: alarm.label || '',
@@ -242,11 +273,28 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
 
   const selectedType = watch('alarm_type');
 
+  const updateTimeSelection = (changes) => {
+    const nextSelection = { ...timeSelection, ...changes };
+    setTimeSelection(nextSelection);
+    setValue('alarm_time', formatTimeTo24Hour(nextSelection), { shouldDirty: true, shouldValidate: true });
+  };
+
+  useEffect(() => {
+    const initialTime = alarm?.alarm_time?.slice(0, 5) || '07:00';
+    const parsedTime = parseTimeTo12Hour(initialTime);
+    setTimeSelection(parsedTime);
+    setValue('alarm_time', formatTimeTo24Hour(parsedTime), { shouldDirty: true, shouldValidate: true });
+  }, [alarm, setValue]);
+
   const onSubmit = async (data) => {
     const payload = {
-      ...data,
-      snooze_limit: parseInt(data.snooze_limit),
-      snooze_interval_minutes: parseInt(data.snooze_interval_minutes),
+      title: data.label || 'Alarm',
+      label: data.label || 'Alarm',
+      alarm_time: data.alarm_time,
+      alarm_type: data.alarm_type,
+      challenge_type: data.challenge_type === 'word' ? 'word_game' : data.challenge_type,
+      snooze_limit: parseInt(data.snooze_limit, 10),
+      snooze_interval_minutes: parseInt(data.snooze_interval_minutes, 10),
       one_time_date: data.alarm_type === 'one_time' ? data.one_time_date : null,
     };
 
@@ -307,12 +355,47 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
           {/* Time */}
           <div>
             <label className="label">Alarm Time</label>
-            <input
-              type="time"
-              className="input text-2xl font-bold text-center"
-              id="alarm-time"
-              {...register('alarm_time', { required: true })}
-            />
+            <div className="flex items-center gap-2">
+              <select
+                className="input text-center text-lg font-semibold"
+                value={timeSelection.hour}
+                onChange={(e) => updateTimeSelection({ hour: e.target.value })}
+              >
+                {Array.from({ length: 12 }, (_, index) => {
+                  const value = index + 1;
+                  return (
+                    <option key={value} value={value}>
+                      {String(value).padStart(2, '0')}
+                    </option>
+                  );
+                })}
+              </select>
+              <span className="text-slate-400 text-xl font-semibold">:</span>
+              <select
+                className="input text-center text-lg font-semibold"
+                value={timeSelection.minute}
+                onChange={(e) => updateTimeSelection({ minute: e.target.value })}
+              >
+                {Array.from({ length: 60 }, (_, index) => {
+                  const value = String(index).padStart(2, '0');
+                  return (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  );
+                })}
+              </select>
+              <select
+                className="input text-center text-lg font-semibold min-w-[72px]"
+                value={timeSelection.period}
+                onChange={(e) => updateTimeSelection({ period: e.target.value })}
+              >
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
+              </select>
+            </div>
+            <input type="hidden" id="alarm-time" {...register('alarm_time', { required: true })} />
+            {errors.alarm_time && <p className="text-red-400 text-xs mt-1">Alarm time is required</p>}
           </div>
 
           {/* Alarm Type */}

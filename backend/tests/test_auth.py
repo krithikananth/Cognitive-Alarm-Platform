@@ -82,6 +82,21 @@ class TestRegister:
         assert response.status_code == 422
 
 
+def test_cors_allows_localhost_loopback_origins(client):
+    """Local frontend origins should be accepted for auth requests during development."""
+    response = client.options(
+        "/api/v1/health",
+        headers={
+            "Origin": "http://127.0.0.1:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"
+
+
 class TestLogin:
     """Tests for POST /api/v1/auth/login."""
 
@@ -135,7 +150,7 @@ class TestCurrentUser:
         data = response.json()
         assert data["email"] == "test@example.com"
         assert data["username"] == "testuser"
-        assert data["id"] == str(test_user.id)
+        assert data["id"] == test_user.id
 
     def test_get_current_user_unauthorized(self, client):
         """Test that accessing /me without a token returns 401."""
@@ -174,8 +189,16 @@ class TestTokenRefresh:
         assert "access_token" in data
         assert "refresh_token" in data
         assert data["token_type"] == "bearer"
-        # New tokens should be different from old ones
-        assert data["refresh_token"] != refresh_token or data["access_token"] != login_response.json()["access_token"]
+        # The newly-issued access token must be usable for authenticated requests.
+        # (We avoid asserting the raw token strings differ, since tokens minted
+        # within the same second share identical claims and therefore encode
+        # identically.)
+        me = client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {data['access_token']}"},
+        )
+        assert me.status_code == 200
+        assert me.json()["email"] == "test@example.com"
 
     def test_refresh_token_invalid(self, client):
         """Test that an invalid refresh token is rejected."""
@@ -192,3 +215,158 @@ class TestTokenRefresh:
         response = client.post("/api/v1/auth/refresh", json=payload)
 
         assert response.status_code == 401
+
+
+class TestGoogleOAuth:
+    """Tests for Google OAuth2 redirect and callback endpoints."""
+
+    def test_google_oauth_not_configured(self, client, monkeypatch):
+        """Without client credentials the start endpoint returns 501."""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_ID", None)
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_SECRET", None)
+
+        response = client.get(
+            "/api/v1/auth/oauth/google",
+            follow_redirects=False,
+        )
+        assert response.status_code == 501
+        assert "not configured" in response.json()["detail"]
+
+    def test_google_oauth_redirect(self, client, monkeypatch):
+        """Configured start endpoint redirects to Google's consent screen."""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_ID", "test-client-id")
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_SECRET", "test-secret")
+        monkeypatch.setattr(
+            settings,
+            "OAUTH2_GOOGLE_REDIRECT_URI",
+            "http://localhost:8000/api/v1/auth/oauth/google/callback",
+        )
+
+        response = client.get(
+            "/api/v1/auth/oauth/google",
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        location = response.headers["location"]
+        assert location.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+        assert "client_id=test-client-id" in location
+        assert "openid" in location and "email" in location and "profile" in location
+
+    def test_google_oauth_callback_creates_user(self, client, db_session, monkeypatch):
+        """Successful Google callback creates a verified user and redirects with JWTs."""
+        from unittest.mock import MagicMock, patch
+
+        from app.core.config import settings
+        from app.models.user import User
+
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_ID", "test-client-id")
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_SECRET", "test-secret")
+        monkeypatch.setattr(settings, "FRONTEND_URL", "http://localhost:3000")
+
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.json.return_value = {"access_token": "google-access-token"}
+
+        userinfo_resp = MagicMock()
+        userinfo_resp.status_code = 200
+        userinfo_resp.json.return_value = {
+            "id": "google-user-123",
+            "email": "oauth.user@example.com",
+            "name": "OAuth User",
+        }
+
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.__exit__.return_value = False
+        mock_client.post.return_value = token_resp
+        mock_client.get.return_value = userinfo_resp
+
+        with patch("app.api.v1.endpoints.auth.httpx.Client", return_value=mock_client):
+            response = client.get(
+                "/api/v1/auth/oauth/google/callback",
+                params={"code": "auth-code"},
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 302
+        location = response.headers["location"]
+        assert location.startswith("http://localhost:3000/oauth/callback?")
+        assert "access_token=" in location
+        assert "refresh_token=" in location
+
+        user = (
+            db_session.query(User)
+            .filter(User.email == "oauth.user@example.com")
+            .first()
+        )
+        assert user is not None
+        assert user.oauth_provider == "google"
+        assert user.oauth_id == "google-user-123"
+        assert user.is_verified is True
+        assert user.full_name == "OAuth User"
+        assert user.profile is not None
+
+    def test_google_oauth_callback_links_existing_email(
+        self, client, db_session, test_user, monkeypatch
+    ):
+        """Existing email/password accounts are linked when signing in with Google."""
+        from unittest.mock import MagicMock, patch
+
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_ID", "test-client-id")
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_SECRET", "test-secret")
+        monkeypatch.setattr(settings, "FRONTEND_URL", "http://localhost:3000")
+
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.json.return_value = {"access_token": "google-access-token"}
+
+        userinfo_resp = MagicMock()
+        userinfo_resp.status_code = 200
+        userinfo_resp.json.return_value = {
+            "id": "google-linked-id",
+            "email": test_user.email,
+            "name": "Linked Name",
+        }
+
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.__exit__.return_value = False
+        mock_client.post.return_value = token_resp
+        mock_client.get.return_value = userinfo_resp
+
+        with patch("app.api.v1.endpoints.auth.httpx.Client", return_value=mock_client):
+            response = client.get(
+                "/api/v1/auth/oauth/google/callback",
+                params={"code": "auth-code"},
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 302
+        db_session.refresh(test_user)
+        assert test_user.oauth_provider == "google"
+        assert test_user.oauth_id == "google-linked-id"
+        assert test_user.is_verified is True
+
+    def test_google_oauth_callback_provider_error(self, client, monkeypatch):
+        """Provider error query param redirects back to the login page."""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_ID", "test-client-id")
+        monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_SECRET", "test-secret")
+        monkeypatch.setattr(settings, "FRONTEND_URL", "http://localhost:3000")
+
+        response = client.get(
+            "/api/v1/auth/oauth/google/callback",
+            params={"error": "access_denied"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"].startswith(
+            "http://localhost:3000/login?error="
+        )

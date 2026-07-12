@@ -1,7 +1,13 @@
 """Tests for user profile endpoints.
 
-Covers getting own profile, updating profile fields, sleep schedule,
-goals, habit preferences, habit score retrieval, and unauthorized access.
+Aligned with the actual wired API (``app/api/v1/endpoints/profiles.py`` +
+``app/schemas/profile.py``):
+- Integer user IDs.
+- Sleep-schedule / goals / habits updates are ``PATCH`` requests.
+- Fields are ``preferred_wake_time`` (HH:MM:SS), ``sleep_duration_hours``,
+  ``productivity_goals``, ``habit_preferences`` — there is no bio/avatar.
+- ``habit_score`` is a computed float; the breakdown lives on
+  ``GET /me/habit-score``.
 """
 
 
@@ -9,18 +15,19 @@ class TestGetProfile:
     """Tests for GET /api/v1/profiles/me."""
 
     def test_get_own_profile(self, client, test_user, auth_headers):
-        """Test that an authenticated user can retrieve their own profile."""
+        """An authenticated user can retrieve their own profile."""
         response = client.get("/api/v1/profiles/me", headers=auth_headers)
 
         assert response.status_code == 200
         data = response.json()
-        assert data["user_id"] == str(test_user.id)
+        assert data["user_id"] == test_user.id
         assert "id" in data
         assert data["timezone"] == "UTC"
-        assert data["habit_score"] == 0.0
+        assert data["difficulty_preference"] == "medium"
+        assert isinstance(data["habit_score"], (int, float))
 
     def test_profile_unauthorized(self, client):
-        """Test that accessing profile without authentication returns 401."""
+        """Accessing the profile without authentication returns 401."""
         response = client.get("/api/v1/profiles/me")
 
         assert response.status_code == 401
@@ -30,11 +37,11 @@ class TestUpdateProfile:
     """Tests for PUT /api/v1/profiles/me."""
 
     def test_update_profile(self, client, test_user, auth_headers):
-        """Test that a user can update their profile bio, avatar, and timezone."""
+        """A user can update timezone, sleep target, and difficulty."""
         payload = {
-            "bio": "I love mornings!",
-            "avatar_url": "https://example.com/avatar.png",
             "timezone": "America/New_York",
+            "sleep_duration_hours": 7.5,
+            "difficulty_preference": "hard",
         }
         response = client.put(
             "/api/v1/profiles/me", json=payload, headers=auth_headers
@@ -42,99 +49,109 @@ class TestUpdateProfile:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["bio"] == "I love mornings!"
-        assert data["avatar_url"] == "https://example.com/avatar.png"
         assert data["timezone"] == "America/New_York"
+        assert data["sleep_duration_hours"] == 7.5
+        assert data["difficulty_preference"] == "hard"
 
     def test_update_profile_partial(self, client, test_user, auth_headers):
-        """Test that a user can partially update their profile (only some fields)."""
-        payload = {"bio": "Just updating bio"}
+        """Partial updates leave other fields at their defaults."""
+        payload = {"sleep_duration_hours": 6.0}
         response = client.put(
             "/api/v1/profiles/me", json=payload, headers=auth_headers
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["bio"] == "Just updating bio"
-        # Other fields should remain at defaults
-        assert data["timezone"] == "UTC"
+        assert data["sleep_duration_hours"] == 6.0
+        assert data["timezone"] == "UTC"  # Unchanged default
+
+    def test_update_profile_invalid_timezone(self, client, test_user, auth_headers):
+        """An unknown timezone is rejected with 422."""
+        response = client.put(
+            "/api/v1/profiles/me",
+            json={"timezone": "Mars/Olympus_Mons"},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
 
 
 class TestSleepSchedule:
-    """Tests for PUT /api/v1/profiles/me/sleep-schedule."""
+    """Tests for PATCH /api/v1/profiles/me/sleep-schedule."""
 
     def test_update_sleep_schedule(self, client, test_user, auth_headers):
-        """Test that a user can set their sleep schedule with valid times."""
+        """A user can set their wake time and sleep duration target."""
         payload = {
-            "sleep_time": "22:30",
-            "wake_time": "06:30",
-            "sleep_duration_target": 8.0,
+            "preferred_wake_time": "06:30",
+            "sleep_duration_hours": 8.0,
         }
-        response = client.put(
+        response = client.patch(
             "/api/v1/profiles/me/sleep-schedule", json=payload, headers=auth_headers
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["sleep_time"] == "22:30"
-        assert data["wake_time"] == "06:30"
-        assert data["sleep_duration_target"] == 8.0
+        assert data["preferred_wake_time"] == "06:30:00"
+        assert data["sleep_duration_hours"] == 8.0
 
     def test_update_sleep_schedule_invalid_time(self, client, test_user, auth_headers):
-        """Test that invalid time formats are rejected with 422."""
-        payload = {
-            "sleep_time": "25:00",  # Invalid hour
-            "wake_time": "06:30",
-        }
-        response = client.put(
+        """An invalid time value is rejected with 422."""
+        payload = {"preferred_wake_time": "25:00"}
+        response = client.patch(
             "/api/v1/profiles/me/sleep-schedule", json=payload, headers=auth_headers
         )
 
         assert response.status_code == 422
 
     def test_update_sleep_schedule_partial(self, client, test_user, auth_headers):
-        """Test that only some sleep schedule fields can be updated."""
-        payload = {"wake_time": "07:00"}
-        response = client.put(
+        """Only supplied sleep-schedule fields are updated."""
+        payload = {"preferred_wake_time": "07:00"}
+        response = client.patch(
             "/api/v1/profiles/me/sleep-schedule", json=payload, headers=auth_headers
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["wake_time"] == "07:00"
+        assert data["preferred_wake_time"] == "07:00:00"
 
 
 class TestGoals:
-    """Tests for PUT /api/v1/profiles/me/goals."""
+    """Tests for PATCH /api/v1/profiles/me/goals."""
 
     def test_update_goals(self, client, test_user, auth_headers):
-        """Test that a user can set their goals list."""
-        payload = {"goals": ["Wake up early", "Exercise daily", "Read 30 minutes"]}
-        response = client.put(
+        """A user can set their productivity goals list."""
+        payload = {
+            "productivity_goals": ["Wake up early", "Exercise daily", "Read 30 minutes"]
+        }
+        response = client.patch(
             "/api/v1/profiles/me/goals", json=payload, headers=auth_headers
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["goals"] == ["Wake up early", "Exercise daily", "Read 30 minutes"]
+        assert data["productivity_goals"] == [
+            "Wake up early",
+            "Exercise daily",
+            "Read 30 minutes",
+        ]
 
     def test_update_goals_empty(self, client, test_user, auth_headers):
-        """Test that a user can clear their goals by setting an empty list."""
-        payload = {"goals": []}
-        response = client.put(
+        """A user can clear their goals with an empty list."""
+        payload = {"productivity_goals": []}
+        response = client.patch(
             "/api/v1/profiles/me/goals", json=payload, headers=auth_headers
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["goals"] == []
+        assert data["productivity_goals"] == []
 
 
 class TestHabitPreferences:
-    """Tests for PUT /api/v1/profiles/me/habits."""
+    """Tests for PATCH /api/v1/profiles/me/habits."""
 
     def test_update_habit_preferences(self, client, test_user, auth_headers):
-        """Test that a user can set their habit preferences."""
+        """A user can set arbitrary habit preferences."""
         payload = {
             "habit_preferences": {
                 "morning_routine": True,
@@ -143,7 +160,7 @@ class TestHabitPreferences:
                 "water_intake_glasses": 8,
             }
         }
-        response = client.put(
+        response = client.patch(
             "/api/v1/profiles/me/habits", json=payload, headers=auth_headers
         )
 
@@ -159,18 +176,21 @@ class TestHabitScore:
     """Tests for GET /api/v1/profiles/me/habit-score."""
 
     def test_get_habit_score(self, client, test_user, auth_headers):
-        """Test that a user can retrieve their habit score (defaults to 0.0)."""
+        """A user can retrieve their weighted habit score with breakdown."""
         response = client.get(
             "/api/v1/profiles/me/habit-score", headers=auth_headers
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["user_id"] == str(test_user.id)
-        assert data["habit_score"] == 0.0
+        assert isinstance(data["habit_score"], (int, float))
+        assert "breakdown" in data
+        assert "weights" in data
+        assert "wake_up_consistency" in data["breakdown"]
+        assert data["weights"]["wake_up_consistency"] == 0.35
 
     def test_get_habit_score_unauthorized(self, client):
-        """Test that unauthenticated access to habit score returns 401."""
+        """Unauthenticated access to habit score returns 401."""
         response = client.get("/api/v1/profiles/me/habit-score")
 
         assert response.status_code == 401

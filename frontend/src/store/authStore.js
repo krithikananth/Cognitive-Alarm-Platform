@@ -33,6 +33,8 @@ const useAuthStore = create((set, get) => ({
         message = detail.map(d => d.msg).join(', ');
       } else if (typeof detail === 'string') {
         message = detail;
+      } else if (err.code === 'ERR_NETWORK' || err.message === 'Network Error') {
+        message = 'Unable to reach the server. Check that the backend is running and CORS is enabled.';
       }
       set({ error: message, isLoading: false });
       return { success: false, error: message };
@@ -59,6 +61,30 @@ const useAuthStore = create((set, get) => ({
         message = detail;
       }
       set({ error: message, isLoading: false });
+      return { success: false, error: message };
+    }
+  },
+
+  // ─── OAuth callback (tokens already issued by backend redirect) ───
+  completeOAuthLogin: async ({ access_token, refresh_token }) => {
+    set({ isLoading: true, error: null });
+    try {
+      localStorage.setItem('access_token', access_token);
+      localStorage.setItem('refresh_token', refresh_token);
+
+      const res = await authAPI.me();
+      const user = res.data;
+      localStorage.setItem('user', JSON.stringify(user));
+      set({ user, isAuthenticated: true, isLoading: false });
+      return { success: true, user };
+    } catch (err) {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('user');
+      const message =
+        (typeof err.response?.data?.detail === 'string' && err.response.data.detail) ||
+        'Google sign-in failed';
+      set({ user: null, isAuthenticated: false, error: message, isLoading: false });
       return { success: false, error: message };
     }
   },

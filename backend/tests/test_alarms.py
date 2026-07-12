@@ -1,8 +1,12 @@
 """Tests for alarm management endpoints.
 
-Covers creating alarms (valid and invalid), listing, retrieving by ID,
-updating, deleting, toggling, snoozing (including limit enforcement),
-dismissing, upcoming alarms, and unauthorized access.
+Aligned with the actual wired API (``app/api/v1/endpoints/alarms.py`` +
+``app/schemas/alarm.py``):
+- Integer alarm/user IDs.
+- ``alarm_time`` is serialized as ``HH:MM:SS``.
+- Listing returns a paginated ``{alarms, total, page, per_page}`` object.
+- Toggle is ``PATCH /{id}/toggle`` with ``{"is_active": ...}``.
+- Snooze/dismiss return the full ``AlarmResponse``.
 """
 
 
@@ -10,17 +14,17 @@ class TestCreateAlarm:
     """Tests for POST /api/v1/alarms/."""
 
     def test_create_alarm(self, client, test_user, auth_headers):
-        """Test that an authenticated user can create an alarm with valid data."""
+        """An authenticated user can create an alarm with valid data."""
         payload = {
             "title": "Morning Workout",
             "description": "Time to exercise!",
             "alarm_time": "06:30",
-            "alarm_date": "2026-07-15",
-            "repeat_pattern": "once",
-            "snooze_duration": 5,
-            "max_snooze": 3,
-            "cognitive_challenge": True,
-            "challenge_difficulty": "hard",
+            "alarm_type": "one_time",
+            "one_time_date": "2026-07-15",
+            "snooze_interval_minutes": 5,
+            "snooze_limit": 3,
+            "challenge_type": "math",
+            "challenge_count": 2,
         }
         response = client.post("/api/v1/alarms/", json=payload, headers=auth_headers)
 
@@ -28,17 +32,16 @@ class TestCreateAlarm:
         data = response.json()
         assert data["title"] == "Morning Workout"
         assert data["description"] == "Time to exercise!"
-        assert data["alarm_time"] == "06:30"
-        assert data["alarm_date"] == "2026-07-15"
-        assert data["is_enabled"] is True
-        assert data["status"] == "active"
-        assert data["owner_id"] == str(test_user.id)
-        assert data["cognitive_challenge"] is True
-        assert data["challenge_difficulty"] == "hard"
+        assert data["alarm_time"] == "06:30:00"
+        assert data["is_active"] is True
+        assert data["user_id"] == test_user.id
+        assert data["challenge_type"] == "math"
+        assert data["challenge_count"] == 2
+        assert data["snooze_limit"] == 3
         assert "id" in data
 
     def test_create_alarm_minimal(self, client, test_user, auth_headers):
-        """Test creating an alarm with only the required fields."""
+        """Creating an alarm with only the required fields uses sensible defaults."""
         payload = {
             "title": "Quick Alarm",
             "alarm_time": "08:00",
@@ -48,14 +51,14 @@ class TestCreateAlarm:
         assert response.status_code == 201
         data = response.json()
         assert data["title"] == "Quick Alarm"
-        assert data["alarm_time"] == "08:00"
-        assert data["repeat_pattern"] == "once"
-        assert data["sound"] == "default"
-        assert data["vibration"] is True
-        assert data["cognitive_challenge"] is False
+        assert data["alarm_time"] == "08:00:00"
+        assert data["alarm_type"] == "daily"
+        assert data["challenge_type"] == "random"
+        assert data["vibrate"] is True
+        assert data["volume"] == 80
 
     def test_create_alarm_invalid_time(self, client, test_user, auth_headers):
-        """Test that creating an alarm with an invalid time format returns 422."""
+        """Creating an alarm with an out-of-range time returns 422."""
         payload = {
             "title": "Bad Alarm",
             "alarm_time": "25:99",  # Invalid time
@@ -65,7 +68,7 @@ class TestCreateAlarm:
         assert response.status_code == 422
 
     def test_create_alarm_invalid_time_format(self, client, test_user, auth_headers):
-        """Test that a non-HH:MM time format is rejected."""
+        """A non HH:MM(:SS) time format is rejected."""
         payload = {
             "title": "Bad Format",
             "alarm_time": "6:30am",  # Wrong format
@@ -76,11 +79,10 @@ class TestCreateAlarm:
 
 
 class TestListAlarms:
-    """Tests for GET /api/v1/alarms/."""
+    """Tests for GET /api/v1/alarms/ (paginated)."""
 
     def test_list_alarms(self, client, test_user, auth_headers):
-        """Test that a user can list their own alarms."""
-        # Create two alarms first
+        """A user can list their own alarms in a paginated envelope."""
         for title in ["Alarm A", "Alarm B"]:
             client.post(
                 "/api/v1/alarms/",
@@ -92,27 +94,28 @@ class TestListAlarms:
 
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
-        assert len(data) == 2
-        titles = [a["title"] for a in data]
+        assert data["total"] == 2
+        assert data["page"] == 1
+        assert isinstance(data["alarms"], list)
+        titles = [a["title"] for a in data["alarms"]]
         assert "Alarm A" in titles
         assert "Alarm B" in titles
 
     def test_list_alarms_empty(self, client, test_user, auth_headers):
-        """Test listing alarms when the user has none returns an empty list."""
+        """Listing with no alarms returns an empty page."""
         response = client.get("/api/v1/alarms/", headers=auth_headers)
 
         assert response.status_code == 200
         data = response.json()
-        assert data == []
+        assert data["total"] == 0
+        assert data["alarms"] == []
 
 
 class TestGetAlarm:
     """Tests for GET /api/v1/alarms/{alarm_id}."""
 
     def test_get_alarm(self, client, test_user, auth_headers):
-        """Test that a user can retrieve a specific alarm by its ID."""
-        # Create an alarm
+        """A user can retrieve a specific alarm by its ID."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Fetch Me", "alarm_time": "09:00"},
@@ -128,10 +131,8 @@ class TestGetAlarm:
         assert data["title"] == "Fetch Me"
 
     def test_get_alarm_not_found(self, client, test_user, auth_headers):
-        """Test that requesting a non-existent alarm ID returns 404."""
-        response = client.get(
-            "/api/v1/alarms/nonexistent-alarm-id", headers=auth_headers
-        )
+        """Requesting a non-existent alarm ID returns 404."""
+        response = client.get("/api/v1/alarms/999999", headers=auth_headers)
 
         assert response.status_code == 404
         assert "Alarm not found" in response.json()["detail"]
@@ -141,8 +142,7 @@ class TestUpdateAlarm:
     """Tests for PUT /api/v1/alarms/{alarm_id}."""
 
     def test_update_alarm(self, client, test_user, auth_headers):
-        """Test that a user can update an alarm's title and time."""
-        # Create an alarm
+        """A user can update an alarm's title and time."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Original Title", "alarm_time": "07:00"},
@@ -150,7 +150,6 @@ class TestUpdateAlarm:
         )
         alarm_id = create_response.json()["id"]
 
-        # Update it
         update_payload = {
             "title": "Updated Title",
             "alarm_time": "08:30",
@@ -163,14 +162,14 @@ class TestUpdateAlarm:
         assert response.status_code == 200
         data = response.json()
         assert data["title"] == "Updated Title"
-        assert data["alarm_time"] == "08:30"
+        assert data["alarm_time"] == "08:30:00"
         assert data["description"] == "Updated description"
 
     def test_update_alarm_partial(self, client, test_user, auth_headers):
-        """Test that only specified fields are updated; others remain unchanged."""
+        """Only supplied fields are updated; others remain unchanged."""
         create_response = client.post(
             "/api/v1/alarms/",
-            json={"title": "Keep This", "alarm_time": "07:00", "sound": "birds"},
+            json={"title": "Keep This", "alarm_time": "07:00", "volume": 55},
             headers=auth_headers,
         )
         alarm_id = create_response.json()["id"]
@@ -184,14 +183,14 @@ class TestUpdateAlarm:
         assert response.status_code == 200
         data = response.json()
         assert data["title"] == "Keep This"  # Unchanged
-        assert data["alarm_time"] == "07:00"  # Unchanged
-        assert data["sound"] == "birds"  # Unchanged
+        assert data["alarm_time"] == "07:00:00"  # Unchanged
+        assert data["volume"] == 55  # Unchanged
         assert data["description"] == "Added description"  # Updated
 
     def test_update_alarm_not_found(self, client, test_user, auth_headers):
-        """Test that updating a non-existent alarm returns 404."""
+        """Updating a non-existent alarm returns 404."""
         response = client.put(
-            "/api/v1/alarms/nonexistent-id",
+            "/api/v1/alarms/999999",
             json={"title": "Nope"},
             headers=auth_headers,
         )
@@ -203,8 +202,7 @@ class TestDeleteAlarm:
     """Tests for DELETE /api/v1/alarms/{alarm_id}."""
 
     def test_delete_alarm(self, client, test_user, auth_headers):
-        """Test that a user can delete their own alarm."""
-        # Create an alarm
+        """A user can delete their own alarm."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Delete Me", "alarm_time": "07:00"},
@@ -212,28 +210,24 @@ class TestDeleteAlarm:
         )
         alarm_id = create_response.json()["id"]
 
-        # Delete it
         response = client.delete(f"/api/v1/alarms/{alarm_id}", headers=auth_headers)
         assert response.status_code == 204
 
-        # Verify it's gone
         get_response = client.get(f"/api/v1/alarms/{alarm_id}", headers=auth_headers)
         assert get_response.status_code == 404
 
     def test_delete_alarm_not_found(self, client, test_user, auth_headers):
-        """Test that deleting a non-existent alarm returns 404."""
-        response = client.delete(
-            "/api/v1/alarms/nonexistent-id", headers=auth_headers
-        )
+        """Deleting a non-existent alarm returns 404."""
+        response = client.delete("/api/v1/alarms/999999", headers=auth_headers)
 
         assert response.status_code == 404
 
 
 class TestToggleAlarm:
-    """Tests for POST /api/v1/alarms/{alarm_id}/toggle."""
+    """Tests for PATCH /api/v1/alarms/{alarm_id}/toggle."""
 
     def test_toggle_alarm_disable(self, client, test_user, auth_headers):
-        """Test disabling an alarm via toggle sets is_enabled=False and status=inactive."""
+        """Disabling an alarm via toggle sets is_active=False."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Toggle Me", "alarm_time": "07:00"},
@@ -241,19 +235,18 @@ class TestToggleAlarm:
         )
         alarm_id = create_response.json()["id"]
 
-        response = client.post(
+        response = client.patch(
             f"/api/v1/alarms/{alarm_id}/toggle",
-            json={"is_enabled": False},
+            json={"is_active": False},
             headers=auth_headers,
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["is_enabled"] is False
-        assert data["status"] == "inactive"
+        assert data["is_active"] is False
 
     def test_toggle_alarm_enable(self, client, test_user, auth_headers):
-        """Test re-enabling a disabled alarm resets status to active and clears snooze count."""
+        """Re-enabling a disabled alarm sets is_active=True and recomputes trigger."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Re-enable Me", "alarm_time": "07:00"},
@@ -261,37 +254,33 @@ class TestToggleAlarm:
         )
         alarm_id = create_response.json()["id"]
 
-        # Disable first
-        client.post(
+        client.patch(
             f"/api/v1/alarms/{alarm_id}/toggle",
-            json={"is_enabled": False},
+            json={"is_active": False},
             headers=auth_headers,
         )
 
-        # Re-enable
-        response = client.post(
+        response = client.patch(
             f"/api/v1/alarms/{alarm_id}/toggle",
-            json={"is_enabled": True},
+            json={"is_active": True},
             headers=auth_headers,
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["is_enabled"] is True
-        assert data["status"] == "active"
-        assert data["snooze_count"] == 0
+        assert data["is_active"] is True
+        assert data["next_trigger_at"] is not None
 
 
 class TestUpcomingAlarms:
     """Tests for GET /api/v1/alarms/upcoming."""
 
     def test_get_upcoming_alarms(self, client, test_user, auth_headers):
-        """Test retrieving upcoming enabled alarms sorted by time."""
-        # Create alarms at different times
-        for time in ["09:00", "06:00", "12:00"]:
+        """Retrieving upcoming active alarms returns them as a list."""
+        for t in ["09:00", "06:00", "12:00"]:
             client.post(
                 "/api/v1/alarms/",
-                json={"title": f"Alarm at {time}", "alarm_time": time},
+                json={"title": f"Alarm at {t}", "alarm_time": t},
                 headers=auth_headers,
             )
 
@@ -299,27 +288,26 @@ class TestUpcomingAlarms:
 
         assert response.status_code == 200
         data = response.json()
+        assert isinstance(data, list)
         assert len(data) == 3
-        # Should be sorted by time
-        times = [a["alarm_time"] for a in data]
-        assert times == sorted(times)
+        # Results are ordered by next_trigger_at (non-decreasing).
+        triggers = [a["next_trigger_at"] for a in data]
+        assert triggers == sorted(triggers)
 
     def test_get_upcoming_alarms_excludes_disabled(self, client, test_user, auth_headers):
-        """Test that disabled alarms are not included in upcoming results."""
-        # Create and disable an alarm
+        """Disabled alarms are not included in upcoming results."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Disabled", "alarm_time": "07:00"},
             headers=auth_headers,
         )
         alarm_id = create_response.json()["id"]
-        client.post(
+        client.patch(
             f"/api/v1/alarms/{alarm_id}/toggle",
-            json={"is_enabled": False},
+            json={"is_active": False},
             headers=auth_headers,
         )
 
-        # Create an enabled alarm
         client.post(
             "/api/v1/alarms/",
             json={"title": "Enabled", "alarm_time": "08:00"},
@@ -329,8 +317,7 @@ class TestUpcomingAlarms:
         response = client.get("/api/v1/alarms/upcoming", headers=auth_headers)
 
         assert response.status_code == 200
-        data = response.json()
-        titles = [a["title"] for a in data]
+        titles = [a["title"] for a in response.json()]
         assert "Disabled" not in titles
         assert "Enabled" in titles
 
@@ -339,60 +326,41 @@ class TestSnoozeAlarm:
     """Tests for POST /api/v1/alarms/{alarm_id}/snooze."""
 
     def test_snooze_alarm(self, client, test_user, auth_headers):
-        """Test that snoozing an alarm increments the snooze count and sets status to snoozed."""
+        """Snoozing an alarm increments its snooze counter."""
         create_response = client.post(
             "/api/v1/alarms/",
-            json={"title": "Snooze Me", "alarm_time": "07:00", "max_snooze": 3},
+            json={"title": "Snooze Me", "alarm_time": "07:00", "snooze_limit": 3},
             headers=auth_headers,
         )
         alarm_id = create_response.json()["id"]
 
         response = client.post(
-            f"/api/v1/alarms/{alarm_id}/snooze", json={}, headers=auth_headers
+            f"/api/v1/alarms/{alarm_id}/snooze", headers=auth_headers
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["snooze_count"] == 1
-        assert data["status"] == "snoozed"
-
-    def test_snooze_alarm_custom_duration(self, client, test_user, auth_headers):
-        """Test that a custom snooze duration overrides the default."""
-        create_response = client.post(
-            "/api/v1/alarms/",
-            json={"title": "Custom Snooze", "alarm_time": "07:00", "snooze_duration": 5},
-            headers=auth_headers,
-        )
-        alarm_id = create_response.json()["id"]
-
-        response = client.post(
-            f"/api/v1/alarms/{alarm_id}/snooze",
-            json={"snooze_duration": 10},
-            headers=auth_headers,
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["snooze_duration"] == 10
+        assert data["total_snoozes"] == 1
+        assert data["next_trigger_at"] is not None
 
     def test_snooze_alarm_max_reached(self, client, test_user, auth_headers):
-        """Test that snoozing beyond the max limit returns 400."""
+        """Snoozing beyond the configured limit returns 400."""
         create_response = client.post(
             "/api/v1/alarms/",
-            json={"title": "Limited Snooze", "alarm_time": "07:00", "max_snooze": 1},
+            json={"title": "Limited Snooze", "alarm_time": "07:00", "snooze_limit": 1},
             headers=auth_headers,
         )
         alarm_id = create_response.json()["id"]
 
         # First snooze (allowed)
         response1 = client.post(
-            f"/api/v1/alarms/{alarm_id}/snooze", json={}, headers=auth_headers
+            f"/api/v1/alarms/{alarm_id}/snooze", headers=auth_headers
         )
         assert response1.status_code == 200
 
-        # Second snooze (should be rejected)
+        # Second snooze (limit reached)
         response2 = client.post(
-            f"/api/v1/alarms/{alarm_id}/snooze", json={}, headers=auth_headers
+            f"/api/v1/alarms/{alarm_id}/snooze", headers=auth_headers
         )
         assert response2.status_code == 400
         assert "Maximum snooze limit reached" in response2.json()["detail"]
@@ -402,7 +370,7 @@ class TestDismissAlarm:
     """Tests for POST /api/v1/alarms/{alarm_id}/dismiss."""
 
     def test_dismiss_alarm(self, client, test_user, auth_headers):
-        """Test that dismissing an alarm sets its status to dismissed."""
+        """Dismissing an alarm records the dismissal."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Dismiss Me", "alarm_time": "07:00"},
@@ -416,61 +384,37 @@ class TestDismissAlarm:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "dismissed"
+        assert data["total_dismissals"] == 1
+        assert data["total_snoozes"] == 0
 
     def test_dismiss_alarm_not_found(self, client, test_user, auth_headers):
-        """Test that dismissing a non-existent alarm returns 404."""
+        """Dismissing a non-existent alarm returns 404."""
         response = client.post(
-            "/api/v1/alarms/nonexistent-id/dismiss", headers=auth_headers
+            "/api/v1/alarms/999999/dismiss", headers=auth_headers
         )
 
         assert response.status_code == 404
 
 
 class TestAlarmUnauthorized:
-    """Tests for unauthorized access to alarm endpoints."""
+    """Tests that alarm endpoints require authentication."""
 
     def test_alarm_unauthorized(self, client):
-        """Test that all alarm endpoints require authentication."""
-        # Create
-        response = client.post(
+        """All alarm endpoints reject unauthenticated access with 401."""
+        assert client.post(
             "/api/v1/alarms/",
             json={"title": "No Auth", "alarm_time": "07:00"},
-        )
-        assert response.status_code == 401
+        ).status_code == 401
 
-        # List
-        response = client.get("/api/v1/alarms/")
-        assert response.status_code == 401
-
-        # Get by ID
-        response = client.get("/api/v1/alarms/some-id")
-        assert response.status_code == 401
-
-        # Update
-        response = client.put(
-            "/api/v1/alarms/some-id", json={"title": "Updated"}
-        )
-        assert response.status_code == 401
-
-        # Delete
-        response = client.delete("/api/v1/alarms/some-id")
-        assert response.status_code == 401
-
-        # Toggle
-        response = client.post(
-            "/api/v1/alarms/some-id/toggle", json={"is_enabled": False}
-        )
-        assert response.status_code == 401
-
-        # Snooze
-        response = client.post("/api/v1/alarms/some-id/snooze", json={})
-        assert response.status_code == 401
-
-        # Dismiss
-        response = client.post("/api/v1/alarms/some-id/dismiss")
-        assert response.status_code == 401
-
-        # Upcoming
-        response = client.get("/api/v1/alarms/upcoming")
-        assert response.status_code == 401
+        assert client.get("/api/v1/alarms/").status_code == 401
+        assert client.get("/api/v1/alarms/upcoming").status_code == 401
+        assert client.get("/api/v1/alarms/1").status_code == 401
+        assert client.put(
+            "/api/v1/alarms/1", json={"title": "Updated"}
+        ).status_code == 401
+        assert client.delete("/api/v1/alarms/1").status_code == 401
+        assert client.patch(
+            "/api/v1/alarms/1/toggle", json={"is_active": False}
+        ).status_code == 401
+        assert client.post("/api/v1/alarms/1/snooze").status_code == 401
+        assert client.post("/api/v1/alarms/1/dismiss").status_code == 401

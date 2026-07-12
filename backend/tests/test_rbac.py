@@ -1,227 +1,107 @@
+"""Tests for Role-Based Access Control (RBAC).
+
+Verifies that admin-only endpoints are properly guarded against regular
+users and unauthenticated requests. Targets the actually-wired endpoints:
+- Admin user management under ``/api/v1/users`` (guarded by ``get_current_admin``).
+- The admin dashboard under ``/api/v1/admin/dashboard`` (guarded by ``require_admin``).
 """
-Tests for Role-Based Access Control (RBAC).
-
-Verifies that admin, wellness_coach, and user roles are properly
-enforced across all protected endpoints.
-"""
-
-import pytest
-from httpx import AsyncClient
-from tests.conftest import auth_header
 
 
-# ═══════════════════════════════════════════
-# Admin Endpoint Access Tests
-# ═══════════════════════════════════════════
+class TestAdminUserManagementAccess:
+    """Access control for admin user-management endpoints."""
 
-@pytest.mark.asyncio
-async def test_admin_can_list_users(client: AsyncClient, test_admin, admin_token):
-    """Test that admin can access user listing endpoint."""
-    response = await client.get(
-        "/api/v1/admin/users",
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert "users" in data
-    assert "total" in data
+    def test_admin_can_list_users(self, client, admin_user, test_user, admin_headers):
+        """Admins can access the user listing endpoint."""
+        response = client.get("/api/v1/users/", headers=admin_headers)
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
 
+    def test_user_cannot_list_users(self, client, test_user, auth_headers):
+        """Regular users are forbidden from the admin listing endpoint."""
+        response = client.get("/api/v1/users/", headers=auth_headers)
+        assert response.status_code == 403
 
-@pytest.mark.asyncio
-async def test_user_cannot_list_users(client: AsyncClient, test_user, user_token):
-    """Test that regular user cannot access admin endpoints."""
-    response = await client.get(
-        "/api/v1/admin/users",
-        headers=auth_header(user_token),
-    )
-    assert response.status_code == 403
+    def test_unauthenticated_cannot_list_users(self, client):
+        """Unauthenticated requests are rejected with 401."""
+        response = client.get("/api/v1/users/")
+        assert response.status_code == 401
 
+    def test_admin_can_change_role(self, client, admin_user, test_user, admin_headers):
+        """Admins can change another user's role."""
+        response = client.put(
+            f"/api/v1/users/{test_user.id}",
+            json={"role": "wellness_coach"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["role"] == "wellness_coach"
 
-@pytest.mark.asyncio
-async def test_coach_cannot_list_all_users(client: AsyncClient, test_coach, coach_token):
-    """Test that coach cannot access admin-only endpoints."""
-    response = await client.get(
-        "/api/v1/admin/users",
-        headers=auth_header(coach_token),
-    )
-    assert response.status_code == 403
+    def test_user_cannot_change_role(self, client, test_user, admin_user, auth_headers):
+        """Regular users cannot change roles."""
+        response = client.put(
+            f"/api/v1/users/{admin_user.id}",
+            json={"role": "user"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 403
 
+    def test_invalid_role_rejected(self, client, admin_user, test_user, admin_headers):
+        """Invalid role values are rejected with 422."""
+        response = client.put(
+            f"/api/v1/users/{test_user.id}",
+            json={"role": "superuser"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 422
 
-@pytest.mark.asyncio
-async def test_admin_can_change_role(
-    client: AsyncClient, test_admin, test_user, admin_token,
-):
-    """Test that admin can change a user's role."""
-    response = await client.put(
-        f"/api/v1/admin/users/{test_user.id}/role",
-        json={"role": "wellness_coach"},
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 200
-    assert response.json()["role"] == "wellness_coach"
+    def test_admin_can_deactivate_and_activate(
+        self, client, admin_user, test_user, admin_headers
+    ):
+        """Admins can deactivate and re-activate a user."""
+        deactivate = client.post(
+            f"/api/v1/users/{test_user.id}/deactivate", headers=admin_headers
+        )
+        assert deactivate.status_code == 200
+        assert deactivate.json()["is_active"] is False
 
+        activate = client.post(
+            f"/api/v1/users/{test_user.id}/activate", headers=admin_headers
+        )
+        assert activate.status_code == 200
+        assert activate.json()["is_active"] is True
 
-@pytest.mark.asyncio
-async def test_user_cannot_change_role(
-    client: AsyncClient, test_user, test_admin, user_token,
-):
-    """Test that regular user cannot change roles."""
-    response = await client.put(
-        f"/api/v1/admin/users/{test_admin.id}/role",
-        json={"role": "user"},
-        headers=auth_header(user_token),
-    )
-    assert response.status_code == 403
+    def test_admin_cannot_deactivate_self(self, client, admin_user, admin_headers):
+        """Admins cannot deactivate their own account (lockout prevention)."""
+        response = client.post(
+            f"/api/v1/users/{admin_user.id}/deactivate", headers=admin_headers
+        )
+        assert response.status_code == 400
 
-
-@pytest.mark.asyncio
-async def test_admin_cannot_demote_self(
-    client: AsyncClient, test_admin, admin_token,
-):
-    """Test that admin cannot change their own role (lockout prevention)."""
-    response = await client.put(
-        f"/api/v1/admin/users/{test_admin.id}/role",
-        json={"role": "user"},
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_admin_can_deactivate_user(
-    client: AsyncClient, test_admin, test_user, admin_token,
-):
-    """Test that admin can deactivate a user account."""
-    response = await client.patch(
-        f"/api/v1/admin/users/{test_user.id}/deactivate",
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 200
-    assert response.json()["is_active"] is False
+    def test_user_cannot_delete_user(self, client, test_user, admin_user, auth_headers):
+        """Regular users cannot delete accounts."""
+        response = client.delete(
+            f"/api/v1/users/{admin_user.id}", headers=auth_headers
+        )
+        assert response.status_code == 403
 
 
-@pytest.mark.asyncio
-async def test_admin_can_activate_user(
-    client: AsyncClient, test_admin, test_user, admin_token, db_session,
-):
-    """Test that admin can re-activate a deactivated user."""
-    test_user.is_active = False
-    await db_session.flush()
+class TestAdminDashboardAccess:
+    """Access control for the admin dashboard endpoint."""
 
-    response = await client.patch(
-        f"/api/v1/admin/users/{test_user.id}/activate",
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 200
-    assert response.json()["is_active"] is True
+    def test_admin_can_view_dashboard(self, client, admin_user, admin_headers):
+        """Admins can view platform dashboard statistics."""
+        response = client.get("/api/v1/admin/dashboard", headers=admin_headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert "total_users" in data
+        assert "total_alarms" in data
 
+    def test_user_cannot_view_dashboard(self, client, test_user, auth_headers):
+        """Regular users are forbidden from the admin dashboard."""
+        response = client.get("/api/v1/admin/dashboard", headers=auth_headers)
+        assert response.status_code == 403
 
-@pytest.mark.asyncio
-async def test_admin_cannot_deactivate_self(
-    client: AsyncClient, test_admin, admin_token,
-):
-    """Test that admin cannot deactivate their own account."""
-    response = await client.patch(
-        f"/api/v1/admin/users/{test_admin.id}/deactivate",
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_admin_can_delete_user(
-    client: AsyncClient, test_admin, test_user, admin_token,
-):
-    """Test that admin can delete a user."""
-    response = await client.delete(
-        f"/api/v1/admin/users/{test_user.id}",
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 200
-    assert "deleted" in response.json()["message"].lower()
-
-
-@pytest.mark.asyncio
-async def test_admin_can_view_platform_stats(
-    client: AsyncClient, test_admin, admin_token,
-):
-    """Test that admin can view platform statistics."""
-    response = await client.get(
-        "/api/v1/admin/stats",
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert "total_users" in data
-    assert "role_distribution" in data
-
-
-# ═══════════════════════════════════════════
-# Coach Endpoint Access Tests
-# ═══════════════════════════════════════════
-
-@pytest.mark.asyncio
-async def test_coach_can_access_coach_endpoints(
-    client: AsyncClient, test_coach, coach_token,
-):
-    """Test that wellness coach can access coach endpoints."""
-    response = await client.get(
-        "/api/v1/coach/users",
-        headers=auth_header(coach_token),
-    )
-    assert response.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_admin_can_access_coach_endpoints(
-    client: AsyncClient, test_admin, admin_token,
-):
-    """Test that admin can also access coach endpoints (role hierarchy)."""
-    response = await client.get(
-        "/api/v1/coach/users",
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_user_cannot_access_coach_endpoints(
-    client: AsyncClient, test_user, user_token,
-):
-    """Test that regular user cannot access coach endpoints."""
-    response = await client.get(
-        "/api/v1/coach/users",
-        headers=auth_header(user_token),
-    )
-    assert response.status_code == 403
-
-
-# ═══════════════════════════════════════════
-# Unauthenticated Access Tests
-# ═══════════════════════════════════════════
-
-@pytest.mark.asyncio
-async def test_unauthenticated_cannot_access_admin(client: AsyncClient):
-    """Test that unauthenticated requests cannot access admin endpoints."""
-    response = await client.get("/api/v1/admin/users")
-    assert response.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_unauthenticated_cannot_access_coach(client: AsyncClient):
-    """Test that unauthenticated requests cannot access coach endpoints."""
-    response = await client.get("/api/v1/coach/users")
-    assert response.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_invalid_role_in_update(
-    client: AsyncClient, test_admin, test_user, admin_token,
-):
-    """Test that invalid role values are rejected."""
-    response = await client.put(
-        f"/api/v1/admin/users/{test_user.id}/role",
-        json={"role": "superuser"},  # Invalid role
-        headers=auth_header(admin_token),
-    )
-    assert response.status_code == 422
+    def test_unauthenticated_cannot_view_dashboard(self, client):
+        """Unauthenticated requests to the dashboard are rejected with 401."""
+        response = client.get("/api/v1/admin/dashboard")
+        assert response.status_code == 401

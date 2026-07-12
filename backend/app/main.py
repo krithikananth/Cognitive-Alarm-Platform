@@ -15,6 +15,26 @@ from app.db.session import engine
 
 # Import all models so they are registered with Base.metadata
 from app.models import user, profile, alarm  # noqa: F401
+from app.models import challenge_session  # noqa: F401
+
+
+def _ensure_sqlite_columns() -> None:
+    """Add missing columns on existing SQLite tables (create_all won't alter)."""
+    if not str(settings.DATABASE_URL).startswith("sqlite"):
+        return
+    statements = [
+        "ALTER TABLE alarm_challenge_logs ADD COLUMN difficulty VARCHAR(50)",
+        "ALTER TABLE alarm_challenge_logs ADD COLUMN challenge_prompt TEXT",
+        "ALTER TABLE alarm_challenge_logs ADD COLUMN is_correct BOOLEAN DEFAULT 0",
+        "ALTER TABLE alarm_challenge_logs ADD COLUMN points_earned INTEGER DEFAULT 0",
+    ]
+    with engine.begin() as conn:
+        for sql in statements:
+            try:
+                conn.exec_driver_sql(sql)
+            except Exception:
+                # Column already exists
+                pass
 
 
 def create_app() -> FastAPI:
@@ -35,6 +55,7 @@ def create_app() -> FastAPI:
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -47,6 +68,7 @@ def create_app() -> FastAPI:
     def on_startup():
         """Create database tables on application startup."""
         Base.metadata.create_all(bind=engine)
+        _ensure_sqlite_columns()
 
         # Seed default admin user if not present
         from app.db.session import SessionLocal

@@ -19,7 +19,7 @@ const TABS = [
   { id: 'preferences', label: 'Preferences', icon: HiOutlineCog6Tooth },
 ];
 
-const CHALLENGE_TYPES = ['math', 'logic', 'memory', 'word', 'pattern', 'riddle', 'quiz'];
+const CHALLENGE_TYPES = ['math', 'logic', 'memory', 'word_game', 'pattern', 'riddle', 'quiz'];
 const DIFFICULTY_LEVELS = ['beginner', 'easy', 'medium', 'hard', 'expert'];
 
 export default function Profile() {
@@ -65,7 +65,7 @@ export default function Profile() {
               <span className="badge-primary">{user?.role}</span>
               <span className="flex items-center gap-1 text-xs text-slate-400">
                 <HiOutlineGlobeAlt className="w-3.5 h-3.5" />
-                {user?.timezone || 'UTC'}
+                {user?.timezone || profile?.timezone || profile?.profile?.timezone || 'UTC'}
               </span>
             </div>
           </div>

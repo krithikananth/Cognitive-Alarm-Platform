@@ -33,7 +33,8 @@ api.interceptors.response.use(
       error.response?.status === 401 &&
       !originalRequest._retry &&
       !originalRequest.url.includes('/auth/login') &&
-      !originalRequest.url.includes('/auth/register')
+      !originalRequest.url.includes('/auth/register') &&
+      !originalRequest.url.includes('/auth/oauth/')
     ) {
       originalRequest._retry = true;
 
@@ -74,6 +75,8 @@ export const authAPI = {
   forgotPassword: (email) => api.post('/auth/forgot-password', { email }),
   resetPassword: (token, newPassword) =>
     api.post('/auth/reset-password', { token, new_password: newPassword }),
+  /** Full-page redirect into the Google OAuth2 authorization flow. */
+  googleLoginUrl: () => `${API_BASE}/auth/oauth/google`,
 };
 
 // ─── User/Profile API ───

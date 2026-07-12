@@ -9,6 +9,7 @@ import useAuthStore from './store/authStore';
 // Pages
 import Login from './pages/Login';
 import Register from './pages/Register';
+import OAuthCallback from './pages/OAuthCallback';
 import Dashboard from './pages/Dashboard';
 import AlarmManager from './pages/AlarmManager';
 import Profile from './pages/Profile';
@@ -41,31 +42,52 @@ function AlarmWatcher() {
   const { alarms, fetchAlarms } = useAlarmStore();
   const { triggerAlarm, isRinging } = useActiveAlarmStore();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const firedRef = React.useRef(new Set());
   
-  // Fetch alarms initially
+  // Fetch alarms initially and refresh every 30 seconds
   React.useEffect(() => {
-    if (isAuthenticated) fetchAlarms();
+    if (isAuthenticated) {
+      fetchAlarms();
+      const refreshInterval = setInterval(() => fetchAlarms(), 30000);
+      return () => clearInterval(refreshInterval);
+    }
   }, [isAuthenticated, fetchAlarms]);
   
-  // Check every 10 seconds if any alarm should ring
+  // Check every 5 seconds if any alarm should ring
   React.useEffect(() => {
     if (!isAuthenticated || isRinging) return;
     
-    const interval = setInterval(() => {
+    const checkAlarms = () => {
       const now = new Date();
       
       for (const alarm of alarms) {
         if (!alarm.is_active || !alarm.next_trigger_at) continue;
+        if (firedRef.current.has(alarm.id)) continue;
         
-        const triggerTime = new Date(alarm.next_trigger_at);
-        // If current time is past the trigger time (within 60 seconds to avoid stale triggers)
-        const diffMs = now - triggerTime;
-        if (diffMs >= 0 && diffMs < 60000) {
+        // Backend returns UTC datetime — ensure proper parsing
+        let triggerTimeStr = alarm.next_trigger_at;
+        // If the string doesn't end with 'Z' or contain timezone info, treat as UTC
+        if (!triggerTimeStr.endsWith('Z') && !triggerTimeStr.includes('+') && !triggerTimeStr.includes('-', 10)) {
+          triggerTimeStr += 'Z';
+        }
+        const triggerTime = new Date(triggerTimeStr);
+        
+        // Compare: current time vs trigger time
+        const diffMs = now.getTime() - triggerTime.getTime();
+        
+        // Trigger if we're within 0 to 120 seconds past the trigger time
+        if (diffMs >= 0 && diffMs < 120000) {
+          console.log(`[AlarmWatcher] Triggering alarm ${alarm.id}: now=${now.toISOString()}, trigger=${triggerTime.toISOString()}, diff=${diffMs}ms`);
+          firedRef.current.add(alarm.id);
           triggerAlarm(alarm.id);
-          break; // Only trigger one alarm at a time
+          break;
         }
       }
-    }, 10000);
+    };
+    
+    // Check immediately on mount
+    checkAlarms();
+    const interval = setInterval(checkAlarms, 5000);
     
     return () => clearInterval(interval);
   }, [alarms, isAuthenticated, isRinging, triggerAlarm]);
@@ -96,6 +118,7 @@ function App() {
         {/* Guest Routes */}
         <Route path="/login" element={<GuestRoute><Login /></GuestRoute>} />
         <Route path="/register" element={<GuestRoute><Register /></GuestRoute>} />
+        <Route path="/oauth/callback" element={<OAuthCallback />} />
 
         {/* Protected Routes (inside Layout) */}
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
