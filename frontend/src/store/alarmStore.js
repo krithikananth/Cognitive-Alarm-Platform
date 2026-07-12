@@ -93,11 +93,15 @@ const useAlarmStore = create((set, get) => ({
     }
   },
 
-  // ─── Fetch History ───
-  fetchHistory: async (limit = 50, offset = 0) => {
+  // ─── Fetch Wake Confirmations (dismiss history) ───
+  fetchHistory: async (limit = 50) => {
     try {
-      const res = await alarmAPI.history(limit, offset);
-      set({ history: res.data.events, totalHistory: res.data.total });
+      const res = await alarmAPI.getWakeConfirmations(limit);
+      const events = res.data?.events || res.data || [];
+      set({
+        history: Array.isArray(events) ? events : [],
+        totalHistory: res.data?.total ?? (Array.isArray(events) ? events.length : 0),
+      });
     } catch (err) {
       console.error('Fetch history failed:', err);
     }

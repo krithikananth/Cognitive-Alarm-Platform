@@ -104,11 +104,17 @@ export default function Login() {
               {errors.password && <p className="text-red-400 text-xs mt-1">{errors.password.message}</p>}
             </div>
 
-            {/* Forgot Password */}
+            {/* Forgot Password — reset flow not shipped yet */}
             <div className="flex justify-end">
-              <Link to="/forgot-password" className="text-sm text-primary-400 hover:text-primary-300 transition">
+              <button
+                type="button"
+                onClick={() =>
+                  toast('Password reset is not available yet. Contact your admin if you need help.')
+                }
+                className="text-sm text-primary-400 hover:text-primary-300 transition"
+              >
                 Forgot password?
-              </Link>
+              </button>
             </div>
 
             {/* Submit */}

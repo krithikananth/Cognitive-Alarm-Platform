@@ -254,6 +254,18 @@ def google_oauth_callback(
 
 
 @router.post(
+    "/logout",
+    summary="Logout current session",
+)
+def logout(current_user: User = Depends(get_current_user)):
+    """Acknowledge logout for the authenticated client.
+
+    JWTs are stateless — the client discards tokens after this call.
+    """
+    return {"message": "Logged out successfully", "user_id": current_user.id}
+
+
+@router.post(
     "/refresh",
     response_model=Token,
     summary="Refresh access token",

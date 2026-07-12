@@ -25,6 +25,7 @@ export default function Layout() {
     : [
         { to: '/dashboard', icon: HiOutlineSquares2X2, label: 'Dashboard' },
         { to: '/alarms', icon: HiOutlineClock, label: 'Alarms' },
+        { to: '/analytics', icon: HiOutlineChartBar, label: 'Analytics' },
         { to: '/profile', icon: HiOutlineUser, label: 'Profile' },
       ];
 

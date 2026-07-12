@@ -26,6 +26,7 @@ class AlarmCreate(BaseModel):
         snooze_interval_minutes: Minutes per snooze.
         challenge_type: Cognitive challenge type.
         challenge_count: Number of challenges to dismiss.
+        challenge_difficulty: Baseline puzzle difficulty for this alarm.
         volume: Alarm volume (0-100).
         vibrate: Enable haptic feedback.
         label: Optional tag / label.
@@ -54,6 +55,10 @@ class AlarmCreate(BaseModel):
     challenge_count: int = Field(
         default=1, ge=1, le=10, description="Number of challenges"
     )
+    challenge_difficulty: str = Field(
+        default="medium",
+        description="Baseline difficulty (beginner/easy/medium/hard/expert)",
+    )
     volume: int = Field(default=80, ge=0, le=100, description="Volume level")
     vibrate: bool = Field(default=True, description="Enable vibration")
     label: Optional[str] = Field(
@@ -62,6 +67,18 @@ class AlarmCreate(BaseModel):
     one_time_date: Optional[date] = Field(
         None, description="Calendar date for one-time alarms (local timezone)"
     )
+
+    @field_validator("challenge_difficulty")
+    @classmethod
+    def validate_challenge_difficulty(cls, v: str) -> str:
+        """Normalize and validate difficulty labels."""
+        allowed = {"beginner", "easy", "medium", "hard", "expert"}
+        normalized = (v or "medium").strip().lower()
+        if normalized not in allowed:
+            raise ValueError(
+                f"challenge_difficulty must be one of: {', '.join(sorted(allowed))}"
+            )
+        return normalized
 
     @field_validator("days_of_week")
     @classmethod
@@ -95,6 +112,7 @@ class AlarmUpdate(BaseModel):
         snooze_interval_minutes: Updated snooze interval.
         challenge_type: Updated challenge type.
         challenge_count: Updated challenge count.
+        challenge_difficulty: Updated baseline difficulty.
         volume: Updated volume.
         vibrate: Updated vibration setting.
         label: Updated label.
@@ -109,12 +127,30 @@ class AlarmUpdate(BaseModel):
     snooze_interval_minutes: Optional[int] = Field(None, ge=1, le=60)
     challenge_type: Optional[ChallengeType] = None
     challenge_count: Optional[int] = Field(None, ge=1, le=10)
+    challenge_difficulty: Optional[str] = Field(
+        None,
+        description="Baseline difficulty (beginner/easy/medium/hard/expert)",
+    )
     volume: Optional[int] = Field(None, ge=0, le=100)
     vibrate: Optional[bool] = None
     label: Optional[str] = Field(None, max_length=255)
     one_time_date: Optional[date] = Field(
         None, description="Calendar date for one-time alarms (local timezone)"
     )
+
+    @field_validator("challenge_difficulty")
+    @classmethod
+    def validate_challenge_difficulty(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize and validate difficulty labels when provided."""
+        if v is None:
+            return v
+        allowed = {"beginner", "easy", "medium", "hard", "expert"}
+        normalized = v.strip().lower()
+        if normalized not in allowed:
+            raise ValueError(
+                f"challenge_difficulty must be one of: {', '.join(sorted(allowed))}"
+            )
+        return normalized
 
     @field_validator("days_of_week")
     @classmethod
@@ -152,6 +188,7 @@ class AlarmResponse(BaseModel):
     snooze_interval_minutes: int
     challenge_type: ChallengeType
     challenge_count: int
+    challenge_difficulty: str = "medium"
     volume: int
     vibrate: bool
     label: Optional[str] = None
@@ -202,3 +239,26 @@ class AlarmToggle(BaseModel):
     """
 
     is_active: bool = Field(..., description="Set alarm active or inactive")
+
+
+class SnoozeInfoResponse(BaseModel):
+    """Anti-snooze status for the active wake cycle.
+
+    Used by the client to disable snooze and preview difficulty escalation.
+    """
+
+    alarm_id: int
+    snooze_count: int = Field(..., ge=0, description="Snoozes used this wake cycle")
+    snooze_limit: int = Field(..., ge=0, description="Max snoozes allowed (0 = disabled)")
+    can_snooze: bool = Field(..., description="Whether another snooze is allowed")
+    snooze_interval_minutes: int = Field(..., ge=1)
+    escalation_level: int = Field(
+        ..., ge=0, description="Difficulty steps raised by prior snoozes"
+    )
+    next_challenge_difficulty: str = Field(
+        ..., description="Difficulty that will apply on the next challenge"
+    )
+    anti_snooze_enforced: bool = Field(
+        ...,
+        description="True when snooze is blocked (limit reached or limit is 0)",
+    )

@@ -16,6 +16,7 @@ from app.db.session import engine
 # Import all models so they are registered with Base.metadata
 from app.models import user, profile, alarm  # noqa: F401
 from app.models import challenge_session  # noqa: F401
+from app.models import alarm_wake_event  # noqa: F401
 
 
 def _ensure_sqlite_columns() -> None:
@@ -27,6 +28,15 @@ def _ensure_sqlite_columns() -> None:
         "ALTER TABLE alarm_challenge_logs ADD COLUMN challenge_prompt TEXT",
         "ALTER TABLE alarm_challenge_logs ADD COLUMN is_correct BOOLEAN DEFAULT 0",
         "ALTER TABLE alarm_challenge_logs ADD COLUMN points_earned INTEGER DEFAULT 0",
+        "ALTER TABLE challenge_sessions ADD COLUMN challenge_type VARCHAR(50) DEFAULT 'math'",
+        "ALTER TABLE challenge_sessions ADD COLUMN consecutive_correct INTEGER DEFAULT 0",
+        "ALTER TABLE challenge_sessions ADD COLUMN required_correct INTEGER DEFAULT 1",
+        "ALTER TABLE challenge_sessions ADD COLUMN total_failed_attempts INTEGER DEFAULT 0",
+        "ALTER TABLE challenge_sessions ADD COLUMN escalation_level INTEGER DEFAULT 0",
+        "ALTER TABLE challenge_sessions ADD COLUMN verification_token VARCHAR(64)",
+        "ALTER TABLE challenge_sessions ADD COLUMN wake_confirmed BOOLEAN DEFAULT 0",
+        "ALTER TABLE challenge_sessions ADD COLUMN session_started_at DATETIME",
+        "ALTER TABLE alarms ADD COLUMN challenge_difficulty VARCHAR(50) DEFAULT 'medium'",
     ]
     with engine.begin() as conn:
         for sql in statements:

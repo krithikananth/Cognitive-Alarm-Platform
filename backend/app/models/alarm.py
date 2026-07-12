@@ -66,13 +66,15 @@ class Alarm(Base):
         snooze_interval_minutes: Duration of each snooze in minutes.
         challenge_type: Type of cognitive challenge presented.
         challenge_count: Number of challenges required to dismiss.
+        challenge_difficulty: Baseline difficulty for this alarm's puzzles.
         volume: Alarm volume level (0-100).
         vibrate: Whether haptic feedback is enabled.
         label: Optional user-defined label / tag.
         next_trigger_at: Computed datetime of the next firing.
         last_triggered_at: Datetime of the most recent firing.
         total_dismissals: Lifetime count of dismissals.
-        total_snoozes: Lifetime count of snooze events.
+        total_snoozes: Snooze count for the current wake cycle
+            (reset to 0 on verified dismiss; rolled into profile.total_snoozes).
         created_at: Timestamp of record creation (UTC).
         updated_at: Timestamp of last update (UTC).
         user: Back-reference to the parent ``User`` model.
@@ -96,6 +98,7 @@ class Alarm(Base):
         Enum(ChallengeType), default=ChallengeType.RANDOM, nullable=False
     )
     challenge_count = Column(Integer, default=1, nullable=False)
+    challenge_difficulty = Column(String(50), default="medium", nullable=False)
     volume = Column(Integer, default=80, nullable=False)
     vibrate = Column(Boolean, default=True, nullable=False)
     label = Column(String(255), nullable=True)

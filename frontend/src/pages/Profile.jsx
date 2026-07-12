@@ -23,7 +23,7 @@ const CHALLENGE_TYPES = ['math', 'logic', 'memory', 'word_game', 'pattern', 'rid
 const DIFFICULTY_LEVELS = ['beginner', 'easy', 'medium', 'hard', 'expert'];
 
 export default function Profile() {
-  const { user, fetchProfile } = useAuthStore();
+  const { user } = useAuthStore();
   const [activeTab, setActiveTab] = useState('profile');
   const [profile, setProfile] = useState(null);
   const [saving, setSaving] = useState(false);

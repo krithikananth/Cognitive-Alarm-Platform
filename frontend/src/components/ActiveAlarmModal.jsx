@@ -3,7 +3,7 @@
  *   - Multi-step challenge flow (Step X of Y progress bar)
  *   - Countdown timer with visual indicator
  *   - Shake animation on wrong answer
- *   - Snooze button auto-disabled when limit reached
+ *   - Anti-snooze: button disabled at limit; difficulty escalates per snooze
  *   - Per-attempt time tracking
  */
 import React, { useState, useEffect } from 'react';
@@ -17,7 +17,8 @@ export default function ActiveAlarmModal() {
     isRinging, challenge, isLoading, error,
     verifyAndDismiss, snoozeAlarm,
     currentStep, totalSteps,
-    canSnooze, snoozeCount, snoozeLimit,
+    canSnooze, snoozeCount, snoozeLimit, snoozeIntervalMinutes,
+    escalationLevel,
     timeLeft, failedAttempts,
   } = useActiveAlarmStore();
 
@@ -79,7 +80,11 @@ export default function ActiveAlarmModal() {
     const elapsed = Math.max(0, timeLimit - (timeLeft ?? timeLimit));
     const result = await verifyAndDismiss(answer, elapsed, failedAttempts);
     if (result?.dismissed) {
-      toast.success(result.message || 'Alarm dismissed!');
+      const wake = result.wakefulness;
+      const wakeMsg = wake?.level
+        ? ` Wakefulness: ${wake.level} (${wake.score}).`
+        : '';
+      toast.success((result.message || 'Alarm dismissed!') + wakeMsg);
     } else if (result?.success && !result?.dismissed) {
       toast.success(result.message || `Step ${result.step - 1} correct!`);
       setAnswer('');
@@ -92,7 +97,11 @@ export default function ActiveAlarmModal() {
     const elapsed = Math.max(0, timeLimit - (timeLeft ?? timeLimit));
     const result = await verifyAndDismiss(opt, elapsed, failedAttempts);
     if (result?.dismissed) {
-      toast.success(result.message || 'Alarm dismissed!');
+      const wake = result.wakefulness;
+      const wakeMsg = wake?.level
+        ? ` Wakefulness: ${wake.level} (${wake.score}).`
+        : '';
+      toast.success((result.message || 'Alarm dismissed!') + wakeMsg);
     } else if (result?.success && !result?.dismissed) {
       toast.success(result.message || `Step ${result.step - 1} correct!`);
     }
@@ -100,12 +109,19 @@ export default function ActiveAlarmModal() {
 
   const handleSnooze = async () => {
     if (!canSnooze) {
-      toast.error('Snooze limit reached! Solve the challenge.');
+      toast.error(
+        snoozeLimit === 0
+          ? 'Anti-snooze is on — solve the challenge to dismiss.'
+          : 'Snooze limit reached! Solve the challenge.'
+      );
       return;
     }
     const res = await snoozeAlarm();
     if (res.success) {
-      toast.success('Alarm snoozed');
+      const mins = res.intervalMinutes || snoozeIntervalMinutes || 5;
+      toast.success(
+        `Snoozed ${mins} min — next challenge will be harder (escalation ${res.escalationLevel}).`
+      );
     }
   };
 
@@ -121,6 +137,11 @@ export default function ActiveAlarmModal() {
   const timerBarColor =
     timeLeft > maxTime * 0.5 ? 'bg-emerald-500' :
     timeLeft > maxTime * 0.2 ? 'bg-amber-500' : 'bg-red-500';
+
+  const snoozeBlockedMessage =
+    snoozeLimit === 0
+      ? 'Anti-snooze enabled — no snoozing. Solve the challenge.'
+      : `Snooze limit reached (${snoozeLimit}/${snoozeLimit}) — solve the challenge!`;
 
   return (
     <AnimatePresence>
@@ -150,6 +171,15 @@ export default function ActiveAlarmModal() {
 
             <h2 className="text-3xl font-display font-bold text-white mb-1">WAKE UP!</h2>
             <p className="text-slate-400 mb-4">Solve the challenge to turn off the alarm.</p>
+
+            {/* ── Anti-snooze escalation banner ── */}
+            {escalationLevel > 0 && (
+              <div className="w-full mb-4 px-3 py-2 rounded-xl bg-orange-500/15 border border-orange-500/30 text-orange-300 text-xs font-medium">
+                Anti-snooze active — difficulty raised {escalationLevel} level
+                {escalationLevel > 1 ? 's' : ''} after snooze
+                {escalationLevel > 1 ? 's' : ''}
+              </div>
+            )}
 
             {/* ── Multi-step progress bar ── */}
             {totalSteps > 1 && (
@@ -212,7 +242,10 @@ export default function ActiveAlarmModal() {
                 <div className="bg-slate-800/50 rounded-2xl p-6 mb-6 border border-slate-700/50">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-bold tracking-widest text-accent-400 uppercase">
-                      {challenge.type} CHALLENGE
+                      {(
+                        { WORD_GAME: 'WORD', QUIZ: 'QUIZ', LOGIC: 'LOGIC' }[challenge.type]
+                        || challenge.type
+                      )} CHALLENGE
                     </span>
                     {challenge.difficulty && (
                       <span className={`text-xs font-bold tracking-widest uppercase px-2 py-0.5 rounded-full ${
@@ -223,6 +256,7 @@ export default function ActiveAlarmModal() {
                         'bg-red-500/20 text-red-400'
                       }`}>
                         {challenge.difficulty}
+                        {escalationLevel > 0 ? ' ↑' : ''}
                       </span>
                     )}
                   </div>
@@ -276,22 +310,22 @@ export default function ActiveAlarmModal() {
                 {/* ── Failed attempts indicator ── */}
                 {failedAttempts > 0 && (
                   <p className="text-red-400 text-sm mb-4">
-                    ❌ {failedAttempts} failed attempt{failedAttempts > 1 ? 's' : ''}
+                    {failedAttempts} failed attempt{failedAttempts > 1 ? 's' : ''}
                   </p>
                 )}
 
-                {/* ── Snooze button ── */}
+                {/* ── Snooze / anti-snooze control ── */}
                 {canSnooze ? (
                   <button
                     onClick={handleSnooze}
                     disabled={isLoading}
                     className="text-slate-500 hover:text-white underline decoration-slate-600 hover:decoration-white underline-offset-4 transition text-sm font-medium"
                   >
-                    Snooze ({snoozeCount}/{snoozeLimit} used)
+                    Snooze ({snoozeCount}/{snoozeLimit} used) — harder next time
                   </button>
                 ) : (
-                  <p className="text-red-400/60 text-xs font-medium">
-                    🚫 Snooze limit reached ({snoozeLimit}/{snoozeLimit}) — solve the challenge!
+                  <p className="text-red-400/80 text-xs font-medium">
+                    {snoozeBlockedMessage}
                   </p>
                 )}
               </div>

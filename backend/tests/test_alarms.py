@@ -37,8 +37,32 @@ class TestCreateAlarm:
         assert data["user_id"] == test_user.id
         assert data["challenge_type"] == "math"
         assert data["challenge_count"] == 2
+        assert data["challenge_difficulty"] == "medium"
         assert data["snooze_limit"] == 3
         assert "id" in data
+
+    def test_create_alarm_with_difficulty(self, client, test_user, auth_headers):
+        """Per-alarm challenge_difficulty is persisted and returned."""
+        payload = {
+            "title": "Hard Morning",
+            "alarm_time": "06:00",
+            "challenge_type": "math",
+            "challenge_difficulty": "hard",
+        }
+        response = client.post("/api/v1/alarms/", json=payload, headers=auth_headers)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["challenge_difficulty"] == "hard"
+
+        # Challenge generation should start from the alarm difficulty baseline
+        ch = client.get(
+            f"/api/v1/alarms/{data['id']}/challenge", headers=auth_headers
+        )
+        assert ch.status_code == 200
+        # Effective difficulty may be softened by time-of-day, but must be valid
+        assert ch.json()["difficulty"] in {
+            "beginner", "easy", "medium", "hard", "expert"
+        }
 
     def test_create_alarm_minimal(self, client, test_user, auth_headers):
         """Creating an alarm with only the required fields uses sensible defaults."""
@@ -54,6 +78,7 @@ class TestCreateAlarm:
         assert data["alarm_time"] == "08:00:00"
         assert data["alarm_type"] == "daily"
         assert data["challenge_type"] == "random"
+        assert data["challenge_difficulty"] == "medium"
         assert data["vibrate"] is True
         assert data["volume"] == 80
 
@@ -365,12 +390,32 @@ class TestSnoozeAlarm:
         assert response2.status_code == 400
         assert "Maximum snooze limit reached" in response2.json()["detail"]
 
+    def test_snooze_disabled_when_limit_zero(self, client, test_user, auth_headers):
+        """snooze_limit=0 is strict anti-snooze — first snooze is rejected."""
+        create_response = client.post(
+            "/api/v1/alarms/",
+            json={"title": "No Snooze", "alarm_time": "07:00", "snooze_limit": 0},
+            headers=auth_headers,
+        )
+        alarm_id = create_response.json()["id"]
+
+        info = client.get(
+            f"/api/v1/alarms/{alarm_id}/snooze-info", headers=auth_headers
+        ).json()
+        assert info["can_snooze"] is False
+        assert info["anti_snooze_enforced"] is True
+
+        response = client.post(
+            f"/api/v1/alarms/{alarm_id}/snooze", headers=auth_headers
+        )
+        assert response.status_code == 400
+
 
 class TestDismissAlarm:
     """Tests for POST /api/v1/alarms/{alarm_id}/dismiss."""
 
-    def test_dismiss_alarm(self, client, test_user, auth_headers):
-        """Dismissing an alarm records the dismissal."""
+    def test_dismiss_without_challenge_forbidden(self, client, test_user, auth_headers):
+        """Dismiss without wake-up verification must be rejected."""
         create_response = client.post(
             "/api/v1/alarms/",
             json={"title": "Dismiss Me", "alarm_time": "07:00"},
@@ -382,10 +427,8 @@ class TestDismissAlarm:
             f"/api/v1/alarms/{alarm_id}/dismiss", headers=auth_headers
         )
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["total_dismissals"] == 1
-        assert data["total_snoozes"] == 0
+        assert response.status_code == 403
+        assert "verification" in response.json()["detail"].lower()
 
     def test_dismiss_alarm_not_found(self, client, test_user, auth_headers):
         """Dismissing a non-existent alarm returns 404."""

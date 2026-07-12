@@ -106,7 +106,16 @@ const useAuthStore = create((set, get) => ({
   fetchProfile: async () => {
     try {
       const res = await userAPI.getProfile();
-      set({ profile: res.data, user: res.data.user });
+      // /users/profile returns a flat bundle (user fields + nested profile)
+      const bundle = res.data || {};
+      const { profile: nestedProfile, ...userFields } = bundle;
+      const nextUser = {
+        ...get().user,
+        ...userFields,
+        timezone: userFields.timezone || nestedProfile?.timezone || get().user?.timezone,
+      };
+      localStorage.setItem('user', JSON.stringify(nextUser));
+      set({ profile: nestedProfile || bundle, user: nextUser });
     } catch (err) {
       console.error('Failed to fetch profile:', err);
     }

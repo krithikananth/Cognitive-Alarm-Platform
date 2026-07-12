@@ -101,9 +101,19 @@ export const alarmAPI = {
   toggle: (id, isActive) => api.patch(`/alarms/${id}/toggle`, { is_active: isActive }),
   upcoming: (hours = 24) => api.get('/alarms/upcoming', { params: { hours_ahead: hours } }),
   snooze: (id) => api.post(`/alarms/${id}/snooze`),
-  dismiss: (id) => api.post(`/alarms/${id}/dismiss`),
+  dismiss: (id, data = {}) => api.post(`/alarms/${id}/dismiss`, data),
+  getSnoozeInfo: (id) => api.get(`/alarms/${id}/snooze-info`),
   getChallenge: (id) => api.get(`/alarms/${id}/challenge`),
   verifyChallenge: (id, data) => api.post(`/alarms/${id}/verify`, data),
+  getChallengeStats: () => api.get('/alarms/challenge/stats'),
+  getChallengeHistory: (params = {}) =>
+    api.get('/alarms/challenge/history', { params }),
+  getChallengeAnalysis: () => api.get('/alarms/challenge/analysis'),
+  getAlarmChallengeHistory: (id, params = {}) =>
+    api.get(`/alarms/${id}/challenge/history`, { params }),
+  getWakefulness: () => api.get('/alarms/wakefulness'),
+  getWakeConfirmations: (limit = 20) =>
+    api.get('/alarms/wake-confirmations', { params: { limit } }),
 };
 
 // ─── Admin API ───

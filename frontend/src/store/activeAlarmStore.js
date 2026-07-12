@@ -14,15 +14,20 @@ const useActiveAlarmStore = create((set, get) => ({
   isLoading: false,
   error: null,
 
-  // ── Multi-step state ──
+  // ── Multi-step / consecutive state (server-authoritative) ──
   currentStep: 1,
-  totalSteps: 1,         // from alarm.challenge_count
+  totalSteps: 1,         // from alarm.challenge_count / server required_correct
   challengeCount: 1,
+  consecutiveCorrect: 0,
 
-  // ── Snooze state ──
+  // ── Snooze / anti-snooze state ──
   canSnooze: true,
   snoozeCount: 0,
   snoozeLimit: 3,
+  snoozeIntervalMinutes: 5,
+  escalationLevel: 0,
+  nextChallengeDifficulty: null,
+  antiSnoozeEnforced: false,
 
   // ── Timer state ──
   timeLeft: 30,          // countdown in seconds
@@ -31,6 +36,7 @@ const useActiveAlarmStore = create((set, get) => ({
   // ── Analytics ──
   failedAttempts: 0,
   startTime: null,
+  lastWakefulness: null,
 
   // ─────────────────────────────────────────────────────────
   // TRIGGER — alarm starts ringing
@@ -49,29 +55,47 @@ const useActiveAlarmStore = create((set, get) => ({
     });
 
     try {
-      // Fetch alarm details to get challenge_count and snooze info
-      const [challengeRes, alarmRes] = await Promise.all([
+      // Challenge payload includes server progress; snooze-info for escalation
+      const [challengeRes, alarmRes, snoozeRes] = await Promise.all([
         alarmAPI.getChallenge(alarmId),
         alarmAPI.get(alarmId),
+        alarmAPI.getSnoozeInfo(alarmId).catch(() => null),
       ]);
 
       const alarm = alarmRes.data;
       const challenge = challengeRes.data;
+      const snooze = snoozeRes?.data;
       const timeLimit = challenge.time_limit_seconds || 30;
+      const totalSteps =
+        challenge.required_correct || alarm.challenge_count || 1;
+      const consecutive = challenge.consecutive_correct || 0;
 
       set({
         challenge,
         isLoading: false,
-        totalSteps: alarm.challenge_count || 1,
-        challengeCount: alarm.challenge_count || 1,
-        canSnooze: (alarm.total_snoozes || 0) < (alarm.snooze_limit || 3),
-        snoozeCount: alarm.total_snoozes || 0,
-        snoozeLimit: alarm.snooze_limit || 3,
+        totalSteps,
+        challengeCount: totalSteps,
+        consecutiveCorrect: consecutive,
+        currentStep: consecutive + 1,
+        canSnooze: snooze
+          ? snooze.can_snooze
+          : (alarm.total_snoozes || 0) < (alarm.snooze_limit ?? 3),
+        snoozeCount: snooze?.snooze_count ?? alarm.total_snoozes ?? 0,
+        snoozeLimit: snooze?.snooze_limit ?? alarm.snooze_limit ?? 3,
+        snoozeIntervalMinutes:
+          snooze?.snooze_interval_minutes ?? alarm.snooze_interval_minutes ?? 5,
+        escalationLevel:
+          snooze?.escalation_level ?? challenge.escalation_level ?? 0,
+        nextChallengeDifficulty:
+          snooze?.next_challenge_difficulty ?? challenge.difficulty ?? null,
+        antiSnoozeEnforced: snooze
+          ? Boolean(snooze.anti_snooze_enforced)
+          : (alarm.total_snoozes || 0) >= (alarm.snooze_limit ?? 3),
         timeLeft: timeLimit,
         startTime: Date.now(),
+        lastWakefulness: null,
       });
 
-      // Start countdown timer
       get()._startTimer(timeLimit);
     } catch (err) {
       set({ error: "Failed to load challenge", isLoading: false });
@@ -124,6 +148,8 @@ const useActiveAlarmStore = create((set, get) => ({
       await alarmAPI.snooze(alarmId);
       get()._stopTimer();
       const newSnoozeCount = get().snoozeCount + 1;
+      const limit = get().snoozeLimit;
+      const canStillSnooze = newSnoozeCount < limit;
       set({
         ringingAlarmId: null,
         isRinging: false,
@@ -132,12 +158,20 @@ const useActiveAlarmStore = create((set, get) => ({
         currentStep: 1,
         failedAttempts: 0,
         snoozeCount: newSnoozeCount,
-        canSnooze: newSnoozeCount < get().snoozeLimit,
+        escalationLevel: newSnoozeCount,
+        canSnooze: canStillSnooze,
+        antiSnoozeEnforced: !canStillSnooze,
       });
       try {
         await useAlarmStore.getState().fetchAlarms();
       } catch (e) { /* ignore */ }
-      return { success: true };
+      return {
+        success: true,
+        snoozeCount: newSnoozeCount,
+        snoozeLimit: limit,
+        intervalMinutes: get().snoozeIntervalMinutes,
+        escalationLevel: newSnoozeCount,
+      };
     } catch (err) {
       const msg = err.response?.data?.detail || "Failed to snooze";
       set({ error: msg, isLoading: false, canSnooze: false });
@@ -176,34 +210,41 @@ const useActiveAlarmStore = create((set, get) => ({
       const data = res.data;
 
       if (data.is_dismissed) {
-        // All steps done — alarm dismissed
         get()._stopTimer();
-        const dismissedId = alarmId;
         set({
           ringingAlarmId: null,
           isRinging: false,
           challenge: null,
           isLoading: false,
           currentStep: 1,
+          consecutiveCorrect: 0,
           failedAttempts: 0,
+          lastWakefulness: data.wakefulness || null,
         });
-        // Refresh alarm list so AlarmWatcher does not re-fire from stale state
         try {
+          // Refresh from server — recurring alarms stay active with a new
+          // next_trigger_at; only one-time alarms are deactivated.
           await useAlarmStore.getState().fetchAlarms();
-          useAlarmStore.setState((state) => ({
-            alarms: state.alarms.map((a) =>
-              a.id === dismissedId
-                ? { ...a, is_active: false, next_trigger_at: null }
-                : a
-            ),
-          }));
         } catch (e) { /* ignore refresh errors */ }
-        return { success: true, dismissed: true, message: data.message };
+        return {
+          success: true,
+          dismissed: true,
+          message: data.message,
+          wakefulness: data.wakefulness,
+        };
       }
 
-      // Multi-step: move to next step, fetch a new challenge
-      const nextStep = data.next_step;
-      set({ currentStep: nextStep, isLoading: true, error: null });
+      // Server-tracked consecutive progress — fetch next puzzle
+      const nextStep = data.next_step || (data.consecutive_correct || 0) + 1;
+      const totalSteps = data.total_steps || data.required_correct || get().totalSteps;
+      set({
+        currentStep: nextStep,
+        totalSteps,
+        consecutiveCorrect: data.consecutive_correct || 0,
+        isLoading: true,
+        error: null,
+        lastWakefulness: data.wakefulness || null,
+      });
 
       const nextChallengeRes = await alarmAPI.getChallenge(alarmId);
       const nextChallenge = nextChallengeRes.data;
@@ -214,6 +255,10 @@ const useActiveAlarmStore = create((set, get) => ({
         isLoading: false,
         startTime: Date.now(),
         timeLeft: nextTimeLimit,
+        currentStep:
+          (nextChallenge.consecutive_correct || data.consecutive_correct || 0) + 1,
+        totalSteps:
+          nextChallenge.required_correct || totalSteps,
       });
       get()._startTimer(nextTimeLimit);
 
@@ -222,17 +267,25 @@ const useActiveAlarmStore = create((set, get) => ({
         dismissed: false,
         message: data.message,
         step: nextStep,
-        totalSteps: data.total_steps,
+        totalSteps,
+        wakefulness: data.wakefulness,
       };
     } catch (err) {
-      const msg = err.response?.data?.detail || "Incorrect answer. Try again.";
+      const payload = err.response?.data || {};
+      const msg =
+        (typeof payload.detail === 'string' ? payload.detail : null) ||
+        "Incorrect answer. Try again.";
+      const streakReset = payload.streak_reset === true;
       set({
         error: msg,
         isLoading: false,
         failedAttempts: get().failedAttempts + 1,
+        consecutiveCorrect: streakReset ? 0 : get().consecutiveCorrect,
+        currentStep: streakReset ? 1 : get().currentStep,
+        lastWakefulness: payload.wakefulness || null,
       });
 
-      // Fetch a new challenge on wrong answer / timeout
+      // Fetch a new challenge on wrong answer / timeout (streak may have reset)
       try {
         const res = await alarmAPI.getChallenge(alarmId);
         const newChallenge = res.data;
@@ -241,11 +294,15 @@ const useActiveAlarmStore = create((set, get) => ({
           challenge: newChallenge,
           startTime: Date.now(),
           timeLeft: nextTimeLimit,
+          consecutiveCorrect: newChallenge.consecutive_correct || 0,
+          currentStep: (newChallenge.consecutive_correct || 0) + 1,
+          totalSteps:
+            newChallenge.required_correct || get().totalSteps,
         });
         get()._startTimer(nextTimeLimit);
       } catch (e) { /* ignore fetch error */ }
 
-      return { success: false, error: msg };
+      return { success: false, error: msg, streakReset, wakefulness: payload.wakefulness };
     }
   },
 }));

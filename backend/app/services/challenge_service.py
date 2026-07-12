@@ -23,8 +23,22 @@ if TYPE_CHECKING:
 # ── Difficulty level ordering (lowest → highest) ──────────────────────
 DIFFICULTY_LEVELS = ["beginner", "easy", "medium", "hard", "expert"]
 
+# Concrete challenge types used for RANDOM / preference pools
+SELECTABLE_CHALLENGE_TYPES = [
+    ChallengeType.MATH,
+    ChallengeType.LOGIC,
+    ChallengeType.MEMORY,
+    ChallengeType.WORD_GAME,
+    ChallengeType.PATTERN,
+    ChallengeType.RIDDLE,
+    ChallengeType.QUIZ,
+]
+
 # Network / UI grace added on top of the published time limit (seconds)
 VERIFY_TIME_GRACE_SECONDS = 5
+
+# Recent attempts used for adaptive difficulty / type weighting
+PERFORMANCE_WINDOW = 20
 
 
 def _clamp_difficulty(level: str) -> str:
@@ -81,62 +95,465 @@ class ChallengeService:
     # ── Public entry point ──────────────────────────────────────────
 
     @staticmethod
+    def _normalize_type(challenge_type: ChallengeType) -> ChallengeType:
+        """Normalize aliases (e.g. WORD → WORD_GAME)."""
+        if challenge_type == ChallengeType.WORD:
+            return ChallengeType.WORD_GAME
+        return challenge_type
+
+    @staticmethod
+    def _parse_preferred_types(preferred_types: Optional[list]) -> list[ChallengeType]:
+        """Parse preferred type strings into ChallengeType enums."""
+        if not preferred_types:
+            return list(SELECTABLE_CHALLENGE_TYPES)
+
+        parsed: list[ChallengeType] = []
+        for raw in preferred_types:
+            try:
+                ct = ChallengeType(str(raw).lower().strip())
+            except ValueError:
+                continue
+            ct = ChallengeService._normalize_type(ct)
+            if ct in SELECTABLE_CHALLENGE_TYPES and ct not in parsed:
+                parsed.append(ct)
+
+        return parsed or list(SELECTABLE_CHALLENGE_TYPES)
+
+    @staticmethod
+    def select_challenge_type(
+        requested: ChallengeType,
+        preferred_types: Optional[list] = None,
+        recent_logs: Optional[list] = None,
+    ) -> ChallengeType:
+        """
+        Resolve which concrete challenge type to serve.
+
+        - Fixed alarm types are honored as-is.
+        - RANDOM (or equivalent) picks from the user's preferred types,
+          weighted toward weaker types so practice stays personalized.
+        """
+        requested = ChallengeService._normalize_type(requested)
+        if requested != ChallengeType.RANDOM:
+            return requested
+
+        pool = ChallengeService._parse_preferred_types(preferred_types)
+
+        # Weight by weakness: lower accuracy → higher selection weight
+        weights = []
+        by_type: Dict[str, Dict[str, int]] = {}
+        for log in recent_logs or []:
+            ct = (getattr(log, "challenge_type", None) or "").lower()
+            if ct in ("random", "word", ""):
+                continue
+            if ct == "word_game" or ct.startswith("word"):
+                ct = "word_game"
+            if ct not in by_type:
+                by_type[ct] = {"total": 0, "correct": 0}
+            by_type[ct]["total"] += 1
+            if getattr(log, "is_correct", False):
+                by_type[ct]["correct"] += 1
+
+        for ct in pool:
+            stats = by_type.get(ct.value, {"total": 0, "correct": 0})
+            if stats["total"] < 3:
+                # Unexplored preferred types get a healthy chance
+                weights.append(2.5)
+            else:
+                accuracy = stats["correct"] / stats["total"]
+                # Invert accuracy: 0% → weight 3.0, 100% → weight 0.5
+                weights.append(max(0.5, 3.0 - (accuracy * 2.5)))
+
+        return random.choices(pool, weights=weights, k=1)[0]
+
+    @staticmethod
+    def adapt_difficulty(
+        base_difficulty: str,
+        recent_logs: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """
+        Adjust difficulty from recent performance before time-of-day softening.
+
+        Returns dict with keys: difficulty, adjustment (-1/0/+1), reason.
+        """
+        base = _clamp_difficulty(base_difficulty)
+        logs = list(recent_logs or [])[:PERFORMANCE_WINDOW]
+
+        if len(logs) < 5:
+            return {
+                "difficulty": base,
+                "adjustment": 0,
+                "reason": "Not enough recent attempts to adapt (need 5+).",
+            }
+
+        correct = sum(1 for l in logs if getattr(l, "is_correct", False))
+        accuracy = correct / len(logs)
+        avg_time = sum(getattr(l, "time_taken_seconds", 0) or 0 for l in logs) / len(logs)
+
+        # Compare average solve time to medium baseline (30s) as a speed signal
+        speed_ratio = avg_time / 30.0
+
+        idx = _difficulty_index(base)
+        adjustment = 0
+        reason = "Performance stable — keeping preferred difficulty."
+
+        if accuracy >= 0.85 and speed_ratio <= 0.55:
+            adjustment = 1
+            reason = (
+                f"Strong recent form ({round(accuracy * 100)}% accuracy, "
+                f"fast solves) — raising difficulty."
+            )
+        elif accuracy >= 0.75 and speed_ratio <= 0.4:
+            adjustment = 1
+            reason = (
+                f"Consistently fast and accurate ({round(accuracy * 100)}%) "
+                f"— raising difficulty."
+            )
+        elif accuracy <= 0.35:
+            adjustment = -1
+            reason = (
+                f"Low recent accuracy ({round(accuracy * 100)}%) "
+                f"— lowering difficulty."
+            )
+        elif accuracy <= 0.5 and speed_ratio >= 0.9:
+            adjustment = -1
+            reason = (
+                f"Struggling on time and accuracy ({round(accuracy * 100)}%) "
+                f"— lowering difficulty."
+            )
+
+        new_idx = max(0, min(len(DIFFICULTY_LEVELS) - 1, idx + adjustment))
+        return {
+            "difficulty": DIFFICULTY_LEVELS[new_idx],
+            "adjustment": new_idx - idx,
+            "reason": reason,
+            "recent_accuracy": round(accuracy * 100, 1),
+            "recent_avg_time": round(avg_time, 1),
+            "sample_size": len(logs),
+        }
+
+    @staticmethod
     def generate_challenge(
         challenge_type: ChallengeType,
         difficulty: str = "medium",
         current_hour: Optional[int] = None,
+        preferred_types: Optional[list] = None,
+        recent_logs: Optional[list] = None,
+        apply_adaptive_difficulty: bool = True,
     ) -> Dict[str, Any]:
         """
-        Generate a cognitive puzzle personalized by difficulty and time.
+        Generate a cognitive puzzle personalized by preferences, performance,
+        and time of day.
 
         Args:
-            challenge_type: The requested category of puzzle.
+            challenge_type: The requested category of puzzle (or RANDOM).
             difficulty: User's difficulty preference
                         (beginner / easy / medium / hard / expert).
             current_hour: Current hour (0-23) for time-of-day adjustment.
                           If None, the system clock is used.
+            preferred_types: Profile preferred challenge type strings.
+            recent_logs: Recent AlarmChallengeLog rows for personalization.
+            apply_adaptive_difficulty: When True, shift difficulty from
+                recent performance before applying time-of-day softening.
 
         Returns:
             A dictionary with the challenge prompt, type, correct answer,
             the effective difficulty applied, and a time_limit_seconds hint.
         """
-        # Resolve effective difficulty (profile pref + time adjustment)
-        effective = _adjust_for_time(difficulty, current_hour)
+        # 1) Personalized type selection (RANDOM → preferred + weak-type bias)
+        resolved_type = ChallengeService.select_challenge_type(
+            challenge_type, preferred_types, recent_logs
+        )
 
-        # Handle RANDOM type
-        if challenge_type == ChallengeType.RANDOM:
-            challenge_type = random.choice([
-                ChallengeType.MATH,
-                ChallengeType.PATTERN,
-                ChallengeType.MEMORY,
-                ChallengeType.RIDDLE,
-            ])
+        # 2) Performance-based adaptive difficulty
+        adaptation = {"adjustment": 0, "reason": "Adaptive difficulty disabled."}
+        working_difficulty = _clamp_difficulty(difficulty)
+        if apply_adaptive_difficulty:
+            adaptation = ChallengeService.adapt_difficulty(
+                working_difficulty, recent_logs
+            )
+            working_difficulty = adaptation["difficulty"]
 
-        # Normalize frontend alias
-        if challenge_type == ChallengeType.WORD:
-            challenge_type = ChallengeType.WORD_GAME
+        # 3) Time-of-day softening
+        effective = _adjust_for_time(working_difficulty, current_hour)
 
         # Dispatch to the appropriate generator
         generators = {
             ChallengeType.MATH: ChallengeService._generate_math,
+            ChallengeType.LOGIC: ChallengeService._generate_logic,
             ChallengeType.PATTERN: ChallengeService._generate_pattern,
             ChallengeType.MEMORY: ChallengeService._generate_memory,
+            ChallengeType.WORD_GAME: ChallengeService._generate_word_game,
             ChallengeType.RIDDLE: ChallengeService._generate_riddle,
+            ChallengeType.QUIZ: ChallengeService._generate_quiz,
         }
 
-        generator = generators.get(challenge_type)
+        generator = generators.get(resolved_type)
         if generator:
             result = generator(effective)
         else:
-            # Logic, Word Game, Quiz → AI or fallback
             result = ChallengeService._generate_ai_challenge(
-                challenge_type, effective
+                resolved_type, effective
             )
 
-        # Attach metadata about the personalization applied
         result["difficulty"] = effective
         result["time_limit_seconds"] = ChallengeService._time_limit_for(effective)
+        result["requested_type"] = challenge_type.value
+        result["selection_reason"] = (
+            "Preferred types + performance weighting"
+            if challenge_type == ChallengeType.RANDOM
+            or ChallengeService._normalize_type(challenge_type) == ChallengeType.RANDOM
+            else "Alarm-configured challenge type"
+        )
+        result["adaptive_difficulty"] = adaptation
         return result
+
+    @staticmethod
+    def analyze_completion(logs: list) -> Dict[str, Any]:
+        """
+        Produce deep challenge-completion analysis and actionable recommendations.
+        """
+        if not logs:
+            return {
+                "summary": {
+                    "total_attempts": 0,
+                    "correct_answers": 0,
+                    "accuracy_percentage": 0.0,
+                    "avg_response_time": 0.0,
+                    "total_points_earned": 0,
+                    "completion_rate": 0.0,
+                    "trend": "insufficient_data",
+                    "trend_label": "Not enough data yet",
+                },
+                "strengths": [],
+                "weaknesses": [],
+                "by_type": {},
+                "by_difficulty": {},
+                "recommendations": [
+                    {
+                        "priority": "high",
+                        "category": "getting_started",
+                        "title": "Complete a few morning challenges",
+                        "detail": (
+                            "Solve at least 5 challenges so we can personalize "
+                            "difficulty and type selection for you."
+                        ),
+                    }
+                ],
+                "insights": [
+                    "No challenge attempts logged yet — your analytics will appear after your first alarm."
+                ],
+            }
+
+        total = len(logs)
+        correct = sum(1 for l in logs if l.is_correct)
+        accuracy = round((correct / total) * 100, 1)
+        avg_time = round(
+            sum(l.time_taken_seconds or 0 for l in logs) / total, 1
+        )
+        total_points = sum(l.points_earned or 0 for l in logs)
+        completion_rate = accuracy  # correct attempts = successful completions
+
+        # ── Per-type breakdown ──
+        by_type: Dict[str, Dict[str, Any]] = {}
+        for log in logs:
+            ct = (log.challenge_type or "unknown").lower()
+            if ct == "word":
+                ct = "word_game"
+            if ct not in by_type:
+                by_type[ct] = {
+                    "total": 0, "correct": 0, "total_time": 0, "points": 0,
+                }
+            by_type[ct]["total"] += 1
+            by_type[ct]["correct"] += 1 if log.is_correct else 0
+            by_type[ct]["total_time"] += log.time_taken_seconds or 0
+            by_type[ct]["points"] += log.points_earned or 0
+
+        for ct, stats in by_type.items():
+            stats["accuracy"] = round(
+                (stats["correct"] / stats["total"]) * 100, 1
+            ) if stats["total"] else 0.0
+            stats["avg_time"] = round(
+                stats["total_time"] / stats["total"], 1
+            ) if stats["total"] else 0.0
+            del stats["total_time"]
+
+        # ── Per-difficulty breakdown ──
+        by_difficulty: Dict[str, Dict[str, Any]] = {}
+        for log in logs:
+            diff = (log.difficulty or "unknown").lower()
+            if diff not in by_difficulty:
+                by_difficulty[diff] = {"total": 0, "correct": 0, "total_time": 0}
+            by_difficulty[diff]["total"] += 1
+            by_difficulty[diff]["correct"] += 1 if log.is_correct else 0
+            by_difficulty[diff]["total_time"] += log.time_taken_seconds or 0
+
+        for diff, stats in by_difficulty.items():
+            stats["accuracy"] = round(
+                (stats["correct"] / stats["total"]) * 100, 1
+            ) if stats["total"] else 0.0
+            stats["avg_time"] = round(
+                stats["total_time"] / stats["total"], 1
+            ) if stats["total"] else 0.0
+            del stats["total_time"]
+
+        # ── Strengths / weaknesses (min 3 attempts) ──
+        ranked = [
+            (ct, s) for ct, s in by_type.items()
+            if s["total"] >= 3 and ct != "random"
+        ]
+        ranked.sort(key=lambda x: (x[1]["accuracy"], -x[1]["avg_time"]), reverse=True)
+        strengths = [
+            {
+                "type": ct,
+                "accuracy": s["accuracy"],
+                "avg_time": s["avg_time"],
+                "attempts": s["total"],
+                "label": f"Strong at {ct.replace('_', ' ')} "
+                         f"({s['accuracy']}% accuracy)",
+            }
+            for ct, s in ranked[:3]
+            if s["accuracy"] >= 70
+        ]
+        weaknesses = [
+            {
+                "type": ct,
+                "accuracy": s["accuracy"],
+                "avg_time": s["avg_time"],
+                "attempts": s["total"],
+                "label": f"Needs practice: {ct.replace('_', ' ')} "
+                         f"({s['accuracy']}% accuracy)",
+            }
+            for ct, s in reversed(ranked)
+            if s["accuracy"] < 60
+        ][:3]
+
+        # ── Trend: compare newest half vs oldest half of last 20 ──
+        window = list(logs[:PERFORMANCE_WINDOW])
+        trend = "insufficient_data"
+        trend_label = "Not enough data for a trend"
+        if len(window) >= 8:
+            mid = len(window) // 2
+            # logs are expected newest-first
+            recent_half = window[:mid]
+            older_half = window[mid:]
+            r_acc = sum(1 for l in recent_half if l.is_correct) / len(recent_half)
+            o_acc = sum(1 for l in older_half if l.is_correct) / len(older_half)
+            delta = r_acc - o_acc
+            if delta >= 0.1:
+                trend, trend_label = "improving", "Improving — keep it up"
+            elif delta <= -0.1:
+                trend, trend_label = "declining", "Declining — ease difficulty or focus weak types"
+            else:
+                trend, trend_label = "stable", "Stable performance"
+
+        # ── Recommendations ──
+        recommendations = []
+        if weaknesses:
+            weak = weaknesses[0]
+            recommendations.append({
+                "priority": "high",
+                "category": "practice_focus",
+                "title": f"Focus on {weak['type'].replace('_', ' ')} challenges",
+                "detail": (
+                    f"Your accuracy on {weak['type'].replace('_', ' ')} is "
+                    f"{weak['accuracy']}%. Prefer this type in Profile or set "
+                    f"an alarm to this type for targeted practice."
+                ),
+            })
+        if accuracy >= 85 and total >= 8:
+            recommendations.append({
+                "priority": "medium",
+                "category": "difficulty",
+                "title": "Ready for a harder difficulty",
+                "detail": (
+                    f"Overall accuracy is {accuracy}%. Raise your difficulty "
+                    f"preference in Profile — adaptive difficulty will also "
+                    f"nudge you up automatically."
+                ),
+            })
+        elif accuracy < 45 and total >= 5:
+            recommendations.append({
+                "priority": "high",
+                "category": "difficulty",
+                "title": "Lower difficulty temporarily",
+                "detail": (
+                    f"Accuracy is {accuracy}%. Dropping difficulty builds "
+                    f"momentum; adaptive difficulty will also ease challenges."
+                ),
+            })
+        if avg_time > 25 and accuracy < 70:
+            recommendations.append({
+                "priority": "medium",
+                "category": "speed",
+                "title": "Practice faster recalls",
+                "detail": (
+                    f"Average solve time is {avg_time}s. Short memory and math "
+                    f"drills help reduce morning cognitive lag."
+                ),
+            })
+        if strengths and not any(r["category"] == "practice_focus" for r in recommendations):
+            recommendations.append({
+                "priority": "low",
+                "category": "variety",
+                "title": "Keep variety in your challenge mix",
+                "detail": (
+                    f"You're strong at {strengths[0]['type'].replace('_', ' ')}. "
+                    f"Enable Random + preferred types so weaker skills still get practice."
+                ),
+            })
+        if not recommendations:
+            recommendations.append({
+                "priority": "low",
+                "category": "maintain",
+                "title": "You're on track",
+                "detail": (
+                    "Performance looks balanced. Keep completing morning challenges "
+                    "to maintain your streak and habit score."
+                ),
+            })
+
+        insights = []
+        insights.append(
+            f"You completed {correct}/{total} challenges correctly "
+            f"({accuracy}% accuracy) averaging {avg_time}s per attempt."
+        )
+        if strengths:
+            insights.append(strengths[0]["label"] + ".")
+        if weaknesses:
+            insights.append(weaknesses[0]["label"] + ".")
+        insights.append(f"Trend: {trend_label}.")
+
+        # Suggested preferred types: keep strengths + boost weaknesses
+        suggested_types = []
+        for w in weaknesses:
+            if w["type"] not in suggested_types:
+                suggested_types.append(w["type"])
+        for s in strengths:
+            if s["type"] not in suggested_types:
+                suggested_types.append(s["type"])
+        for ct in SELECTABLE_CHALLENGE_TYPES:
+            if ct.value not in suggested_types and len(suggested_types) < 4:
+                suggested_types.append(ct.value)
+
+        return {
+            "summary": {
+                "total_attempts": total,
+                "correct_answers": correct,
+                "accuracy_percentage": accuracy,
+                "avg_response_time": avg_time,
+                "total_points_earned": total_points,
+                "completion_rate": completion_rate,
+                "trend": trend,
+                "trend_label": trend_label,
+            },
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "by_type": by_type,
+            "by_difficulty": by_difficulty,
+            "recommendations": recommendations,
+            "insights": insights,
+            "suggested_preferred_types": suggested_types[:5],
+        }
 
     # ── Time limit per difficulty ────────────────────────────────────
 
@@ -224,10 +641,17 @@ class ChallengeService:
         challenge_type: ChallengeType, difficulty: str = "medium"
     ) -> Dict[str, Any]:
         """Fallback to algorithmic generation if AI fails or key is missing."""
-        if challenge_type == ChallengeType.RIDDLE:
-            return ChallengeService._generate_riddle(difficulty)
-        else:
-            return ChallengeService._generate_math(difficulty)
+        fallbacks = {
+            ChallengeType.LOGIC: ChallengeService._generate_logic,
+            ChallengeType.WORD_GAME: ChallengeService._generate_word_game,
+            ChallengeType.WORD: ChallengeService._generate_word_game,
+            ChallengeType.QUIZ: ChallengeService._generate_quiz,
+            ChallengeType.RIDDLE: ChallengeService._generate_riddle,
+            ChallengeType.PATTERN: ChallengeService._generate_pattern,
+            ChallengeType.MEMORY: ChallengeService._generate_memory,
+        }
+        generator = fallbacks.get(challenge_type, ChallengeService._generate_math)
+        return generator(difficulty)
 
     # ── MATH generator (difficulty-aware) ────────────────────────────
 
@@ -516,6 +940,412 @@ class ChallengeService:
             "options": options,
         }
 
+    # ── LOGIC generator (difficulty-aware) ───────────────────────────
+
+    @staticmethod
+    def _generate_logic(difficulty: str = "medium") -> Dict[str, Any]:
+        """
+        Generate a logic puzzle scaled to difficulty.
+
+        Variants: odd-one-out, analogies, syllogisms, and ranking puzzles.
+        """
+        difficulty = _clamp_difficulty(difficulty)
+
+        easy = [
+            {
+                "q": "Which number does not belong? 2, 4, 6, 9, 8",
+                "a": "9",
+                "opts": ["9", "2", "6", "8"],
+            },
+            {
+                "q": "If all roses are flowers and some flowers fade quickly, "
+                     "which statement must be true?",
+                "a": "Some roses may fade quickly",
+                "opts": [
+                    "Some roses may fade quickly",
+                    "All flowers are roses",
+                    "No roses fade",
+                    "All roses fade quickly",
+                ],
+            },
+            {
+                "q": "Complete the analogy: Cat is to Kitten as Dog is to ?",
+                "a": "Puppy",
+                "opts": ["Puppy", "Cub", "Foal", "Calf"],
+            },
+            {
+                "q": "Which word does not belong? Apple, Banana, Carrot, Mango",
+                "a": "Carrot",
+                "opts": ["Carrot", "Apple", "Banana", "Mango"],
+            },
+            {
+                "q": "If today is Wednesday, what day will it be in 4 days?",
+                "a": "Sunday",
+                "opts": ["Sunday", "Saturday", "Monday", "Friday"],
+            },
+            {
+                "q": "A is taller than B. B is taller than C. Who is shortest?",
+                "a": "C",
+                "opts": ["C", "A", "B", "Cannot tell"],
+            },
+        ]
+
+        medium = [
+            {
+                "q": "All A are B. Some B are C. Which conclusion follows?",
+                "a": "Some A may be C",
+                "opts": [
+                    "Some A may be C",
+                    "All A are C",
+                    "No A are C",
+                    "All C are A",
+                ],
+            },
+            {
+                "q": "Find the odd one out: Square, Circle, Triangle, Cube",
+                "a": "Cube",
+                "opts": ["Cube", "Square", "Circle", "Triangle"],
+            },
+            {
+                "q": "If 3 pens cost $6, how many pens can you buy for $20?",
+                "a": "10",
+                "opts": ["10", "9", "12", "8"],
+            },
+            {
+                "q": "Book is to Reading as Fork is to ?",
+                "a": "Eating",
+                "opts": ["Eating", "Cooking", "Spoon", "Kitchen"],
+            },
+            {
+                "q": "Which comes next in the letter series? A, C, F, J, ?",
+                "a": "O",
+                "opts": ["O", "N", "M", "P"],
+            },
+            {
+                "q": "Tom is older than Sue. Sue is older than Mia. "
+                     "Who is the youngest?",
+                "a": "Mia",
+                "opts": ["Mia", "Sue", "Tom", "Cannot tell"],
+            },
+            {
+                "q": "If only one statement is true: "
+                     "(1) The answer is 12  (2) The answer is 15  "
+                     "(3) The answer is not 12  — which is correct?",
+                "a": "15",
+                "opts": ["15", "12", "Neither", "Both 12 and 15"],
+            },
+        ]
+
+        hard = [
+            {
+                "q": "In a race, Amy finished before Ben. Ben finished before "
+                     "Cara. Dana finished after Cara. Who finished last?",
+                "a": "Dana",
+                "opts": ["Dana", "Cara", "Ben", "Amy"],
+            },
+            {
+                "q": "If no heroes are cowards and some soldiers are cowards, "
+                     "which must be true?",
+                "a": "Some soldiers are not heroes",
+                "opts": [
+                    "Some soldiers are not heroes",
+                    "All soldiers are heroes",
+                    "No soldiers are heroes",
+                    "All heroes are soldiers",
+                ],
+            },
+            {
+                "q": "Which number completes the series? 2, 6, 12, 20, 30, ?",
+                "a": "42",
+                "opts": ["42", "40", "36", "48"],
+            },
+            {
+                "q": "Five friends sit in a row. Ava is not at either end. "
+                     "Ben sits to the immediate left of Ava. "
+                     "Cara sits at the right end. Who can sit at the left end?",
+                "a": "Dan or Eve",
+                "opts": ["Dan or Eve", "Ava", "Ben", "Cara"],
+            },
+            {
+                "q": "If RED = 27 and BLUE = 37, what is GREEN equal to? "
+                     "(A=1 … Z=26, sum of letter values)",
+                "a": "49",
+                "opts": ["49", "47", "52", "44"],
+            },
+            {
+                "q": "A clock shows 3:15. What is the angle between the hour "
+                     "and minute hands?",
+                "a": "7.5°",
+                "opts": ["7.5°", "0°", "15°", "30°"],
+            },
+        ]
+
+        expert = [
+            {
+                "q": "Exactly one of these is true: "
+                     "(A) Answer is 8  (B) Answer is 11  "
+                     "(C) Answer is not 8  (D) Answer is 14. What is the answer?",
+                "a": "11",
+                "opts": ["11", "8", "14", "Cannot determine"],
+            },
+            {
+                "q": "Three boxes: one has apples, one has oranges, one has both. "
+                     "All labels are wrong. The box labeled 'Apples' has oranges. "
+                     "What is in the box labeled 'Both'?",
+                "a": "Apples",
+                "opts": ["Apples", "Oranges", "Both", "Empty"],
+            },
+            {
+                "q": "Which letter comes next? Z, X, U, Q, L, ?",
+                "a": "F",
+                "opts": ["F", "G", "E", "H"],
+            },
+            {
+                "q": "If P ⇒ Q and ¬Q, what follows?",
+                "a": "¬P",
+                "opts": ["¬P", "P", "Q", "Nothing"],
+            },
+            {
+                "q": "A farmer has chickens and cows. Together they have 30 heads "
+                     "and 86 legs. How many chickens?",
+                "a": "17",
+                "opts": ["17", "13", "15", "20"],
+            },
+        ]
+
+        if difficulty in ("beginner", "easy"):
+            pool = easy
+        elif difficulty == "medium":
+            pool = easy + medium
+        elif difficulty == "hard":
+            pool = medium + hard
+        else:
+            pool = hard + expert
+
+        chosen = random.choice(pool)
+        options = chosen["opts"][:]
+        random.shuffle(options)
+
+        return {
+            "type": "LOGIC",
+            "prompt": chosen["q"],
+            "answer": chosen["a"],
+            "options": options,
+        }
+
+    # ── WORD GAME generator (difficulty-aware) ───────────────────────
+
+    @staticmethod
+    def _generate_word_game(difficulty: str = "medium") -> Dict[str, Any]:
+        """
+        Generate a word puzzle: unscramble, missing letter, or odd-word-out.
+        """
+        difficulty = _clamp_difficulty(difficulty)
+
+        # (word, distractors for multiple choice)
+        easy_words = [
+            ("CAT", ["ACT", "TAC", "CTA"]),
+            ("DOG", ["GOD", "ODG", "DGO"]),
+            ("SUN", ["NUS", "USN", "NSU"]),
+            ("BOOK", ["KOOB", "OBOK", "BOKO"]),
+            ("TREE", ["REET", "ETER", "ERTE"]),
+            ("FISH", ["HSIF", "SIHF", "IFHS"]),
+            ("MOON", ["NOOM", "OMON", "ONOM"]),
+            ("STAR", ["RATS", "TARS", "ARST"]),
+        ]
+
+        medium_words = [
+            ("APPLE", ["PAPLE", "ALPEP", "PELPA"]),
+            ("HOUSE", ["SEUOH", "HUOSE", "OSEUH"]),
+            ("WATER", ["RETAW", "TAWER", "AWRET"]),
+            ("LIGHT", ["THGIL", "GLITH", "LGIHT"]),
+            ("MUSIC", ["CISUM", "MUISC", "SICUM"]),
+            ("BRAIN", ["NIARB", "RABIN", "AIRBN"]),
+            ("CLOCK", ["KCOLC", "COLCK", "LCOKC"]),
+            ("PLANT", ["TNALP", "LAPTN", "NAPLT"]),
+        ]
+
+        hard_words = [
+            ("PUZZLE", ["ZELPUP", "PUZZEL", "ZLPEUZ"]),
+            ("ORANGE", ["EGNARO", "ORGNAE", "NAROGE"]),
+            ("PLANET", ["TENALP", "PLENTA", "NEPTAL"]),
+            ("GUITAR", ["RATIUG", "GIUTAR", "TARIGU"]),
+            ("BRIDGE", ["EGDIRB", "BRIDEG", "DIRBGE"]),
+            ("CASTLE", ["ELTASC", "CASLTE", "TLECAS"]),
+            ("WINTER", ["RETNIW", "WINTRE", "TINWER"]),
+            ("SILVER", ["REVILS", "SILVRE", "VILSER"]),
+        ]
+
+        expert_words = [
+            ("MYSTERY", ["YRETSMY", "MYSETRY", "TERYSMY"]),
+            ("JOURNEY", ["YENRUOJ", "JOURENY", "RUOJNEY"]),
+            ("FREEDOM", ["MODEERF", "FREDEOM", "EDOMERF"]),
+            ("CRYSTAL", ["LATSYRC", "CRYSTLA", "STYRALC"]),
+            ("PHANTOM", ["MOTNAHP", "PHANTMO", "THANPOM"]),
+            ("WHISPER", ["REPSIHW", "WHISPRE", "SIPREHW"]),
+            ("GALAXY", ["YXALAG", "AXALGY", "GLAXAY"]),
+            ("ECLIPSE", ["ESPILCE", "ECLISPE", "CLIPSEE"]),
+        ]
+
+        if difficulty in ("beginner", "easy"):
+            word_pool = easy_words
+            variant_weights = ["unscramble", "unscramble", "odd_out"]
+        elif difficulty == "medium":
+            word_pool = medium_words
+            variant_weights = ["unscramble", "missing", "odd_out"]
+        elif difficulty == "hard":
+            word_pool = hard_words
+            variant_weights = ["unscramble", "missing", "anagram_hint"]
+        else:
+            word_pool = expert_words
+            variant_weights = ["unscramble", "anagram_hint", "missing"]
+
+        variant = random.choice(variant_weights)
+
+        if variant == "odd_out":
+            odd_sets = [
+                ("Which word does not belong?", "Blue", ["Blue", "Red", "Green", "Chair"]),
+                ("Which word does not belong?", "Banana", ["Dog", "Cat", "Bird", "Banana"]),
+                ("Which word does not belong?", "Shoe", ["Shoe", "Car", "Bus", "Train"]),
+                ("Which word does not belong?", "Pencil", ["Apple", "Orange", "Grape", "Pencil"]),
+                ("Which word does not belong?", "Happy", ["Happy", "Table", "Chair", "Desk"]),
+            ]
+            prompt, answer, options = random.choice(odd_sets)
+            opts = options[:]
+            random.shuffle(opts)
+            return {
+                "type": "WORD_GAME",
+                "prompt": prompt + " " + ", ".join(options),
+                "answer": answer,
+                "options": opts,
+            }
+
+        word, distractors = random.choice(word_pool)
+        scrambled = "".join(random.sample(list(word), len(word)))
+        # Ensure scramble is actually different when possible
+        for _ in range(10):
+            if scrambled != word:
+                break
+            scrambled = "".join(random.sample(list(word), len(word)))
+
+        if variant == "missing":
+            idx = random.randint(0, len(word) - 1)
+            blanked = word[:idx] + "_" + word[idx + 1 :]
+            answer = word[idx]
+            # Letter options including correct
+            alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            wrong = set()
+            while len(wrong) < 3:
+                ch = random.choice(alphabet)
+                if ch != answer:
+                    wrong.add(ch)
+            options = [answer] + list(wrong)
+            random.shuffle(options)
+            return {
+                "type": "WORD_GAME",
+                "prompt": f"Fill in the missing letter: {blanked}",
+                "answer": answer,
+                "options": options,
+            }
+
+        if variant == "anagram_hint":
+            hint = f"(starts with {word[0]}, {len(word)} letters)"
+            prompt = f"Unscramble: {scrambled} {hint}"
+        else:
+            prompt = f"Unscramble the word: {scrambled}"
+
+        options = [word] + distractors[:3]
+        # Ensure unique options
+        options = list(dict.fromkeys(options))
+        while len(options) < 4:
+            # pad with letter-swapped decoys
+            chars = list(word)
+            i, j = random.sample(range(len(chars)), 2)
+            chars[i], chars[j] = chars[j], chars[i]
+            decoy = "".join(chars)
+            if decoy != word and decoy not in options:
+                options.append(decoy)
+        options = options[:4]
+        random.shuffle(options)
+
+        return {
+            "type": "WORD_GAME",
+            "prompt": prompt,
+            "answer": word,
+            "options": options,
+        }
+
+    # ── QUIZ generator (difficulty-aware) ────────────────────────────
+
+    @staticmethod
+    def _generate_quiz(difficulty: str = "medium") -> Dict[str, Any]:
+        """Generate a quick general-knowledge quiz question."""
+        difficulty = _clamp_difficulty(difficulty)
+
+        easy = [
+            {"q": "How many days are in a week?", "a": "7", "opts": ["7", "5", "6", "8"]},
+            {"q": "What color do you get by mixing red and white?", "a": "Pink", "opts": ["Pink", "Purple", "Orange", "Brown"]},
+            {"q": "How many continents are there?", "a": "7", "opts": ["7", "5", "6", "8"]},
+            {"q": "What is the capital of France?", "a": "Paris", "opts": ["Paris", "London", "Rome", "Berlin"]},
+            {"q": "How many sides does a triangle have?", "a": "3", "opts": ["3", "4", "5", "2"]},
+            {"q": "Which planet is known as the Red Planet?", "a": "Mars", "opts": ["Mars", "Venus", "Jupiter", "Mercury"]},
+            {"q": "What do bees produce?", "a": "Honey", "opts": ["Honey", "Milk", "Silk", "Wax only"]},
+            {"q": "How many hours are in a day?", "a": "24", "opts": ["24", "12", "48", "60"]},
+        ]
+
+        medium = [
+            {"q": "What is the chemical symbol for water?", "a": "H2O", "opts": ["H2O", "CO2", "O2", "NaCl"]},
+            {"q": "Who painted the Mona Lisa?", "a": "Leonardo da Vinci", "opts": ["Leonardo da Vinci", "Michelangelo", "Picasso", "Van Gogh"]},
+            {"q": "What is the largest ocean on Earth?", "a": "Pacific", "opts": ["Pacific", "Atlantic", "Indian", "Arctic"]},
+            {"q": "How many bones are in the adult human body?", "a": "206", "opts": ["206", "198", "250", "180"]},
+            {"q": "What gas do plants absorb from the air?", "a": "Carbon dioxide", "opts": ["Carbon dioxide", "Oxygen", "Nitrogen", "Helium"]},
+            {"q": "Which country is home to the kangaroo?", "a": "Australia", "opts": ["Australia", "Brazil", "India", "South Africa"]},
+            {"q": "What is the square root of 81?", "a": "9", "opts": ["9", "8", "7", "10"]},
+            {"q": "In which sport is the term 'love' used for a score of zero?", "a": "Tennis", "opts": ["Tennis", "Golf", "Soccer", "Cricket"]},
+        ]
+
+        hard = [
+            {"q": "What year did World War II end?", "a": "1945", "opts": ["1945", "1944", "1939", "1948"]},
+            {"q": "What is the hardest natural substance on Earth?", "a": "Diamond", "opts": ["Diamond", "Gold", "Iron", "Quartz"]},
+            {"q": "Which element has the chemical symbol Au?", "a": "Gold", "opts": ["Gold", "Silver", "Aluminum", "Argon"]},
+            {"q": "What is the smallest prime number?", "a": "2", "opts": ["2", "1", "3", "0"]},
+            {"q": "Who developed the theory of relativity?", "a": "Albert Einstein", "opts": ["Albert Einstein", "Newton", "Tesla", "Hawking"]},
+            {"q": "What is the capital of Canada?", "a": "Ottawa", "opts": ["Ottawa", "Toronto", "Vancouver", "Montreal"]},
+            {"q": "How many chambers does a human heart have?", "a": "4", "opts": ["4", "2", "3", "5"]},
+            {"q": "Which planet has the most moons?", "a": "Saturn", "opts": ["Saturn", "Jupiter", "Uranus", "Neptune"]},
+        ]
+
+        expert = [
+            {"q": "What is the powerhouse of the cell?", "a": "Mitochondria", "opts": ["Mitochondria", "Nucleus", "Ribosome", "Chloroplast"]},
+            {"q": "What is the speed of light in vacuum (approx.)?", "a": "300,000 km/s", "opts": ["300,000 km/s", "150,000 km/s", "30,000 km/s", "3,000 km/s"]},
+            {"q": "Which mathematician invented calculus independently of Newton?", "a": "Leibniz", "opts": ["Leibniz", "Euler", "Gauss", "Pascal"]},
+            {"q": "What is the chemical formula for table salt?", "a": "NaCl", "opts": ["NaCl", "KCl", "NaOH", "CaCO3"]},
+            {"q": "In which year did the Titanic sink?", "a": "1912", "opts": ["1912", "1910", "1914", "1905"]},
+            {"q": "What is the largest internal organ in the human body?", "a": "Liver", "opts": ["Liver", "Lungs", "Brain", "Stomach"]},
+            {"q": "Which composer wrote 'The Four Seasons'?", "a": "Vivaldi", "opts": ["Vivaldi", "Bach", "Mozart", "Beethoven"]},
+            {"q": "What does DNA stand for?", "a": "Deoxyribonucleic acid", "opts": ["Deoxyribonucleic acid", "Dinucleic acid", "Deoxyribose acid", "Dual nucleic acid"]},
+        ]
+
+        if difficulty in ("beginner", "easy"):
+            pool = easy
+        elif difficulty == "medium":
+            pool = easy + medium
+        elif difficulty == "hard":
+            pool = medium + hard
+        else:
+            pool = hard + expert
+
+        chosen = random.choice(pool)
+        options = chosen["opts"][:]
+        random.shuffle(options)
+
+        return {
+            "type": "QUIZ",
+            "prompt": chosen["q"],
+            "answer": chosen["a"],
+            "options": options,
+        }
+
     # ── Options generator ────────────────────────────────────────────
 
     @staticmethod
@@ -537,13 +1367,48 @@ class ChallengeService:
     # ── Active challenge sessions (DB-backed) ─────────────────────────
 
     @staticmethod
+    def _session_to_dict(row) -> Dict[str, Any]:
+        """Serialize a ChallengeSession ORM row to a plain dict."""
+        issued_at = row.issued_at
+        if issued_at is not None and issued_at.tzinfo is None:
+            issued_at = issued_at.replace(tzinfo=timezone.utc)
+        started = getattr(row, "session_started_at", None) or issued_at
+        if started is not None and started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return {
+            "answer": row.answer,
+            "prompt": row.prompt or "",
+            "challenge_type": (getattr(row, "challenge_type", None) or "math").lower(),
+            "difficulty": row.difficulty or "medium",
+            "time_limit_seconds": int(row.time_limit_seconds or 30),
+            "issued_at": issued_at,
+            "consecutive_correct": int(getattr(row, "consecutive_correct", 0) or 0),
+            "required_correct": int(getattr(row, "required_correct", 1) or 1),
+            "total_failed_attempts": int(
+                getattr(row, "total_failed_attempts", 0) or 0
+            ),
+            "escalation_level": int(getattr(row, "escalation_level", 0) or 0),
+            "verification_token": getattr(row, "verification_token", None),
+            "wake_confirmed": bool(getattr(row, "wake_confirmed", False)),
+            "session_started_at": started,
+        }
+
+    @staticmethod
     def store_challenge_session(
         user_id: int,
         alarm_id: int,
         challenge: Dict[str, Any],
         db: "Session",
-    ) -> None:
-        """Persist the issued challenge so verify can trust server state."""
+        *,
+        required_correct: Optional[int] = None,
+        escalation_level: Optional[int] = None,
+        reset_progress: bool = False,
+    ) -> Dict[str, Any]:
+        """Persist the issued challenge so verify can trust server state.
+
+        Preserves consecutive-correct progress across puzzle refreshes unless
+        ``reset_progress`` is True (e.g. new ring cycle after snooze).
+        """
         from app.models.challenge_session import ChallengeSession
 
         row = (
@@ -555,25 +1420,53 @@ class ChallengeService:
             .first()
         )
         issued_at = datetime.now(timezone.utc)
-        payload = {
+        puzzle = {
             "answer": str(challenge.get("answer", "")),
             "prompt": challenge.get("prompt") or "",
+            "challenge_type": str(
+                challenge.get("type") or challenge.get("challenge_type") or "math"
+            ).lower(),
             "difficulty": challenge.get("difficulty") or "medium",
             "time_limit_seconds": int(challenge.get("time_limit_seconds") or 30),
             "issued_at": issued_at,
+            # New puzzle invalidates any prior dismiss token
+            "verification_token": None,
+            "wake_confirmed": False,
         }
         if row:
-            for key, value in payload.items():
+            for key, value in puzzle.items():
                 setattr(row, key, value)
+            if required_correct is not None:
+                row.required_correct = max(1, int(required_correct))
+            if escalation_level is not None:
+                row.escalation_level = max(0, int(escalation_level))
+            if reset_progress:
+                row.consecutive_correct = 0
+                row.total_failed_attempts = 0
+                row.session_started_at = issued_at
         else:
             db.add(
                 ChallengeSession(
                     user_id=user_id,
                     alarm_id=alarm_id,
-                    **payload,
+                    consecutive_correct=0,
+                    required_correct=max(1, int(required_correct or 1)),
+                    total_failed_attempts=0,
+                    escalation_level=max(0, int(escalation_level or 0)),
+                    session_started_at=issued_at,
+                    **puzzle,
                 )
             )
         db.commit()
+        row = (
+            db.query(ChallengeSession)
+            .filter(
+                ChallengeSession.user_id == user_id,
+                ChallengeSession.alarm_id == alarm_id,
+            )
+            .first()
+        )
+        return ChallengeService._session_to_dict(row)
 
     @staticmethod
     def get_challenge_session(
@@ -592,16 +1485,90 @@ class ChallengeService:
         )
         if not row:
             return None
-        issued_at = row.issued_at
-        if issued_at is not None and issued_at.tzinfo is None:
-            issued_at = issued_at.replace(tzinfo=timezone.utc)
-        return {
-            "answer": row.answer,
-            "prompt": row.prompt or "",
-            "difficulty": row.difficulty or "medium",
-            "time_limit_seconds": int(row.time_limit_seconds or 30),
-            "issued_at": issued_at,
-        }
+        return ChallengeService._session_to_dict(row)
+
+    @staticmethod
+    def clear_puzzle_fields(user_id: int, alarm_id: int, db: "Session") -> None:
+        """Invalidate the active puzzle answer while keeping verification progress."""
+        from app.models.challenge_session import ChallengeSession
+
+        row = (
+            db.query(ChallengeSession)
+            .filter(
+                ChallengeSession.user_id == user_id,
+                ChallengeSession.alarm_id == alarm_id,
+            )
+            .first()
+        )
+        if not row:
+            return
+        row.answer = ""
+        row.prompt = ""
+        row.issued_at = datetime.now(timezone.utc)
+        db.commit()
+
+    @staticmethod
+    def record_correct_step(
+        user_id: int, alarm_id: int, db: "Session"
+    ) -> Dict[str, Any]:
+        """Increment consecutive-correct progress after a verified correct answer."""
+        from app.models.challenge_session import ChallengeSession
+        import secrets
+
+        row = (
+            db.query(ChallengeSession)
+            .filter(
+                ChallengeSession.user_id == user_id,
+                ChallengeSession.alarm_id == alarm_id,
+            )
+            .first()
+        )
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active challenge session.",
+            )
+        row.consecutive_correct = int(row.consecutive_correct or 0) + 1
+        # Consume puzzle so it cannot be replayed
+        row.answer = ""
+        row.prompt = ""
+        required = max(1, int(row.required_correct or 1))
+        if row.consecutive_correct >= required:
+            row.verification_token = secrets.token_urlsafe(24)
+            row.wake_confirmed = True
+        db.commit()
+        return ChallengeService._session_to_dict(row)
+
+    @staticmethod
+    def record_failed_attempt(
+        user_id: int, alarm_id: int, db: "Session", *, reset_streak: bool = True
+    ) -> Dict[str, Any]:
+        """Record a wrong/timeout attempt and reset consecutive streak."""
+        from app.models.challenge_session import ChallengeSession
+
+        row = (
+            db.query(ChallengeSession)
+            .filter(
+                ChallengeSession.user_id == user_id,
+                ChallengeSession.alarm_id == alarm_id,
+            )
+            .first()
+        )
+        if not row:
+            return {
+                "consecutive_correct": 0,
+                "required_correct": 1,
+                "total_failed_attempts": 1,
+            }
+        row.total_failed_attempts = int(row.total_failed_attempts or 0) + 1
+        if reset_streak:
+            row.consecutive_correct = 0
+        row.answer = ""
+        row.prompt = ""
+        row.verification_token = None
+        row.wake_confirmed = False
+        db.commit()
+        return ChallengeService._session_to_dict(row)
 
     @staticmethod
     def clear_challenge_session(
@@ -615,6 +1582,84 @@ class ChallengeService:
             ChallengeSession.alarm_id == alarm_id,
         ).delete()
         db.commit()
+
+    @staticmethod
+    def escalate_difficulty(base_difficulty: str, escalation_level: int) -> str:
+        """Raise difficulty by one level per snooze (capped at expert)."""
+        idx = _difficulty_index(base_difficulty)
+        idx = min(len(DIFFICULTY_LEVELS) - 1, idx + max(0, int(escalation_level or 0)))
+        return DIFFICULTY_LEVELS[idx]
+
+    @staticmethod
+    def assess_wakefulness(
+        *,
+        consecutive_correct: int,
+        required_correct: int,
+        failed_attempts: int,
+        time_taken_seconds: int,
+        time_limit_seconds: int,
+        recent_accuracy: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Score cognitive wakefulness from verification performance (0–100)."""
+        required = max(1, int(required_correct or 1))
+        consecutive = max(0, int(consecutive_correct or 0))
+        failed = max(0, int(failed_attempts or 0))
+        limit = max(1, int(time_limit_seconds or 30))
+        taken = max(0, int(time_taken_seconds or 0))
+
+        completion_ratio = min(1.0, consecutive / required)
+        speed_ratio = max(0.0, min(1.0, (limit - taken) / limit))
+        fail_penalty = min(40.0, failed * 8.0)
+        accuracy_bonus = 0.0
+        if recent_accuracy is not None:
+            accuracy_bonus = max(0.0, min(15.0, (float(recent_accuracy) - 50.0) * 0.3))
+
+        score = (
+            completion_ratio * 55.0
+            + speed_ratio * 30.0
+            + accuracy_bonus
+            - fail_penalty
+        )
+        score = round(max(0.0, min(100.0, score)), 1)
+
+        if score >= 80:
+            level = "sharp"
+        elif score >= 55:
+            level = "alert"
+        elif score >= 30:
+            level = "groggy"
+        else:
+            level = "drowsy"
+
+        return {
+            "score": score,
+            "level": level,
+            "factors": {
+                "completion_ratio": round(completion_ratio, 2),
+                "speed_ratio": round(speed_ratio, 2),
+                "failed_attempts": failed,
+                "fail_penalty": fail_penalty,
+                "accuracy_bonus": round(accuracy_bonus, 1),
+            },
+        }
+
+    @staticmethod
+    def public_challenge_payload(
+        challenge: Dict[str, Any],
+        *,
+        consecutive_correct: int = 0,
+        required_correct: int = 1,
+        escalation_level: int = 0,
+    ) -> Dict[str, Any]:
+        """Return challenge data safe for clients (no answer)."""
+        payload = {k: v for k, v in challenge.items() if k != "answer"}
+        payload["current_step"] = int(consecutive_correct) + 1
+        payload["total_steps"] = max(1, int(required_correct or 1))
+        payload["consecutive_correct"] = int(consecutive_correct)
+        payload["required_correct"] = max(1, int(required_correct or 1))
+        payload["escalation_level"] = int(escalation_level or 0)
+        payload["requires_consecutive"] = True
+        return payload
 
     # ── Answer verification ──────────────────────────────────────────
 

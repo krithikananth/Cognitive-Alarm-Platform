@@ -213,7 +213,7 @@ export default function Dashboard() {
           <div className="space-y-3">
             <QuickAction icon={HiOutlinePlus} label="Create Alarm" to="/alarms" color="primary" />
             <QuickAction icon={HiOutlinePuzzlePiece} label="Practice Challenge" onClick={() => toast.success('Practice mode coming soon!')} color="accent" />
-            <QuickAction icon={HiOutlineChartBar} label="View Analytics" to="/profile" color="emerald" />
+            <QuickAction icon={HiOutlineChartBar} label="View Analytics" to="/analytics" color="emerald" />
             <QuickAction icon={HiOutlineTrophy} label="Habit Tracker" to="/profile" color="orange" />
           </div>
 

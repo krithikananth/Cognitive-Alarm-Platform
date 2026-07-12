@@ -22,6 +22,7 @@ const ALARM_TYPES = [
 ];
 
 const CHALLENGE_TYPES = [
+  { value: 'random', label: '🎲 Random' },
   { value: 'math', label: '🔢 Math' },
   { value: 'logic', label: '🧩 Logic' },
   { value: 'memory', label: '🧠 Memory' },
@@ -195,11 +196,14 @@ export default function AlarmManager() {
                 <div className="flex items-center gap-4 mt-3 text-xs text-slate-400">
                   <span className="flex items-center gap-1">
                     <HiOutlineBell className="w-3.5 h-3.5" />
-                    Snooze: {alarm.snooze_limit}x
+                    {alarm.snooze_limit === 0
+                      ? 'Anti-snooze'
+                      : `Snooze: ${alarm.snooze_limit}x`}
                   </span>
                   <span className="flex items-center gap-1">
                     <HiOutlinePuzzlePiece className="w-3.5 h-3.5" />
                     {alarm.challenge_type || 'Any'}
+                    {alarm.challenge_count > 1 ? ` ×${alarm.challenge_count}` : ''}
                   </span>
                 </div>
 
@@ -254,8 +258,9 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
       label: alarm.label || '',
       alarm_time: alarm.alarm_time?.slice(0, 5) || '07:00',
       alarm_type: alarm.alarm_type || 'daily',
-      challenge_type: alarm.challenge_type || 'math',
+      challenge_type: alarm.challenge_type || 'random',
       challenge_difficulty: alarm.challenge_difficulty || 'medium',
+      challenge_count: alarm.challenge_count ?? 1,
       snooze_limit: alarm.snooze_limit ?? 3,
       snooze_interval_minutes: alarm.snooze_interval_minutes ?? 5,
       one_time_date: alarm.one_time_date || '',
@@ -263,8 +268,9 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
       label: '',
       alarm_time: '07:00',
       alarm_type: 'daily',
-      challenge_type: 'math',
+      challenge_type: 'random',
       challenge_difficulty: 'medium',
+      challenge_count: 1,
       snooze_limit: 3,
       snooze_interval_minutes: 5,
       one_time_date: '',
@@ -293,6 +299,8 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
       alarm_time: data.alarm_time,
       alarm_type: data.alarm_type,
       challenge_type: data.challenge_type === 'word' ? 'word_game' : data.challenge_type,
+      challenge_difficulty: data.challenge_difficulty || 'medium',
+      challenge_count: parseInt(data.challenge_count, 10) || 1,
       snooze_limit: parseInt(data.snooze_limit, 10),
       snooze_interval_minutes: parseInt(data.snooze_interval_minutes, 10),
       one_time_date: data.alarm_type === 'one_time' ? data.one_time_date : null,
@@ -472,15 +480,36 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
             </div>
           </div>
 
-          {/* Snooze Settings */}
+          {/* Consecutive challenges required to dismiss */}
+          <div>
+            <label className="label">Challenges to Dismiss (consecutive)</label>
+            <input
+              type="number"
+              min="1"
+              max="10"
+              className="input"
+              {...register('challenge_count')}
+            />
+            <p className="text-[11px] text-slate-500 mt-1">
+              Wrong answers reset the streak — you must solve this many in a row.
+            </p>
+          </div>
+
+          {/* Anti-snooze settings */}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="label">Max Snoozes</label>
               <input type="number" min="0" max="10" className="input" {...register('snooze_limit')} />
+              <p className="text-[11px] text-slate-500 mt-1">
+                0 = anti-snooze (no snoozing). Each snooze raises challenge difficulty.
+              </p>
             </div>
             <div>
               <label className="label">Snooze Interval (min)</label>
               <input type="number" min="1" max="30" className="input" {...register('snooze_interval_minutes')} />
+              <p className="text-[11px] text-slate-500 mt-1">
+                Delay before the alarm re-rings after a snooze.
+              </p>
             </div>
           </div>
 

@@ -13,6 +13,7 @@ import OAuthCallback from './pages/OAuthCallback';
 import Dashboard from './pages/Dashboard';
 import AlarmManager from './pages/AlarmManager';
 import Profile from './pages/Profile';
+import Analytics from './pages/Analytics';
 import AdminDashboard from './pages/AdminDashboard';
 import Layout from './components/Layout';
 
@@ -56,39 +57,41 @@ function AlarmWatcher() {
   // Check every 5 seconds if any alarm should ring
   React.useEffect(() => {
     if (!isAuthenticated || isRinging) return;
-    
+
     const checkAlarms = () => {
       const now = new Date();
-      
+
       for (const alarm of alarms) {
         if (!alarm.is_active || !alarm.next_trigger_at) continue;
-        if (firedRef.current.has(alarm.id)) continue;
-        
+
+        // Key by id + trigger time so snooze / next-day re-rings work
+        const fireKey = `${alarm.id}:${alarm.next_trigger_at}`;
+        if (firedRef.current.has(fireKey)) continue;
+
         // Backend returns UTC datetime — ensure proper parsing
         let triggerTimeStr = alarm.next_trigger_at;
-        // If the string doesn't end with 'Z' or contain timezone info, treat as UTC
-        if (!triggerTimeStr.endsWith('Z') && !triggerTimeStr.includes('+') && !triggerTimeStr.includes('-', 10)) {
+        if (
+          !triggerTimeStr.endsWith('Z') &&
+          !triggerTimeStr.includes('+') &&
+          !triggerTimeStr.includes('-', 10)
+        ) {
           triggerTimeStr += 'Z';
         }
         const triggerTime = new Date(triggerTimeStr);
-        
-        // Compare: current time vs trigger time
         const diffMs = now.getTime() - triggerTime.getTime();
-        
+
         // Trigger if we're within 0 to 120 seconds past the trigger time
         if (diffMs >= 0 && diffMs < 120000) {
-          console.log(`[AlarmWatcher] Triggering alarm ${alarm.id}: now=${now.toISOString()}, trigger=${triggerTime.toISOString()}, diff=${diffMs}ms`);
-          firedRef.current.add(alarm.id);
+          firedRef.current.add(fireKey);
           triggerAlarm(alarm.id);
           break;
         }
       }
     };
-    
-    // Check immediately on mount
+
     checkAlarms();
     const interval = setInterval(checkAlarms, 5000);
-    
+
     return () => clearInterval(interval);
   }, [alarms, isAuthenticated, isRinging, triggerAlarm]);
   
@@ -125,6 +128,7 @@ function App() {
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="alarms" element={<AlarmManager />} />
+          <Route path="analytics" element={<Analytics />} />
           <Route path="profile" element={<Profile />} />
           <Route path="admin" element={<AdminDashboard />} />
         </Route>

@@ -17,6 +17,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.profile import UserProfile
 from app.models.alarm import Alarm, AlarmType, ChallengeType, AlarmChallengeLog
+from app.models.alarm_wake_event import AlarmWakeEvent
 from app.services.challenge_service import ChallengeService, VERIFY_TIME_GRACE_SECONDS
 from app.schemas.alarm import (
     AlarmCreate,
@@ -24,6 +25,7 @@ from app.schemas.alarm import (
     AlarmResponse,
     AlarmListResponse,
     AlarmToggle,
+    SnoozeInfoResponse,
 )
 from app.api.deps import get_current_user
 
@@ -87,6 +89,7 @@ def create_alarm(
         snooze_interval_minutes=alarm_data.snooze_interval_minutes,
         challenge_type=challenge_type,
         challenge_count=alarm_data.challenge_count,
+        challenge_difficulty=alarm_data.challenge_difficulty,
         volume=alarm_data.volume,
         vibrate=alarm_data.vibrate,
         label=alarm_data.label,
@@ -165,6 +168,133 @@ def get_upcoming_alarms(
         .all()
     )
     return alarms
+
+
+@router.get(
+    "/wake-confirmations",
+    summary="List wake-up confirmation events",
+)
+def list_wake_confirmations(
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return recent verified wake-up events for the current user."""
+    events = (
+        db.query(AlarmWakeEvent)
+        .filter(AlarmWakeEvent.user_id == current_user.id)
+        .order_by(AlarmWakeEvent.dismissed_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "total": len(events),
+        "events": [
+            {
+                "id": e.id,
+                "alarm_id": e.alarm_id,
+                "triggered_at": e.triggered_at,
+                "dismissed_at": e.dismissed_at,
+                "dismiss_method": e.dismiss_method,
+                "challenges_required": e.challenges_required,
+                "challenges_completed": e.challenges_completed,
+                "consecutive_correct": e.consecutive_correct,
+                "failed_attempts": e.failed_attempts,
+                "snooze_count_at_dismiss": e.snooze_count_at_dismiss,
+                "time_to_dismiss_seconds": e.time_to_dismiss_seconds,
+                "wakefulness_score": e.wakefulness_score,
+                "wakefulness_level": e.wakefulness_level,
+                "verified": e.verified,
+            }
+            for e in events
+        ],
+    }
+
+
+@router.get(
+    "/wakefulness",
+    summary="Assess current wakefulness from recent performance",
+)
+def get_wakefulness_assessment(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cognitive wakefulness assessment from recent challenge + wake events."""
+    recent_logs = (
+        db.query(AlarmChallengeLog)
+        .filter(AlarmChallengeLog.user_id == current_user.id)
+        .order_by(AlarmChallengeLog.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    recent_events = (
+        db.query(AlarmWakeEvent)
+        .filter(
+            AlarmWakeEvent.user_id == current_user.id,
+            AlarmWakeEvent.verified.is_(True),
+        )
+        .order_by(AlarmWakeEvent.dismissed_at.desc())
+        .limit(10)
+        .all()
+    )
+
+    if not recent_logs and not recent_events:
+        return {
+            "score": 0.0,
+            "level": "unknown",
+            "message": "Complete a wake-up challenge to assess wakefulness.",
+            "recent_wake_events": 0,
+            "factors": {},
+        }
+
+    accuracy = None
+    avg_time = 30
+    failed = 0
+    if recent_logs:
+        accuracy = (
+            sum(1 for l in recent_logs if l.is_correct) / len(recent_logs)
+        ) * 100.0
+        times = [l.time_taken_seconds for l in recent_logs if l.is_correct]
+        avg_time = int(sum(times) / len(times)) if times else 30
+        failed = sum(1 for l in recent_logs if not l.is_correct)
+
+    if recent_events:
+        avg_wake = sum(e.wakefulness_score or 0 for e in recent_events) / len(
+            recent_events
+        )
+        last = recent_events[0]
+        assessment = ChallengeService.assess_wakefulness(
+            consecutive_correct=last.consecutive_correct or 1,
+            required_correct=last.challenges_required or 1,
+            failed_attempts=failed,
+            time_taken_seconds=avg_time,
+            time_limit_seconds=max(avg_time, 30),
+            recent_accuracy=accuracy,
+        )
+        assessment["score"] = round((assessment["score"] + avg_wake) / 2, 1)
+        if assessment["score"] >= 80:
+            assessment["level"] = "sharp"
+        elif assessment["score"] >= 55:
+            assessment["level"] = "alert"
+        elif assessment["score"] >= 30:
+            assessment["level"] = "groggy"
+        else:
+            assessment["level"] = "drowsy"
+    else:
+        assessment = ChallengeService.assess_wakefulness(
+            consecutive_correct=1,
+            required_correct=1,
+            failed_attempts=failed,
+            time_taken_seconds=avg_time,
+            time_limit_seconds=max(avg_time, 30),
+            recent_accuracy=accuracy,
+        )
+
+    assessment["recent_wake_events"] = len(recent_events)
+    assessment["recent_accuracy"] = (
+        round(accuracy, 1) if accuracy is not None else None
+    )
+    return assessment
 
 
 @router.get(
@@ -332,6 +462,8 @@ def snooze_alarm(
     alarm.next_trigger_at = datetime.now(timezone.utc) + timedelta(
         minutes=alarm.snooze_interval_minutes
     )
+    # Anti-snooze: wipe verification progress; next challenge will escalate
+    ChallengeService.clear_challenge_session(current_user.id, alarm.id, db)
 
     db.commit()
     db.refresh(alarm)
@@ -349,10 +481,12 @@ def get_alarm_challenge(
 ):
     """Fetch a personalized cognitive challenge for the specified alarm.
 
-    The challenge difficulty is determined by the user's profile preference
-    (beginner / easy / medium / hard / expert) and automatically adjusted
-    based on the current time of day (easier challenges during very early
-    morning hours when the user is groggiest).
+    Personalization pipeline:
+      1. Preferred challenge types (for RANDOM alarms)
+      2. Performance-based adaptive difficulty from recent logs
+      3. Profile difficulty preference as the baseline
+      4. Time-of-day softening (easier when groggiest)
+      5. Anti-snooze difficulty escalation
     """
     alarm = (
         db.query(Alarm)
@@ -365,31 +499,56 @@ def get_alarm_challenge(
             detail="Alarm not found",
         )
 
-    # ── Read the user's difficulty preference from their profile ──
-    difficulty = "medium"  # default fallback
+    # ── Difficulty baseline from alarm (profile used only as soft default elsewhere) ──
+    difficulty = getattr(alarm, "challenge_difficulty", None) or "medium"
     user_tz_name = "UTC"
+    preferred_types = None
     if current_user.profile:
-        if current_user.profile.difficulty_preference:
-            difficulty = current_user.profile.difficulty_preference.value
         if current_user.profile.timezone:
             user_tz_name = current_user.profile.timezone
+        habits = current_user.profile.habit_preferences or {}
+        preferred_types = habits.get("preferred_challenge_types")
 
-    # ── Get the current hour in the user's local timezone ──
+    # ── Anti-snooze escalation ──
+    escalation = int(alarm.total_snoozes or 0)
+    difficulty = ChallengeService.escalate_difficulty(difficulty, escalation)
+
+    # ── Recent performance logs (newest first) ──
+    recent_logs = (
+        db.query(AlarmChallengeLog)
+        .filter(AlarmChallengeLog.user_id == current_user.id)
+        .order_by(AlarmChallengeLog.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
     current_hour = datetime.now(_resolve_timezone(user_tz_name)).hour
 
     challenge = ChallengeService.generate_challenge(
         challenge_type=alarm.challenge_type,
         difficulty=difficulty,
         current_hour=current_hour,
+        preferred_types=preferred_types,
+        recent_logs=recent_logs,
     )
-    # Persist answer server-side — clients must not be trusted for verification
-    ChallengeService.store_challenge_session(
-        current_user.id, alarm.id, challenge, db
+    # Persist answer + progress server-side (preserve consecutive streak)
+    session = ChallengeService.store_challenge_session(
+        current_user.id,
+        alarm.id,
+        challenge,
+        db,
+        required_correct=alarm.challenge_count,
+        escalation_level=escalation,
     )
-    return challenge
+    return ChallengeService.public_challenge_payload(
+        challenge,
+        consecutive_correct=session["consecutive_correct"],
+        required_correct=session["required_correct"],
+        escalation_level=session["escalation_level"],
+    )
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class VerifyAnswerRequest(BaseModel):
@@ -402,8 +561,17 @@ class VerifyAnswerRequest(BaseModel):
     failed_attempts: int = 0
     challenge_prompt: str = ""
     challenge_difficulty: str = "medium"
-    challenge_step: int = 1          # which step in a multi-step sequence
-    challenge_total_steps: int = 1   # total steps required
+    # Deprecated: server tracks progress — client values are ignored
+    challenge_step: int = 1
+    challenge_total_steps: int = 1
+
+
+class DismissRequest(BaseModel):
+    """Optional verification token for challenge-gated dismissal."""
+
+    verification_token: Optional[str] = Field(
+        None, description="Token issued after consecutive challenges are solved"
+    )
 
 
 @router.post(
@@ -419,13 +587,12 @@ def verify_alarm_challenge(
     """Verify the user's answer to a cognitive challenge.
 
     Features:
-        - Verifies against the **server-stored** challenge session (not the
-          client-supplied expected answer).
-        - Logs **every** attempt (correct and incorrect) for analytics.
+        - Verifies against the **server-stored** challenge session.
+        - Logs **every** attempt for analytics.
         - Enforces **time limits** using server-side issuance time.
-        - Supports **multi-step challenges** — only dismisses the alarm
-          when the user has completed all required steps.
-        - Returns progress info so the frontend can show "Step 2 of 3".
+        - **Multi-step + consecutive correct**: progress is server-tracked;
+          a wrong/timeout answer resets the consecutive streak.
+        - On full completion, records a wake confirmation and dismisses.
     """
     alarm = (
         db.query(Alarm)
@@ -442,55 +609,43 @@ def verify_alarm_challenge(
         current_user.id, alarm_id, db
     )
 
-    if session:
-        expected = session["answer"]
-        difficulty = session["difficulty"]
-        prompt = session["prompt"] or data.challenge_prompt
-        max_time = int(session["time_limit_seconds"])
-        issued_at = session["issued_at"]
-        if issued_at.tzinfo is None:
-            issued_at = issued_at.replace(tzinfo=timezone.utc)
-        elapsed = (datetime.now(timezone.utc) - issued_at).total_seconds()
-        # Use the larger of server elapsed and client-reported time:
-        # - server elapsed blocks under-reporting (spoofing a fast solve)
-        # - client time honors device timer expiry (e.g. time_taken_seconds: 999)
-        client_time = max(0, int(data.time_taken_seconds or 0))
-        time_taken = max(int(round(elapsed)), client_time)
-        timed_out = time_taken > (max_time + VERIFY_TIME_GRACE_SECONDS)
-    else:
-        # Legacy fallback for clients that still send expected_answer
-        if not data.expected_answer:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No active challenge. Request a new one first.",
-            )
-        expected = data.expected_answer
-        difficulty = data.challenge_difficulty or "medium"
-        prompt = data.challenge_prompt
-        time_limits = {
-            "beginner": 60, "easy": 45, "medium": 30, "hard": 20, "expert": 15,
-        }
-        max_time = time_limits.get(difficulty.lower(), 30)
-        time_taken = data.time_taken_seconds
-        timed_out = time_taken > (max_time + VERIFY_TIME_GRACE_SECONDS)
+    if not session or not session.get("answer"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active challenge. Request a new one first.",
+        )
 
-    # ── Check answer correctness ──
+    expected = session["answer"]
+    difficulty = session["difficulty"]
+    prompt = session["prompt"] or data.challenge_prompt
+    resolved_type = session.get("challenge_type") or alarm.challenge_type.value
+    max_time = int(session["time_limit_seconds"])
+    issued_at = session["issued_at"]
+    if issued_at.tzinfo is None:
+        issued_at = issued_at.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - issued_at).total_seconds()
+    client_time = max(0, int(data.time_taken_seconds or 0))
+    time_taken = max(int(round(elapsed)), client_time)
+    timed_out = time_taken > (max_time + VERIFY_TIME_GRACE_SECONDS)
+
+    # Normalize logged type (WORD → word_game)
+    log_type = str(resolved_type).lower()
+    if log_type == "word":
+        log_type = "word_game"
+
     is_correct = ChallengeService.verify_answer(expected, data.user_answer)
-
-    # ── Compute score ──
     actually_correct = is_correct and not timed_out
     score = ChallengeService.calculate_score(
-        challenge_type=alarm.challenge_type.value,
+        challenge_type=log_type,
         difficulty=difficulty,
         time_taken_seconds=time_taken,
         is_correct=actually_correct,
     )
 
-    # ── Log EVERY attempt (correct or incorrect) ──
     log = AlarmChallengeLog(
         alarm_id=alarm.id,
         user_id=current_user.id,
-        challenge_type=alarm.challenge_type.value,
+        challenge_type=log_type,
         difficulty=difficulty,
         challenge_prompt=prompt,
         is_correct=actually_correct,
@@ -501,72 +656,143 @@ def verify_alarm_challenge(
     db.add(log)
     db.commit()
 
-    # ── Handle timeout ──
-    if timed_out:
-        # Invalidate the expired session so the client must fetch a fresh one
-        ChallengeService.clear_challenge_session(current_user.id, alarm_id, db)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Time's up! You took {time_taken}s but the "
-                   f"limit is {max_time}s for {difficulty} difficulty.",
-        )
+    required_steps = max(1, int(session.get("required_correct") or alarm.challenge_count or 1))
 
-    # ── Handle wrong answer ──
-    if not is_correct:
-        # Clear so the next GET /challenge issues a fresh puzzle
-        ChallengeService.clear_challenge_session(current_user.id, alarm_id, db)
+    # ── Timeout / wrong answer → reset consecutive streak ──
+    if timed_out or not is_correct:
+        progress = ChallengeService.record_failed_attempt(
+            current_user.id, alarm_id, db, reset_streak=True
+        )
+        wakefulness = ChallengeService.assess_wakefulness(
+            consecutive_correct=progress.get("consecutive_correct", 0),
+            required_correct=required_steps,
+            failed_attempts=progress.get("total_failed_attempts", 0),
+            time_taken_seconds=time_taken,
+            time_limit_seconds=max_time,
+        )
+        if timed_out:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Time's up! You took {time_taken}s but the "
+                    f"limit is {max_time}s for {difficulty} difficulty. "
+                    f"Consecutive streak reset — start again."
+                ),
+            )
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
-                "detail": "Incorrect answer. Try again.",
+                "detail": (
+                    "Incorrect answer. Consecutive streak reset — "
+                    f"need {required_steps} in a row."
+                ),
                 "score": score,
+                "consecutive_correct": 0,
+                "required_correct": required_steps,
+                "streak_reset": True,
+                "wakefulness": wakefulness,
             },
         )
 
-    # Correct — consume this session (next step / retry will issue a new one)
-    ChallengeService.clear_challenge_session(current_user.id, alarm_id, db)
+    # ── Correct — advance server-tracked consecutive progress ──
+    progress = ChallengeService.record_correct_step(
+        current_user.id, alarm_id, db
+    )
+    consecutive = progress["consecutive_correct"]
+    required_steps = progress["required_correct"]
 
-    # ── Multi-step: check if more challenges are needed ──
-    required_steps = alarm.challenge_count
-    current_step = data.challenge_step
+    recent_logs = (
+        db.query(AlarmChallengeLog)
+        .filter(AlarmChallengeLog.user_id == current_user.id)
+        .order_by(AlarmChallengeLog.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    recent_accuracy = None
+    if recent_logs:
+        recent_accuracy = (
+            sum(1 for l in recent_logs if l.is_correct) / len(recent_logs)
+        ) * 100.0
 
-    if current_step < required_steps:
+    wakefulness = ChallengeService.assess_wakefulness(
+        consecutive_correct=consecutive,
+        required_correct=required_steps,
+        failed_attempts=progress.get("total_failed_attempts", 0),
+        time_taken_seconds=time_taken,
+        time_limit_seconds=max_time,
+        recent_accuracy=recent_accuracy,
+    )
+
+    if consecutive < required_steps:
         return {
             "status": "step_complete",
-            "message": f"Correct! Step {current_step} of {required_steps} complete.",
-            "current_step": current_step,
+            "message": (
+                f"Correct! {consecutive} of {required_steps} consecutive "
+                f"challenges complete."
+            ),
+            "current_step": consecutive,
             "total_steps": required_steps,
-            "next_step": current_step + 1,
+            "next_step": consecutive + 1,
+            "consecutive_correct": consecutive,
+            "required_correct": required_steps,
             "is_dismissed": False,
             "score": score,
+            "wakefulness": wakefulness,
         }
 
-    # ── All steps completed — dismiss the alarm ──
-    result = _dismiss_alarm_internal(alarm, current_user, db)
+    # ── All consecutive challenges solved — confirm wake & dismiss ──
+    # Anti-snooze audit: mark when the user only woke after exhausting snoozes
+    dismiss_method = (
+        "snooze_exhausted"
+        if (
+            alarm.snooze_limit > 0
+            and alarm.total_snoozes >= alarm.snooze_limit
+        )
+        else "challenge"
+    )
+    result = _dismiss_alarm_internal(
+        alarm,
+        current_user,
+        db,
+        dismiss_method=dismiss_method,
+        verification=progress,
+        wakefulness=wakefulness,
+    )
     return {
         "status": "dismissed",
-        "message": f"All {required_steps} challenges solved! Alarm dismissed.",
-        "current_step": current_step,
+        "message": (
+            f"Wake-up verified! {required_steps} consecutive challenges "
+            f"solved. Alarm dismissed."
+        ),
+        "current_step": consecutive,
         "total_steps": required_steps,
+        "consecutive_correct": consecutive,
+        "required_correct": required_steps,
         "is_dismissed": True,
-        "alarm": result,
+        "verification_token": progress.get("verification_token"),
+        "alarm": AlarmResponse.model_validate(result).model_dump(mode="json"),
         "score": score,
+        "wakefulness": wakefulness,
+        "wake_confirmed": True,
     }
 
 
 @router.post(
     "/{alarm_id}/dismiss",
     response_model=AlarmResponse,
-    summary="Dismiss alarm",
+    summary="Dismiss alarm (verification required)",
 )
 def dismiss_alarm(
     alarm_id: int,
+    body: DismissRequest = DismissRequest(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Dismiss an alarm after completing the cognitive challenge.
+    """Dismiss only after wake-up verification completes.
 
-    Records the dismissal event and calculates the next trigger time.
+    Prefer ``POST /verify`` which auto-dismisses on full consecutive
+    completion. This endpoint accepts an optional ``verification_token``
+    issued by a completed verify session.
     """
     alarm = (
         db.query(Alarm)
@@ -578,13 +804,56 @@ def dismiss_alarm(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Alarm not found",
         )
-    return _dismiss_alarm_internal(alarm, current_user, db)
+
+    session = ChallengeService.get_challenge_session(
+        current_user.id, alarm_id, db
+    )
+    token = body.verification_token
+    wake_ok = bool(
+        session
+        and session.get("wake_confirmed")
+        and session.get("verification_token")
+        and (not token or token == session["verification_token"])
+    )
+    if not wake_ok:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Wake-up verification required. Solve the cognitive "
+                "challenge(s) via POST /verify before dismissing."
+            ),
+        )
+
+    dismiss_method = (
+        "snooze_exhausted"
+        if (
+            alarm.snooze_limit > 0
+            and alarm.total_snoozes >= alarm.snooze_limit
+        )
+        else "challenge"
+    )
+    return _dismiss_alarm_internal(
+        alarm,
+        current_user,
+        db,
+        dismiss_method=dismiss_method,
+        verification=session,
+    )
 
 
-def _dismiss_alarm_internal(alarm: Alarm, current_user: User, db: Session):
-    """Shared dismissal logic used by both verify (auto-dismiss) and manual dismiss."""
+def _dismiss_alarm_internal(
+    alarm: Alarm,
+    current_user: User,
+    db: Session,
+    *,
+    dismiss_method: str = "challenge",
+    verification: Optional[dict] = None,
+    wakefulness: Optional[dict] = None,
+):
+    """Shared dismissal logic used by verify (auto-dismiss) and gated dismiss."""
+    now = datetime.now(timezone.utc)
     alarm.total_dismissals += 1
-    alarm.last_triggered_at = datetime.now(timezone.utc)
+    alarm.last_triggered_at = now
     user_tz = _user_timezone(db, current_user.id)
     if alarm.alarm_type == AlarmType.ONE_TIME:
         alarm.is_active = False
@@ -592,11 +861,47 @@ def _dismiss_alarm_internal(alarm: Alarm, current_user: User, db: Session):
     else:
         alarm.next_trigger_at = _calculate_next_trigger(alarm, user_tz=user_tz)
 
-    # Update user profile stats (performance tracking)
+    consecutive = int((verification or {}).get("consecutive_correct") or alarm.challenge_count or 1)
+    required = int((verification or {}).get("required_correct") or alarm.challenge_count or 1)
+    failed = int((verification or {}).get("total_failed_attempts") or 0)
+    started = (verification or {}).get("session_started_at")
+    time_to_dismiss = None
+    if started is not None:
+        if getattr(started, "tzinfo", None) is None:
+            started = started.replace(tzinfo=timezone.utc)
+        time_to_dismiss = max(0, int((now - started).total_seconds()))
+
+    if wakefulness is None:
+        wakefulness = ChallengeService.assess_wakefulness(
+            consecutive_correct=consecutive,
+            required_correct=required,
+            failed_attempts=failed,
+            time_taken_seconds=time_to_dismiss or 0,
+            time_limit_seconds=max(30, (time_to_dismiss or 30)),
+        )
+
+    # Wake-up confirmation tracking
+    wake_event = AlarmWakeEvent(
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        triggered_at=started or now,
+        dismissed_at=now,
+        dismiss_method=dismiss_method,
+        challenges_required=required,
+        challenges_completed=consecutive,
+        consecutive_correct=consecutive,
+        failed_attempts=failed,
+        snooze_count_at_dismiss=alarm.total_snoozes,
+        time_to_dismiss_seconds=time_to_dismiss,
+        wakefulness_score=wakefulness.get("score"),
+        wakefulness_level=wakefulness.get("level"),
+        verified=True,
+    )
+    db.add(wake_event)
+
     if current_user.profile:
         current_user.profile.total_alarms_dismissed += 1
 
-        # Simple scoring logic: Snoozing too much breaks your streak
         if alarm.total_snoozes == 0:
             current_user.profile.streak_days += 1
             if current_user.profile.streak_days > current_user.profile.best_streak:
@@ -612,8 +917,8 @@ def _dismiss_alarm_internal(alarm: Alarm, current_user: User, db: Session):
 
         current_user.profile.total_snoozes += alarm.total_snoozes
 
-    # Reset alarm snooze counter for the next occurrence
     alarm.total_snoozes = 0
+    ChallengeService.clear_challenge_session(current_user.id, alarm.id, db)
 
     db.commit()
     db.refresh(alarm)
@@ -773,22 +1078,105 @@ def get_challenge_stats(
     }
 
 
+@router.get(
+    "/challenge/history",
+    summary="Get all challenge attempt history for the current user",
+)
+def get_user_challenge_history(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Paginated challenge attempt history across all of the user's alarms."""
+    query = (
+        db.query(AlarmChallengeLog)
+        .filter(AlarmChallengeLog.user_id == current_user.id)
+        .order_by(AlarmChallengeLog.created_at.desc())
+    )
+    total = query.count()
+    rows = query.offset((page - 1) * per_page).limit(per_page).all()
+
+    history = [
+        {
+            "id": log.id,
+            "alarm_id": log.alarm_id,
+            "challenge_type": log.challenge_type,
+            "difficulty": log.difficulty,
+            "challenge_prompt": log.challenge_prompt,
+            "is_correct": log.is_correct,
+            "time_taken_seconds": log.time_taken_seconds,
+            "failed_attempts": log.failed_attempts,
+            "points_earned": log.points_earned,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        }
+        for log in rows
+    ]
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "history": history,
+    }
+
+
+@router.get(
+    "/challenge/analysis",
+    summary="Deep challenge completion analysis and recommendations",
+)
+def get_challenge_analysis(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze challenge completion patterns and return actionable insights.
+
+    Includes strengths/weaknesses by type, performance trend, recommendations,
+    and suggested preferred challenge types.
+    """
+    logs = (
+        db.query(AlarmChallengeLog)
+        .filter(AlarmChallengeLog.user_id == current_user.id)
+        .order_by(AlarmChallengeLog.created_at.desc())
+        .all()
+    )
+    analysis = ChallengeService.analyze_completion(logs)
+
+    # Attach current personalization context
+    preferred = []
+    difficulty = "medium"
+    if current_user.profile:
+        habits = current_user.profile.habit_preferences or {}
+        preferred = habits.get("preferred_challenge_types") or []
+        if current_user.profile.difficulty_preference:
+            difficulty = current_user.profile.difficulty_preference.value
+
+    adaptation = ChallengeService.adapt_difficulty(difficulty, logs[:20])
+    analysis["personalization"] = {
+        "preferred_challenge_types": preferred,
+        "difficulty_preference": difficulty,
+        "adaptive_difficulty": adaptation,
+    }
+    return analysis
+
+
 # ─────────────────────────────────────────────────────────────
-# Snooze with difficulty escalation
+# Snooze status (anti-snooze escalation)
 # ─────────────────────────────────────────────────────────────
 
 @router.get(
     "/{alarm_id}/snooze-info",
-    summary="Get snooze status for an alarm",
+    response_model=SnoozeInfoResponse,
+    summary="Get snooze / anti-snooze status for an alarm",
 )
 def get_snooze_info(
     alarm_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return the current snooze count, limit, and whether snoozing is allowed.
+    """Return snooze count, limit, and anti-snooze escalation preview.
 
-    The frontend uses this to proactively disable the snooze button.
+    The frontend uses this to disable the snooze control and show how much
+    harder the next challenge will be after prior snoozes.
     """
     alarm = (
         db.query(Alarm)
@@ -800,13 +1188,22 @@ def get_snooze_info(
             status_code=status.HTTP_404_NOT_FOUND, detail="Alarm not found"
         )
 
-    return {
-        "alarm_id": alarm.id,
-        "snooze_count": alarm.total_snoozes,
-        "snooze_limit": alarm.snooze_limit,
-        "can_snooze": alarm.total_snoozes < alarm.snooze_limit,
-        "snooze_interval_minutes": alarm.snooze_interval_minutes,
-    }
+    escalation = int(alarm.total_snoozes or 0)
+    can_snooze = alarm.total_snoozes < alarm.snooze_limit
+    base_diff = getattr(alarm, "challenge_difficulty", None) or "medium"
+
+    return SnoozeInfoResponse(
+        alarm_id=alarm.id,
+        snooze_count=alarm.total_snoozes,
+        snooze_limit=alarm.snooze_limit,
+        can_snooze=can_snooze,
+        snooze_interval_minutes=alarm.snooze_interval_minutes,
+        escalation_level=escalation,
+        next_challenge_difficulty=ChallengeService.escalate_difficulty(
+            base_diff, escalation
+        ),
+        anti_snooze_enforced=not can_snooze,
+    )
 
 
 def _calculate_next_trigger(

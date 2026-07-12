@@ -57,10 +57,111 @@ class TestChallengeGeneration:
         assert len(result["options"]) == 4
         assert result["answer"] in result["options"]
 
+    def test_generate_logic_returns_valid_structure(self):
+        """Logic challenge should have a prompt, answer, and 4 options."""
+        result = ChallengeService.generate_challenge(
+            ChallengeType.LOGIC, current_hour=10
+        )
+        assert result["type"] == "LOGIC"
+        assert result["prompt"]
+        assert len(result["options"]) == 4
+        assert result["answer"] in result["options"]
+
+    def test_generate_word_game_returns_valid_structure(self):
+        """Word game should return WORD_GAME with answer among options."""
+        result = ChallengeService.generate_challenge(
+            ChallengeType.WORD_GAME, current_hour=10
+        )
+        assert result["type"] == "WORD_GAME"
+        assert result["prompt"]
+        assert len(result["options"]) == 4
+        assert result["answer"] in result["options"]
+
+    def test_generate_word_alias_maps_to_word_game(self):
+        """Frontend WORD alias should produce a WORD_GAME challenge."""
+        result = ChallengeService.generate_challenge(
+            ChallengeType.WORD, current_hour=10
+        )
+        assert result["type"] == "WORD_GAME"
+
+    def test_generate_quiz_returns_valid_structure(self):
+        """Quiz challenge should have a question and 4 options."""
+        result = ChallengeService.generate_challenge(
+            ChallengeType.QUIZ, current_hour=10
+        )
+        assert result["type"] == "QUIZ"
+        assert "?" in result["prompt"]
+        assert len(result["options"]) == 4
+        assert result["answer"] in result["options"]
+
     def test_generate_random_resolves_to_real_type(self):
         """RANDOM type should resolve to an actual challenge type."""
         result = ChallengeService.generate_challenge(ChallengeType.RANDOM)
-        assert result["type"] in ["MATH", "PATTERN", "MEMORY", "RIDDLE"]
+        assert result["type"] in [
+            "MATH", "LOGIC", "PATTERN", "MEMORY", "WORD_GAME", "RIDDLE", "QUIZ",
+        ]
+
+    def test_random_uses_preferred_types_only(self):
+        """RANDOM with preferred types should stay inside that pool."""
+        preferred = ["math", "riddle"]
+        for _ in range(20):
+            result = ChallengeService.generate_challenge(
+                ChallengeType.RANDOM,
+                preferred_types=preferred,
+                current_hour=10,
+                apply_adaptive_difficulty=False,
+            )
+            assert result["type"] in ["MATH", "RIDDLE"]
+
+    def test_adapt_difficulty_raises_on_strong_performance(self):
+        """High accuracy + fast solves should raise difficulty."""
+        class FakeLog:
+            def __init__(self, correct, seconds):
+                self.is_correct = correct
+                self.time_taken_seconds = seconds
+                self.challenge_type = "math"
+
+        logs = [FakeLog(True, 8) for _ in range(10)]
+        adapted = ChallengeService.adapt_difficulty("medium", logs)
+        assert adapted["difficulty"] == "hard"
+        assert adapted["adjustment"] == 1
+
+    def test_adapt_difficulty_lowers_on_weak_performance(self):
+        """Low accuracy should lower difficulty."""
+        class FakeLog:
+            def __init__(self, correct):
+                self.is_correct = correct
+                self.time_taken_seconds = 40
+                self.challenge_type = "math"
+
+        logs = [FakeLog(False) for _ in range(8)] + [FakeLog(True), FakeLog(True)]
+        adapted = ChallengeService.adapt_difficulty("medium", logs)
+        assert adapted["difficulty"] == "easy"
+        assert adapted["adjustment"] == -1
+
+    def test_analyze_completion_returns_recommendations(self):
+        """Analysis should include summary, insights, and recommendations."""
+        class FakeLog:
+            def __init__(self, ct, correct, seconds=10, diff="medium", points=20):
+                self.challenge_type = ct
+                self.is_correct = correct
+                self.time_taken_seconds = seconds
+                self.difficulty = diff
+                self.points_earned = points
+
+        logs = (
+            [FakeLog("math", True) for _ in range(6)]
+            + [FakeLog("logic", False) for _ in range(5)]
+            + [FakeLog("logic", True)]
+        )
+        analysis = ChallengeService.analyze_completion(logs)
+        assert analysis["summary"]["total_attempts"] == 12
+        assert "recommendations" in analysis
+        assert len(analysis["recommendations"]) >= 1
+        assert "insights" in analysis
+        assert "by_type" in analysis
+        assert "math" in analysis["by_type"]
+        assert "logic" in analysis["by_type"]
 
     def test_all_types_return_difficulty_and_time_limit(self):
         """Every challenge type should include difficulty and time_limit_seconds."""
@@ -202,6 +303,22 @@ class TestAnswerVerification:
 # Integration Tests — Challenge API Endpoints
 # ═══════════════════════════════════════════════════════════════
 
+def _session_answer(db_session, user_id: int, alarm_id: int) -> str:
+    """Read the server-stored challenge answer (not exposed in API response)."""
+    from app.models.challenge_session import ChallengeSession
+
+    row = (
+        db_session.query(ChallengeSession)
+        .filter(
+            ChallengeSession.user_id == user_id,
+            ChallengeSession.alarm_id == alarm_id,
+        )
+        .first()
+    )
+    assert row is not None and row.answer, "Expected an active challenge session"
+    return row.answer
+
+
 class TestGetChallengeEndpoint:
     """Tests for GET /api/v1/alarms/{alarm_id}/challenge."""
 
@@ -219,16 +336,18 @@ class TestGetChallengeEndpoint:
         return res.json()["id"]
 
     def test_get_challenge_returns_challenge(self, client, test_user, auth_headers):
-        """GET /challenge should return a challenge object."""
+        """GET /challenge should return a challenge object without the answer."""
         alarm_id = self._create_alarm(client, auth_headers)
         res = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
         assert res.status_code == 200
         data = res.json()
         assert "type" in data
         assert "prompt" in data
-        assert "answer" in data
+        assert "answer" not in data
         assert "difficulty" in data
         assert "time_limit_seconds" in data
+        assert "required_correct" in data
+        assert "consecutive_correct" in data
 
     def test_get_challenge_returns_difficulty_field(self, client, test_user, auth_headers):
         """Challenge response should include the effective difficulty."""
@@ -263,55 +382,72 @@ class TestVerifyChallengeEndpoint:
         assert res.status_code == 201
         return res.json()["id"]
 
-    def test_verify_correct_answer_dismisses(self, client, test_user, auth_headers):
+    def test_verify_correct_answer_dismisses(
+        self, client, test_user, auth_headers, db_session
+    ):
         """Correct answer on single-step alarm should dismiss it."""
         alarm_id = self._create_alarm(client, auth_headers)
-        # Get a challenge
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        # Verify with the correct answer
-        res = client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": ch["answer"],
-            "time_taken_seconds": 5,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-            "challenge_step": 1,
-            "challenge_total_steps": 1,
-        }, headers=auth_headers)
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["is_dismissed"] is True
         assert data["status"] == "dismissed"
+        assert data["wake_confirmed"] is True
+        assert "wakefulness" in data
 
-    def test_verify_incorrect_answer_returns_400(self, client, test_user, auth_headers):
-        """Incorrect answer should return 400 with score.total_points == 0."""
+    def test_verify_incorrect_answer_returns_400(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Incorrect answer should return 400 and reset consecutive streak."""
         alarm_id = self._create_alarm(client, auth_headers)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        res = client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": "definitely_wrong_answer_xyz",
-            "time_taken_seconds": 5,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-        }, headers=auth_headers)
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": "definitely_wrong_answer_xyz",
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
         assert res.status_code == 400
         data = res.json()
         assert "Incorrect" in data["detail"]
+        assert data.get("streak_reset") is True
+        assert data["consecutive_correct"] == 0
         assert "score" in data
         assert data["score"]["total_points"] == 0
         assert data["score"]["base_points"] == 0
         assert data["score"]["time_bonus"] == 0
         assert "breakdown" in data["score"]
 
-    def test_verify_timeout_returns_400(self, client, test_user, auth_headers, db_session):
+    def test_verify_timeout_returns_400(
+        self, client, test_user, auth_headers, db_session
+    ):
         """Answer submitted after time limit should return 400."""
         from datetime import datetime, timezone, timedelta
         from app.models.challenge_session import ChallengeSession
 
         alarm_id = self._create_alarm(client, auth_headers)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
 
-        # Backdate the server session so the challenge appears expired
         session = (
             db_session.query(ChallengeSession)
             .filter(
@@ -324,92 +460,169 @@ class TestVerifyChallengeEndpoint:
         session.issued_at = datetime.now(timezone.utc) - timedelta(seconds=120)
         db_session.commit()
 
-        res = client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "user_answer": ch["answer"],
-            "time_taken_seconds": 5,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-        }, headers=auth_headers)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer, "time_taken_seconds": 5},
+            headers=auth_headers,
+        )
         assert res.status_code == 400
         assert "Time" in res.json()["detail"]
 
-    def test_verify_client_reported_timeout_returns_400(self, client, test_user, auth_headers):
+    def test_verify_client_reported_timeout_returns_400(
+        self, client, test_user, auth_headers, db_session
+    ):
         """Client-reported time over the limit should return 400 Time's up."""
         alarm_id = self._create_alarm(client, auth_headers)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        res = client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "user_answer": ch["answer"],
-            "time_taken_seconds": 999,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-        }, headers=auth_headers)
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer, "time_taken_seconds": 999},
+            headers=auth_headers,
+        )
         assert res.status_code == 400
         assert "Time's up" in res.json()["detail"]
 
-    def test_verify_ignores_spoofed_expected_answer(self, client, test_user, auth_headers):
+    def test_verify_ignores_spoofed_expected_answer(
+        self, client, test_user, auth_headers, db_session
+    ):
         """Client-supplied expected_answer must not override the server session."""
         alarm_id = self._create_alarm(client, auth_headers)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        res = client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": "totally_wrong_spoof",
-            "user_answer": ch["answer"],
-            "time_taken_seconds": 5,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-            "challenge_step": 1,
-            "challenge_total_steps": 1,
-        }, headers=auth_headers)
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "expected_answer": "totally_wrong_spoof",
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+            },
+            headers=auth_headers,
+        )
         assert res.status_code == 200
         assert res.json()["is_dismissed"] is True
 
-    def test_verify_multi_step_returns_next_step(self, client, test_user, auth_headers):
-        """Multi-step alarm: correct answer on step 1/3 should not dismiss."""
+    def test_verify_multi_step_returns_next_step(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Multi-step: first correct answer should not dismiss."""
         alarm_id = self._create_alarm(client, auth_headers, challenge_count=3)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        res = client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": ch["answer"],
-            "time_taken_seconds": 5,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-            "challenge_step": 1,
-            "challenge_total_steps": 3,
-        }, headers=auth_headers)
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+                "challenge_step": 99,  # spoofed — server ignores
+            },
+            headers=auth_headers,
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["is_dismissed"] is False
         assert data["status"] == "step_complete"
         assert data["next_step"] == 2
+        assert data["consecutive_correct"] == 1
 
-    def test_verify_multi_step_final_step_dismisses(self, client, test_user, auth_headers):
-        """Multi-step alarm: correct answer on final step should dismiss."""
+    def test_verify_ignores_client_step_spoof(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Client cannot skip to final step by spoofing challenge_step."""
         alarm_id = self._create_alarm(client, auth_headers, challenge_count=2)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        # Step 2 of 2 (last step)
-        res = client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": ch["answer"],
-            "time_taken_seconds": 5,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-            "challenge_step": 2,
-            "challenge_total_steps": 2,
-        }, headers=auth_headers)
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+                "challenge_step": 2,
+                "challenge_total_steps": 2,
+            },
+            headers=auth_headers,
+        )
         assert res.status_code == 200
         data = res.json()
-        assert data["is_dismissed"] is True
+        assert data["is_dismissed"] is False
+        assert data["consecutive_correct"] == 1
 
-    def test_verify_logs_correct_attempt(self, client, test_user, auth_headers, db_session):
+    def test_verify_multi_step_final_step_dismisses(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Two consecutive correct answers dismiss a challenge_count=2 alarm."""
+        alarm_id = self._create_alarm(client, auth_headers, challenge_count=2)
+
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer1 = _session_answer(db_session, test_user.id, alarm_id)
+        res1 = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer1, "time_taken_seconds": 5},
+            headers=auth_headers,
+        )
+        assert res1.status_code == 200
+        assert res1.json()["is_dismissed"] is False
+
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer2 = _session_answer(db_session, test_user.id, alarm_id)
+        res2 = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer2, "time_taken_seconds": 5},
+            headers=auth_headers,
+        )
+        assert res2.status_code == 200
+        data = res2.json()
+        assert data["is_dismissed"] is True
+        assert data["wake_confirmed"] is True
+
+    def test_consecutive_wrong_answer_resets_streak(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Wrong answer after a correct step resets consecutive progress."""
+        alarm_id = self._create_alarm(client, auth_headers, challenge_count=3)
+
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        res1 = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer, "time_taken_seconds": 5},
+            headers=auth_headers,
+        )
+        assert res1.json()["consecutive_correct"] == 1
+
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        res2 = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": "wrong", "time_taken_seconds": 5},
+            headers=auth_headers,
+        )
+        assert res2.status_code == 400
+        assert res2.json()["streak_reset"] is True
+        assert res2.json()["consecutive_correct"] == 0
+
+    def test_verify_logs_correct_attempt(
+        self, client, test_user, auth_headers, db_session
+    ):
         """Correct answer should create a log entry with is_correct=True."""
         alarm_id = self._create_alarm(client, auth_headers)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": ch["answer"],
-            "time_taken_seconds": 8,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-        }, headers=auth_headers)
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": answer,
+                "time_taken_seconds": 8,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
         log = db_session.query(AlarmChallengeLog).filter_by(alarm_id=alarm_id).first()
         assert log is not None
         assert log.is_correct is True
@@ -417,52 +630,143 @@ class TestVerifyChallengeEndpoint:
         assert log.challenge_prompt == ch["prompt"]
         assert log.difficulty == ch["difficulty"]
 
-    def test_verify_logs_incorrect_attempt(self, client, test_user, auth_headers, db_session):
+    def test_verify_logs_incorrect_attempt(
+        self, client, test_user, auth_headers, db_session
+    ):
         """Incorrect answer should still create a log entry with is_correct=False."""
         alarm_id = self._create_alarm(client, auth_headers)
-        ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
-        client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": "wrong_answer",
-            "time_taken_seconds": 3,
-            "challenge_prompt": ch["prompt"],
-            "challenge_difficulty": ch["difficulty"],
-        }, headers=auth_headers)
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": "wrong_answer",
+                "time_taken_seconds": 3,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
         log = db_session.query(AlarmChallengeLog).filter_by(alarm_id=alarm_id).first()
         assert log is not None
         assert log.is_correct is False
 
     def test_verify_not_found(self, client, test_user, auth_headers):
         """Verifying non-existent alarm should return 404."""
-        res = client.post("/api/v1/alarms/99999/verify", json={
-            "expected_answer": "x",
-            "user_answer": "x",
-        }, headers=auth_headers)
+        res = client.post(
+            "/api/v1/alarms/99999/verify",
+            json={"expected_answer": "x", "user_answer": "x"},
+            headers=auth_headers,
+        )
         assert res.status_code == 404
+
+    def test_dismiss_without_verification_forbidden(
+        self, client, test_user, auth_headers
+    ):
+        """POST /dismiss must not bypass wake-up verification."""
+        alarm_id = self._create_alarm(client, auth_headers)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/dismiss", headers=auth_headers
+        )
+        assert res.status_code == 403
+        assert "verification" in res.json()["detail"].lower()
+
+    def test_wake_confirmations_after_dismiss(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Successful verify should create a wake confirmation event."""
+        alarm_id = self._create_alarm(client, auth_headers)
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer, "time_taken_seconds": 4},
+            headers=auth_headers,
+        )
+        res = client.get("/api/v1/alarms/wake-confirmations", headers=auth_headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["total"] >= 1
+        assert data["events"][0]["verified"] is True
+        assert data["events"][0]["wakefulness_score"] is not None
+
+    def test_dismiss_after_snooze_exhaustion_records_method(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """When snooze limit is exhausted, wake event uses snooze_exhausted."""
+        alarm_id = self._create_alarm(client, auth_headers, snooze_limit=1)
+        client.post(f"/api/v1/alarms/{alarm_id}/snooze", headers=auth_headers)
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer, "time_taken_seconds": 4},
+            headers=auth_headers,
+        )
+        res = client.get("/api/v1/alarms/wake-confirmations", headers=auth_headers)
+        assert res.status_code == 200
+        event = res.json()["events"][0]
+        assert event["dismiss_method"] == "snooze_exhausted"
+        assert event["snooze_count_at_dismiss"] == 1
+
+    def test_wakefulness_endpoint(self, client, test_user, auth_headers, db_session):
+        alarm_id = self._create_alarm(client, auth_headers)
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={"user_answer": answer, "time_taken_seconds": 4},
+            headers=auth_headers,
+        )
+        res = client.get("/api/v1/alarms/wakefulness", headers=auth_headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert "score" in data
+        assert "level" in data
+        assert data["recent_wake_events"] >= 1
+
+    def test_snooze_escalates_difficulty(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """After snooze, next challenge difficulty should escalate."""
+        alarm_id = self._create_alarm(client, auth_headers, snooze_limit=3)
+        client.post(f"/api/v1/alarms/{alarm_id}/snooze", headers=auth_headers)
+        info = client.get(
+            f"/api/v1/alarms/{alarm_id}/snooze-info", headers=auth_headers
+        ).json()
+        assert info["escalation_level"] == 1
+        assert info["snooze_count"] == 1
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        assert ch["escalation_level"] == 1
 
 
 class TestChallengeHistoryEndpoint:
     """Tests for GET /api/v1/alarms/{alarm_id}/challenge/history."""
 
-    def _create_and_verify(self, client, auth_headers):
+    def _create_and_verify(self, client, auth_headers, db_session, user_id):
         """Create an alarm, get challenge, verify it, return alarm_id."""
         res = client.post("/api/v1/alarms/", json={
             "title": "History Test", "alarm_time": "07:00", "challenge_type": "math",
         }, headers=auth_headers)
         alarm_id = res.json()["id"]
         ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
+        answer = _session_answer(db_session, user_id, alarm_id)
         client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": ch["answer"],
+            "user_answer": answer,
             "time_taken_seconds": 5,
             "challenge_prompt": ch["prompt"],
             "challenge_difficulty": ch["difficulty"],
         }, headers=auth_headers)
         return alarm_id
 
-    def test_history_returns_attempts(self, client, test_user, auth_headers):
+    def test_history_returns_attempts(self, client, test_user, auth_headers, db_session):
         """History should return logged challenge attempts."""
-        alarm_id = self._create_and_verify(client, auth_headers)
+        alarm_id = self._create_and_verify(
+            client, auth_headers, db_session, test_user.id
+        )
         res = client.get(f"/api/v1/alarms/{alarm_id}/challenge/history", headers=auth_headers)
         assert res.status_code == 200
         data = res.json()
@@ -491,17 +795,16 @@ class TestChallengeStatsEndpoint:
         assert data["total_attempts"] == 0
         assert data["accuracy_percentage"] == 0.0
 
-    def test_stats_with_data(self, client, test_user, auth_headers):
+    def test_stats_with_data(self, client, test_user, auth_headers, db_session):
         """Stats after attempts should compute accuracy and breakdown."""
-        # Create alarm & do a correct verification
         res = client.post("/api/v1/alarms/", json={
             "title": "Stats Test", "alarm_time": "07:00", "challenge_type": "math",
         }, headers=auth_headers)
         alarm_id = res.json()["id"]
         ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
+        answer = _session_answer(db_session, test_user.id, alarm_id)
         client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
-            "expected_answer": ch["answer"],
-            "user_answer": ch["answer"],
+            "user_answer": answer,
             "time_taken_seconds": 5,
             "challenge_prompt": ch["prompt"],
             "challenge_difficulty": ch["difficulty"],
@@ -514,6 +817,67 @@ class TestChallengeStatsEndpoint:
         assert data["correct_answers"] >= 1
         assert "by_type" in data
         assert "by_difficulty" in data
+
+
+class TestChallengeAnalysisEndpoint:
+    """Tests for GET /api/v1/alarms/challenge/analysis."""
+
+    def test_analysis_empty(self, client, test_user, auth_headers):
+        res = client.get("/api/v1/alarms/challenge/analysis", headers=auth_headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["summary"]["total_attempts"] == 0
+        assert len(data["recommendations"]) >= 1
+        assert "personalization" in data
+
+    def test_analysis_after_attempts(self, client, test_user, auth_headers, db_session):
+        res = client.post("/api/v1/alarms/", json={
+            "title": "Analysis Test", "alarm_time": "07:00", "challenge_type": "math",
+            "challenge_count": 3,
+        }, headers=auth_headers)
+        alarm_id = res.json()["id"]
+        for _ in range(3):
+            ch = client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers).json()
+            answer = _session_answer(db_session, test_user.id, alarm_id)
+            client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            }, headers=auth_headers)
+
+        res = client.get("/api/v1/alarms/challenge/analysis", headers=auth_headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["summary"]["total_attempts"] >= 3
+        assert "insights" in data
+        assert "by_type" in data
+
+
+class TestUserChallengeHistoryEndpoint:
+    """Tests for GET /api/v1/alarms/challenge/history."""
+
+    def test_user_history(self, client, test_user, auth_headers, db_session):
+        res = client.post("/api/v1/alarms/", json={
+            "title": "Hist", "alarm_time": "07:00", "challenge_type": "quiz",
+        }, headers=auth_headers)
+        alarm_id = res.json()["id"]
+        client.get(f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers)
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        client.post(f"/api/v1/alarms/{alarm_id}/verify", json={
+            "user_answer": answer,
+            "time_taken_seconds": 4,
+        }, headers=auth_headers)
+
+        res = client.get("/api/v1/alarms/challenge/history", headers=auth_headers)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["total"] >= 1
+        assert len(data["history"]) >= 1
+        # Resolved type should be logged (quiz), not blank
+        assert data["history"][0]["challenge_type"] in {
+            "quiz", "math", "logic", "memory", "word_game", "pattern", "riddle"
+        }
 
 
 class TestSnoozeInfoEndpoint:
@@ -532,6 +896,9 @@ class TestSnoozeInfoEndpoint:
         assert data["snooze_count"] == 0
         assert data["snooze_limit"] == 3
         assert data["can_snooze"] is True
+        assert data["anti_snooze_enforced"] is False
+        assert "escalation_level" in data
+        assert "next_challenge_difficulty" in data
 
     def test_snooze_info_after_snoozing(self, client, test_user, auth_headers):
         """After snoozing, snooze_count should increment."""
@@ -560,6 +927,7 @@ class TestSnoozeInfoEndpoint:
         res = client.get(f"/api/v1/alarms/{alarm_id}/snooze-info", headers=auth_headers)
         data = res.json()
         assert data["can_snooze"] is False
+        assert data["anti_snooze_enforced"] is True
 
     def test_snooze_info_not_found(self, client, test_user, auth_headers):
         res = client.get("/api/v1/alarms/99999/snooze-info", headers=auth_headers)
