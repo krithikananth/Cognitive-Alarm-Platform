@@ -18,6 +18,7 @@ from app.models.user import User
 from app.models.profile import UserProfile
 from app.models.alarm import Alarm, AlarmType, ChallengeType, AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
+from app.models.challenge_session import ChallengeSession
 from app.services.challenge_service import ChallengeService, VERIFY_TIME_GRACE_SECONDS
 from app.schemas.alarm import (
     AlarmCreate,
@@ -49,6 +50,20 @@ def _to_utc_naive(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _utc_isoformat(dt: Optional[datetime]) -> Optional[str]:
+    """Serialize a stored (UTC-naive) datetime with an explicit UTC offset.
+
+    Without the offset, clients parsing the ISO string (e.g. ``new Date(...)``
+    in JS) treat it as local time instead of UTC, shifting displayed times by
+    the browser's UTC offset.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 router = APIRouter(prefix="/alarms", tags=["Alarm Scheduling"])
 
@@ -378,7 +393,7 @@ def delete_alarm(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Permanently delete an alarm."""
+    """Permanently delete an alarm and its related challenge/wake records."""
     alarm = (
         db.query(Alarm)
         .filter(Alarm.id == alarm_id, Alarm.user_id == current_user.id)
@@ -389,6 +404,19 @@ def delete_alarm(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Alarm not found",
         )
+
+    # Clear dependents first so FK constraints (Postgres / SQLite with FKs on)
+    # cannot block the alarm row delete.
+    db.query(ChallengeSession).filter(ChallengeSession.alarm_id == alarm_id).delete(
+        synchronize_session=False
+    )
+    db.query(AlarmWakeEvent).filter(AlarmWakeEvent.alarm_id == alarm_id).delete(
+        synchronize_session=False
+    )
+    db.query(AlarmChallengeLog).filter(AlarmChallengeLog.alarm_id == alarm_id).delete(
+        synchronize_session=False
+    )
+
     db.delete(alarm)
     db.commit()
     return None
@@ -983,7 +1011,7 @@ def get_challenge_history(
                 "time_taken_seconds": log.time_taken_seconds,
                 "failed_attempts": log.failed_attempts,
                 "points_earned": log.points_earned,
-                "created_at": log.created_at.isoformat() if log.created_at else None,
+                "created_at": _utc_isoformat(log.created_at),
             }
             for log in logs
         ],
@@ -1108,7 +1136,7 @@ def get_user_challenge_history(
             "time_taken_seconds": log.time_taken_seconds,
             "failed_attempts": log.failed_attempts,
             "points_earned": log.points_earned,
-            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "created_at": _utc_isoformat(log.created_at),
         }
         for log in rows
     ]

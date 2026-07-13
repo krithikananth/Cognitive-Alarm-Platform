@@ -60,14 +60,21 @@ const useAlarmStore = create((set, get) => ({
 
   // ─── Delete Alarm ───
   deleteAlarm: async (id) => {
+    if (id == null) {
+      return { success: false, error: 'Invalid alarm id' };
+    }
     try {
-      await alarmAPI.delete(id);
+      await alarmAPI.remove(id);
       set((state) => ({
-        alarms: state.alarms.filter((a) => a.id !== id),
+        alarms: state.alarms.filter((a) => a.id !== id && String(a.id) !== String(id)),
       }));
       return { success: true };
     } catch (err) {
-      return { success: false, error: err.response?.data?.detail };
+      const message =
+        err.response?.data?.detail ||
+        err.message ||
+        'Failed to delete alarm';
+      return { success: false, error: message };
     }
   },
 

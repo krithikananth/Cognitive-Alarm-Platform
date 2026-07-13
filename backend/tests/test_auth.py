@@ -221,18 +221,26 @@ class TestGoogleOAuth:
     """Tests for Google OAuth2 redirect and callback endpoints."""
 
     def test_google_oauth_not_configured(self, client, monkeypatch):
-        """Without client credentials the start endpoint returns 501."""
+        """Without client credentials the start endpoint redirects back to login.
+
+        The browser navigates directly to this endpoint, so instead of a raw
+        error page we bounce back to the SPA login route with an ``error``
+        query param the frontend can surface as a toast.
+        """
         from app.core.config import settings
 
         monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_ID", None)
         monkeypatch.setattr(settings, "OAUTH2_GOOGLE_CLIENT_SECRET", None)
+        monkeypatch.setattr(settings, "FRONTEND_URL", "http://localhost:3000")
 
         response = client.get(
             "/api/v1/auth/oauth/google",
             follow_redirects=False,
         )
-        assert response.status_code == 501
-        assert "not configured" in response.json()["detail"]
+        assert response.status_code == 302
+        location = response.headers["location"]
+        assert location.startswith("http://localhost:3000/login?error=")
+        assert "not+configured" in location or "not%20configured" in location
 
     def test_google_oauth_redirect(self, client, monkeypatch):
         """Configured start endpoint redirects to Google's consent screen."""

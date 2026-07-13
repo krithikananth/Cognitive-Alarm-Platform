@@ -97,7 +97,8 @@ export const alarmAPI = {
   list: (activeOnly = false) => api.get('/alarms/', { params: { is_active: activeOnly === true ? true : undefined } }),
   get: (id) => api.get(`/alarms/${id}`),
   update: (id, data) => api.put(`/alarms/${id}`, data),
-  delete: (id) => api.delete(`/alarms/${id}`),
+  // Named `remove` — `delete` is a JS reserved word and is unreliable as a method key.
+  remove: (id) => api.delete(`/alarms/${id}`),
   toggle: (id, isActive) => api.patch(`/alarms/${id}/toggle`, { is_active: isActive }),
   upcoming: (hours = 24) => api.get('/alarms/upcoming', { params: { hours_ahead: hours } }),
   snooze: (id) => api.post(`/alarms/${id}/snooze`),

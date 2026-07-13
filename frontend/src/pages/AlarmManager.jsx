@@ -67,6 +67,8 @@ export default function AlarmManager() {
   const triggerAlarm = useActiveAlarmStore((s) => s.triggerAlarm);
   const [showModal, setShowModal] = useState(false);
   const [editingAlarm, setEditingAlarm] = useState(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     fetchAlarms();
@@ -82,11 +84,29 @@ export default function AlarmManager() {
     setShowModal(true);
   };
 
-  const handleDelete = async (id) => {
-    if (window.confirm('Delete this alarm?')) {
-      const result = await deleteAlarm(id);
-      if (result.success) toast.success('Alarm deleted');
+  const handleDeleteRequest = (id) => {
+    setPendingDeleteId(id);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (pendingDeleteId == null || isDeleting) return;
+    setIsDeleting(true);
+    try {
+      const result = await deleteAlarm(pendingDeleteId);
+      if (result.success) {
+        toast.success('Alarm deleted');
+        setPendingDeleteId(null);
+      } else {
+        toast.error(result.error || 'Failed to delete alarm');
+      }
+    } finally {
+      setIsDeleting(false);
     }
+  };
+
+  const handleDeleteCancel = () => {
+    if (isDeleting) return;
+    setPendingDeleteId(null);
   };
 
   const handleToggle = async (alarm) => {
@@ -220,7 +240,17 @@ export default function AlarmManager() {
                   <button onClick={() => handleEdit(alarm)} className="p-2 rounded-lg hover:bg-surface-700 transition" title="Edit">
                     <HiOutlinePencilSquare className="w-4 h-4 text-slate-400 hover:text-primary-400" />
                   </button>
-                  <button onClick={() => handleDelete(alarm.id)} className="p-2 rounded-lg hover:bg-red-500/10 transition" title="Delete">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleDeleteRequest(alarm.id);
+                    }}
+                    className="p-2 rounded-lg hover:bg-red-500/10 transition"
+                    title="Delete"
+                    id={`delete-alarm-${alarm.id}`}
+                  >
                     <HiOutlineTrash className="w-4 h-4 text-slate-400 hover:text-red-400" />
                   </button>
                 </div>
@@ -239,6 +269,50 @@ export default function AlarmManager() {
             onCreate={createAlarm}
             onUpdate={updateAlarm}
           />
+        )}
+      </AnimatePresence>
+
+      {/* Delete confirmation */}
+      <AnimatePresence>
+        {pendingDeleteId != null && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          >
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleDeleteCancel} />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative w-full max-w-sm glass rounded-2xl p-6 z-10"
+            >
+              <h2 className="text-lg font-bold text-white mb-2">Delete this alarm?</h2>
+              <p className="text-sm text-slate-400 mb-6">
+                This permanently removes the alarm and cannot be undone.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={handleDeleteCancel}
+                  disabled={isDeleting}
+                  className="btn-secondary flex-1"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteConfirm}
+                  disabled={isDeleting}
+                  className="flex-1 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-medium transition disabled:opacity-50"
+                  id="confirm-delete-alarm"
+                >
+                  {isDeleting ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>

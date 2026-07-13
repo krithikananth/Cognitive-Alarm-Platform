@@ -23,7 +23,7 @@ const CHALLENGE_TYPES = ['math', 'logic', 'memory', 'word_game', 'pattern', 'rid
 const DIFFICULTY_LEVELS = ['beginner', 'easy', 'medium', 'hard', 'expert'];
 
 export default function Profile() {
-  const { user } = useAuthStore();
+  const { user, fetchProfile } = useAuthStore();
   const [activeTab, setActiveTab] = useState('profile');
   const [profile, setProfile] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -39,6 +39,13 @@ export default function Profile() {
     } catch (err) {
       console.error(err);
     }
+  };
+
+  // Refreshes both the page-local profile bundle and the shared auth store's
+  // `user` (which the header/user-card above reads from), so edits made in
+  // any tab are reflected immediately instead of only after a page reload.
+  const refreshAll = async () => {
+    await Promise.all([loadProfile(), fetchProfile()]);
   };
 
   return (
@@ -92,17 +99,17 @@ export default function Profile() {
 
       {/* Tab Content */}
       <motion.div key={activeTab} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-        {activeTab === 'profile' && <ProfileTab user={user} />}
-        {activeTab === 'sleep' && <SleepTab profile={profile} onUpdate={loadProfile} />}
-        {activeTab === 'preferences' && <PreferencesTab profile={profile} onUpdate={loadProfile} />}
+        {activeTab === 'profile' && <ProfileTab user={user} onUpdate={refreshAll} />}
+        {activeTab === 'sleep' && <SleepTab profile={profile} onUpdate={refreshAll} />}
+        {activeTab === 'preferences' && <PreferencesTab profile={profile} onUpdate={refreshAll} />}
       </motion.div>
     </div>
   );
 }
 
 
-function ProfileTab({ user }) {
-  const { register, handleSubmit } = useForm({
+function ProfileTab({ user, onUpdate }) {
+  const { register, handleSubmit, reset } = useForm({
     defaultValues: {
       full_name: user?.full_name || '',
       username: user?.username || '',
@@ -117,6 +124,8 @@ function ProfileTab({ user }) {
     try {
       await userAPI.updateUser(data);
       toast.success('Profile updated!');
+      await onUpdate?.();
+      reset(data);
     } catch (err) {
       toast.error('Update failed');
     }

@@ -4,6 +4,22 @@
 import { create } from 'zustand';
 import { authAPI, userAPI } from '../services/api';
 
+// Best-effort sync of the browser's detected IANA timezone to the user's
+// profile. Runs after every login so accounts created without a timezone
+// (older sign-ups, OAuth sign-ups, or a stale/incorrect stored value) get
+// self-corrected — otherwise alarm scheduling silently falls back to UTC
+// and rings hours late/early relative to the user's local wall-clock time.
+const syncBrowserTimezone = () => {
+  try {
+    const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (detected) {
+      userAPI.updateUser({ timezone: detected }).catch(() => {});
+    }
+  } catch (e) {
+    // Intl unsupported or blocked — nothing we can do, keep existing value.
+  }
+};
+
 const useAuthStore = create((set, get) => ({
   // State
   user: (() => {
@@ -51,6 +67,7 @@ const useAuthStore = create((set, get) => ({
       localStorage.setItem('refresh_token', refresh_token);
       localStorage.setItem('user', JSON.stringify(user));
       set({ user, isAuthenticated: true, isLoading: false });
+      syncBrowserTimezone();
       return { success: true };
     } catch (err) {
       let message = 'Login failed';
@@ -76,6 +93,7 @@ const useAuthStore = create((set, get) => ({
       const user = res.data;
       localStorage.setItem('user', JSON.stringify(user));
       set({ user, isAuthenticated: true, isLoading: false });
+      syncBrowserTimezone();
       return { success: true, user };
     } catch (err) {
       localStorage.removeItem('access_token');

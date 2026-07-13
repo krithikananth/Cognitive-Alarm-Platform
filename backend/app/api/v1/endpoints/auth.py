@@ -126,13 +126,11 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(..., description="Valid refresh JWT")
 
 
-def _require_google_oauth_config() -> None:
-    """Raise 501 when Google OAuth credentials are not configured."""
-    if not settings.OAUTH2_GOOGLE_CLIENT_ID or not settings.OAUTH2_GOOGLE_CLIENT_SECRET:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Google OAuth is not configured",
-        )
+def _google_oauth_configured() -> bool:
+    """Return True when both Google OAuth client credentials are present."""
+    return bool(
+        settings.OAUTH2_GOOGLE_CLIENT_ID and settings.OAUTH2_GOOGLE_CLIENT_SECRET
+    )
 
 
 def _oauth_error_redirect(message: str) -> RedirectResponse:
@@ -166,7 +164,10 @@ def _oauth_success_redirect(token_payload: dict) -> RedirectResponse:
 )
 def google_oauth_redirect():
     """Redirect the browser to Google's OAuth2 consent screen."""
-    _require_google_oauth_config()
+    if not _google_oauth_configured():
+        return _oauth_error_redirect(
+            "Google sign-in is not configured. Please contact your administrator."
+        )
 
     params = urlencode(
         {
@@ -195,7 +196,10 @@ def google_oauth_callback(
     db: Session = Depends(get_db),
 ):
     """Exchange the Google auth code, link/create the user, redirect with JWTs."""
-    _require_google_oauth_config()
+    if not _google_oauth_configured():
+        return _oauth_error_redirect(
+            "Google sign-in is not configured. Please contact your administrator."
+        )
 
     if error:
         return _oauth_error_redirect(error)
