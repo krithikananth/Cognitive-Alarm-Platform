@@ -12,6 +12,7 @@ import {
 import toast from 'react-hot-toast';
 import useAuthStore from '../store/authStore';
 import { userAPI } from '../services/api';
+import { formatTimeDisplay } from '../utils/timeFormat';
 
 const TABS = [
   { id: 'profile', label: 'Profile', icon: HiOutlineUser },
@@ -208,12 +209,14 @@ function ProfileTab({ user, onUpdate }) {
 }
 
 function SleepTab({ profile, onUpdate }) {
-  const { register, handleSubmit } = useForm({
+  const { register, handleSubmit, watch } = useForm({
     defaultValues: {
       preferred_wakeup_time: profile?.profile?.preferred_wakeup_time?.slice(0, 5) || '07:00',
       sleep_duration_hours: profile?.profile?.sleep_duration_hours || 8,
     },
   });
+
+  const preferredWakeupTime = watch('preferred_wakeup_time');
 
   const onSubmit = async (data) => {
     try {
@@ -239,6 +242,9 @@ function SleepTab({ profile, onUpdate }) {
           <div>
             <label className="label">Preferred Wake-up Time</label>
             <input type="time" className="input text-xl font-bold" {...register('preferred_wakeup_time')} />
+            <p className="mt-1.5 text-sm text-slate-400">
+              {formatTimeDisplay(preferredWakeupTime)}
+            </p>
           </div>
           <div>
             <label className="label">Sleep Duration (hours)</label>
@@ -253,7 +259,8 @@ function SleepTab({ profile, onUpdate }) {
               const dur = profile?.profile?.sleep_duration_hours || 8;
               const [h, m] = wake.split(':').map(Number);
               const bedH = ((h - Math.floor(dur)) + 24) % 24;
-              return `${bedH.toString().padStart(2, '0')}:${(m || 0).toString().padStart(2, '0')}`;
+              const bedtime24 = `${bedH.toString().padStart(2, '0')}:${(m || 0).toString().padStart(2, '0')}`;
+              return formatTimeDisplay(bedtime24);
             })()}
             </strong>
           </p>

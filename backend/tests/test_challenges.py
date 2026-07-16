@@ -39,7 +39,28 @@ class TestChallengeGeneration:
         result = ChallengeService.generate_challenge(ChallengeType.PATTERN)
         assert result["type"] == "PATTERN"
         assert "comes next" in result["prompt"].lower()
-        assert result["answer"].isdigit() or result["answer"].lstrip("-").isdigit()
+        assert result["answer"]
+        assert isinstance(result["options"], list)
+        assert len(result["options"]) == 4
+        assert result["answer"] in result["options"]
+
+    def test_generate_pattern_varies_across_categories(self):
+        """Repeated generation should yield more than only digit answers."""
+        answers = []
+        for _ in range(40):
+            result = ChallengeService.generate_challenge(
+                ChallengeType.PATTERN, current_hour=10
+            )
+            assert result["type"] == "PATTERN"
+            assert len(result["options"]) == 4
+            assert result["answer"] in result["options"]
+            answers.append(result["answer"])
+        # At least one non-numeric answer across many draws (category variety)
+        non_numeric = [
+            a for a in answers
+            if not (a.isdigit() or a.lstrip("-").isdigit())
+        ]
+        assert len(non_numeric) >= 1
 
     def test_generate_memory_returns_digit_sequence(self):
         """Memory challenge prompt should be all digits with no options."""
@@ -113,6 +134,87 @@ class TestChallengeGeneration:
             )
             assert result["type"] in ["MATH", "RIDDLE"]
 
+    def test_random_covers_all_supported_types_fairly(self):
+        """RANDOM without preferences should sample across every selectable type."""
+        seen = set()
+        for _ in range(120):
+            result = ChallengeService.generate_challenge(
+                ChallengeType.RANDOM,
+                current_hour=10,
+                apply_adaptive_difficulty=False,
+            )
+            seen.add(result["type"])
+        assert seen == {
+            "MATH", "LOGIC", "PATTERN", "MEMORY", "WORD_GAME", "RIDDLE", "QUIZ",
+        }
+
+    def test_select_challenge_type_avoids_recent_type_bias(self):
+        """Recent types should be deprioritized, not dominate RANDOM selection."""
+        class FakeLog:
+            def __init__(self, ct):
+                self.challenge_type = ct
+                self.is_correct = True
+
+        # Flood recent history with MATH — fair selector should still pick others
+        logs = [FakeLog("math") for _ in range(7)]
+        picks = [
+            ChallengeService.select_challenge_type(
+                ChallengeType.RANDOM, recent_logs=logs
+            ).value
+            for _ in range(80)
+        ]
+        non_math = sum(1 for p in picks if p != "math")
+        assert non_math >= 40
+
+    def test_exclude_prompts_avoids_recent_bank_question(self):
+        """Bank challenges should skip recently shown prompts when alternatives exist."""
+        banks = ChallengeService._riddle_banks()["easy"]
+        first = banks[0]
+        result = ChallengeService.generate_challenge(
+            ChallengeType.RIDDLE,
+            difficulty="beginner",
+            current_hour=10,
+            apply_adaptive_difficulty=False,
+            exclude_prompts=[first["q"]],
+        )
+        assert result["prompt"].strip().lower() != first["q"].strip().lower()
+
+    def test_generate_challenge_recovers_from_generator_failure(self):
+        """Generation should regenerate instead of crashing on transient failures."""
+        original = ChallengeService._generate_math
+        calls = {"n": 0}
+
+        def flaky(difficulty="medium"):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ValueError("simulated generation failure")
+            return original(difficulty)
+
+        ChallengeService._generate_math = staticmethod(flaky)
+        try:
+            result = ChallengeService.generate_challenge(
+                ChallengeType.MATH,
+                current_hour=10,
+                apply_adaptive_difficulty=False,
+            )
+            assert result["type"] == "MATH"
+            assert result["answer"]
+            assert calls["n"] >= 3
+        finally:
+            ChallengeService._generate_math = original
+
+    def test_validate_generated_challenge_rejects_inconsistent_mcq(self):
+        """Pre-serve validation must reject inconsistent option sets."""
+        with pytest.raises(ValueError):
+            ChallengeService._validate_generated_challenge(
+                {
+                    "type": "QUIZ",
+                    "prompt": "Sample question?",
+                    "answer": "A",
+                    "options": ["B", "C", "D", "E"],
+                }
+            )
+
     def test_adapt_difficulty_raises_on_strong_performance(self):
         """High accuracy + fast solves should raise difficulty."""
         class FakeLog:
@@ -169,6 +271,88 @@ class TestChallengeGeneration:
             result = ChallengeService.generate_challenge(ct, difficulty="medium")
             assert "difficulty" in result, f"{ct.value} missing difficulty"
             assert "time_limit_seconds" in result, f"{ct.value} missing time_limit"
+
+
+class TestChallengeAnswerUniqueness:
+    """Every MCQ must expose exactly one unambiguous correct option."""
+
+    def _assert_valid_mcq(self, result):
+        assert result["answer"]
+        assert isinstance(result["options"], list)
+        assert len(result["options"]) == 4
+        assert len({o.strip().lower() for o in result["options"]}) == 4
+        assert result["answer"] in result["options"]
+        ChallengeService.validate_mcq_item(
+            result["prompt"], result["answer"], result["options"]
+        )
+
+    def test_static_riddle_bank_items_are_unambiguous(self):
+        """Every curated riddle must validate with one clear correct option."""
+        banks = ChallengeService._riddle_banks()
+        for tier, items in banks.items():
+            for item in items:
+                options = ChallengeService.validate_mcq_item(
+                    item["q"], item["a"], item["opts"]
+                )
+                assert item["a"] in options
+                assert len(options) == 4, f"riddle/{tier}: {item['q']}"
+
+    def test_static_logic_and_quiz_banks_are_unambiguous(self):
+        """Logic and quiz banks must each have one factual/correct option."""
+        for name, banks in (
+            ("logic", ChallengeService._logic_banks()),
+            ("quiz", ChallengeService._quiz_banks()),
+        ):
+            for tier, items in banks.items():
+                for item in items:
+                    ChallengeService.validate_mcq_item(
+                        item["q"], item["a"], item["opts"]
+                    )
+
+    def test_generated_mcq_types_always_have_one_correct_option(self):
+        """Generated challenges should never present duplicate or missing answers."""
+        mcq_types = [
+            ChallengeType.MATH,
+            ChallengeType.LOGIC,
+            ChallengeType.PATTERN,
+            ChallengeType.WORD_GAME,
+            ChallengeType.RIDDLE,
+            ChallengeType.QUIZ,
+        ]
+        for ct in mcq_types:
+            for difficulty in DIFFICULTY_LEVELS:
+                for _ in range(8):
+                    result = ChallengeService.generate_challenge(
+                        ct,
+                        difficulty=difficulty,
+                        current_hour=10,
+                        apply_adaptive_difficulty=False,
+                    )
+                    self._assert_valid_mcq(result)
+                    # Distractors must not equal the correct answer
+                    distractors = [
+                        o for o in result["options"] if o != result["answer"]
+                    ]
+                    assert len(distractors) == 3
+                    assert all(
+                        o.strip().lower() != result["answer"].strip().lower()
+                        for o in distractors
+                    )
+
+    def test_validate_mcq_rejects_duplicate_and_missing_answers(self):
+        """Validator should reject ambiguous or inconsistent option sets."""
+        with pytest.raises(ValueError):
+            ChallengeService.validate_mcq_item(
+                "Sample?", "A", ["A", "A", "B", "C"]
+            )
+        with pytest.raises(ValueError):
+            ChallengeService.validate_mcq_item(
+                "Sample?", "A", ["B", "C", "D", "E"]
+            )
+        with pytest.raises(ValueError):
+            ChallengeService.validate_mcq_item(
+                "Sample?", "A", ["A", "B", "C"]
+            )
 
 
 class TestDifficultyPersonalization:

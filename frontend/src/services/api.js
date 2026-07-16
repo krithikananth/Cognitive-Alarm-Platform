@@ -117,6 +117,15 @@ export const alarmAPI = {
     api.get('/alarms/wake-confirmations', { params: { limit } }),
 };
 
+// ─── Recommendations API (sleep / wake / productivity coaching) ───
+export const recommendationAPI = {
+  getAll: (params = {}) => api.get('/recommendations', { params }),
+  getDaily: () => api.get('/recommendations/daily'),
+  getSleep: () => api.get('/recommendations/sleep'),
+  getWake: () => api.get('/recommendations/wake'),
+  getProductivity: () => api.get('/recommendations/productivity'),
+};
+
 // ─── Admin API ───
 export const adminAPI = {
   getDashboard: () => api.get('/admin/dashboard'),

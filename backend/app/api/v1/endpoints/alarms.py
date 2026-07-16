@@ -546,11 +546,19 @@ def get_alarm_challenge(
         db.query(AlarmChallengeLog)
         .filter(AlarmChallengeLog.user_id == current_user.id)
         .order_by(AlarmChallengeLog.created_at.desc())
-        .limit(20)
+        .limit(25)
         .all()
     )
 
     current_hour = datetime.now(_resolve_timezone(user_tz_name)).hour
+
+    # Avoid repeating the prompt still active in this alarm's session
+    active_session = ChallengeService.get_challenge_session(
+        current_user.id, alarm.id, db
+    )
+    exclude_prompts = []
+    if active_session and active_session.get("prompt"):
+        exclude_prompts.append(active_session["prompt"])
 
     challenge = ChallengeService.generate_challenge(
         challenge_type=alarm.challenge_type,
@@ -558,6 +566,7 @@ def get_alarm_challenge(
         current_hour=current_hour,
         preferred_types=preferred_types,
         recent_logs=recent_logs,
+        exclude_prompts=exclude_prompts or None,
     )
     # Persist answer + progress server-side (preserve consecutive streak)
     session = ChallengeService.store_challenge_session(

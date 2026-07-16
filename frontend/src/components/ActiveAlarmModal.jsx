@@ -12,6 +12,15 @@ import { HiOutlineBellAlert, HiOutlineClock, HiOutlineCheckCircle } from 'react-
 import toast from 'react-hot-toast';
 import useActiveAlarmStore from '../store/activeAlarmStore';
 
+/** How long (ms) the memory sequence stays visible, by difficulty. */
+const MEMORY_DISPLAY_MS = {
+  beginner: 5000,
+  easy: 5000,
+  medium: 4000,
+  hard: 3000,
+  expert: 2500,
+};
+
 export default function ActiveAlarmModal() {
   const {
     isRinging, challenge, isLoading, error,
@@ -24,6 +33,9 @@ export default function ActiveAlarmModal() {
 
   const [answer, setAnswer] = useState('');
   const [shaking, setShaking] = useState(false);
+  // Memory challenge: show sequence first, then hide and allow input
+  const [memoryReady, setMemoryReady] = useState(false);
+  const [memorySecondsLeft, setMemorySecondsLeft] = useState(0);
 
   // ── Audio alarm beep ──
   useEffect(() => {
@@ -69,13 +81,48 @@ export default function ActiveAlarmModal() {
     }
   }, [error]);
 
+  // ── Memory challenge: memorize phase then hide sequence ──
+  useEffect(() => {
+    if (!isRinging || !challenge || challenge.type !== 'MEMORY') {
+      setMemoryReady(true);
+      setMemorySecondsLeft(0);
+      return undefined;
+    }
+
+    const displayMs =
+      MEMORY_DISPLAY_MS[challenge.difficulty] ?? MEMORY_DISPLAY_MS.medium;
+    const totalSeconds = Math.ceil(displayMs / 1000);
+
+    setMemoryReady(false);
+    setMemorySecondsLeft(totalSeconds);
+    setAnswer('');
+
+    const hideTimer = setTimeout(() => {
+      setMemoryReady(true);
+      setMemorySecondsLeft(0);
+    }, displayMs);
+
+    const countdownInterval = setInterval(() => {
+      setMemorySecondsLeft((prev) => (prev > 1 ? prev - 1 : 0));
+    }, 1000);
+
+    return () => {
+      clearTimeout(hideTimer);
+      clearInterval(countdownInterval);
+    };
+  }, [isRinging, challenge?.type, challenge?.prompt, challenge?.difficulty, currentStep]);
+
   if (!isRinging) {
     return null;
   }
 
+  const isMemoryChallenge = challenge?.type === 'MEMORY';
+  const showMemorySequence = isMemoryChallenge && !memoryReady;
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!answer.trim() || isLoading) return;
+    if (isMemoryChallenge && !memoryReady) return;
     const timeLimit = challenge?.time_limit_seconds || 30;
     const elapsed = Math.max(0, timeLimit - (timeLeft ?? timeLimit));
     const result = await verifyAndDismiss(answer, elapsed, failedAttempts);
@@ -261,9 +308,34 @@ export default function ActiveAlarmModal() {
                     )}
                   </div>
 
-                  {challenge.type === 'MEMORY' ? (
-                    <div className="text-4xl font-bold tracking-[1em] text-white my-6">
-                      {challenge.prompt}
+                  {isMemoryChallenge ? (
+                    <div className="my-6">
+                      {showMemorySequence ? (
+                        <>
+                          <p className="text-sm text-accent-400 font-medium mb-3">
+                            Memorize this sequence…
+                          </p>
+                          <div
+                            className="text-4xl font-bold tracking-[1em] text-white select-none"
+                            onCopy={(e) => e.preventDefault()}
+                            onContextMenu={(e) => e.preventDefault()}
+                          >
+                            {challenge.prompt}
+                          </div>
+                          <p className="text-xs text-slate-500 mt-3">
+                            Hides in {memorySecondsLeft}s
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-sm text-slate-400 font-medium mb-3">
+                            Enter the sequence from memory
+                          </p>
+                          <div className="text-4xl font-bold tracking-[0.5em] text-slate-600 select-none">
+                            {'•'.repeat(Math.min(challenge.prompt?.length || 4, 12))}
+                          </div>
+                        </>
+                      )}
                     </div>
                   ) : (
                     <div className="text-2xl font-bold text-white my-4">
@@ -286,15 +358,26 @@ export default function ActiveAlarmModal() {
                       </button>
                     ))}
                   </div>
+                ) : showMemorySequence ? (
+                  <div className="mb-6 px-4 py-6 rounded-2xl border border-dashed border-slate-600 bg-slate-800/30">
+                    <p className="text-slate-500 text-sm">
+                      Answer input unlocks after the sequence is hidden.
+                    </p>
+                  </div>
                 ) : (
                   <form onSubmit={handleSubmit} className="mb-6">
                     <input
                       type="text"
                       value={answer}
                       onChange={(e) => setAnswer(e.target.value)}
-                      placeholder="Type your answer here..."
+                      placeholder={
+                        isMemoryChallenge
+                          ? 'Type the sequence from memory...'
+                          : 'Type your answer here...'
+                      }
                       className="input w-full text-center text-xl h-14 mb-4"
                       autoFocus
+                      disabled={isLoading}
                     />
                     <button
                       type="submit"

@@ -40,6 +40,15 @@ VERIFY_TIME_GRACE_SECONDS = 5
 # Recent attempts used for adaptive difficulty / type weighting
 PERFORMANCE_WINDOW = 20
 
+# Avoid repeating the same prompt across consecutive alarms / multi-step sessions
+RECENT_PROMPT_WINDOW = 25
+
+# Soft anti-repeat window for RANDOM type fairness
+RECENT_TYPE_WINDOW = 7
+
+# Max attempts when generation fails or yields a duplicate prompt
+MAX_GENERATION_ATTEMPTS = 8
+
 
 def _clamp_difficulty(level: str) -> str:
     """Ensure the difficulty string is a valid level, defaulting to medium."""
@@ -53,6 +62,16 @@ def _difficulty_index(level: str) -> int:
         return DIFFICULTY_LEVELS.index(_clamp_difficulty(level))
     except ValueError:
         return 2  # medium
+
+
+def _option_key(text: str) -> str:
+    """Case-insensitive key for comparing multiple-choice options."""
+    return str(text).strip().lower()
+
+
+def _prompt_key(text: str) -> str:
+    """Normalized key for comparing challenge prompts (dedup)."""
+    return " ".join(str(text or "").strip().lower().split())
 
 
 def _adjust_for_time(base_difficulty: str, current_hour: Optional[int] = None) -> str:
@@ -102,6 +121,202 @@ class ChallengeService:
         return challenge_type
 
     @staticmethod
+    def validate_mcq_item(
+        prompt: str,
+        answer: str,
+        options: list,
+        *,
+        expected_count: int = 4,
+    ) -> list[str]:
+        """
+        Validate a multiple-choice item has exactly one unambiguous correct answer.
+
+        Rules:
+            - Non-empty prompt and answer
+            - Exactly ``expected_count`` unique options (case-insensitive)
+            - Correct answer appears exactly once among the options
+            - No blank / whitespace-only options
+
+        Returns:
+            Normalized options list with the canonical answer spelling preserved.
+
+        Raises:
+            ValueError: if the item is ambiguous, incomplete, or inconsistent.
+        """
+        prompt_text = (prompt or "").strip()
+        answer_text = str(answer or "").strip()
+        if not prompt_text:
+            raise ValueError("Challenge prompt must be non-empty")
+        if not answer_text:
+            raise ValueError("Challenge answer must be non-empty")
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        answer_key = _option_key(answer_text)
+        answer_hits = 0
+
+        for raw in options or []:
+            text = str(raw).strip()
+            if not text:
+                raise ValueError("Options must not be blank")
+            key = _option_key(text)
+            if key in seen:
+                raise ValueError(f"Duplicate option: {text}")
+            seen.add(key)
+            if key == answer_key:
+                answer_hits += 1
+                normalized.append(answer_text)
+            else:
+                normalized.append(text)
+
+        if answer_hits != 1:
+            raise ValueError(
+                "Correct answer must appear exactly once among the options"
+            )
+        if len(normalized) != expected_count:
+            raise ValueError(
+                f"Expected exactly {expected_count} unique options, "
+                f"got {len(normalized)}"
+            )
+        return normalized
+
+    @staticmethod
+    def _finalize_mcq(
+        challenge_type: str,
+        prompt: str,
+        answer: str,
+        options: list,
+    ) -> Dict[str, Any]:
+        """Shuffle validated MCQ options into a challenge payload."""
+        validated = ChallengeService.validate_mcq_item(prompt, answer, options)
+        shuffled = validated[:]
+        random.shuffle(shuffled)
+        return {
+            "type": challenge_type,
+            "prompt": prompt.strip(),
+            "answer": str(answer).strip(),
+            "options": shuffled,
+        }
+
+    @staticmethod
+    def _pick_mcq_from_bank(
+        pool: list,
+        challenge_type: str,
+        exclude_prompts: Optional[set] = None,
+    ) -> Dict[str, Any]:
+        """
+        Select a bank entry that passes single-answer MCQ validation.
+
+        Invalid curated items are skipped so ambiguous questions are never shown.
+        Recently shown prompts are avoided when alternatives remain in the pool.
+        """
+        if not pool:
+            raise ValueError(f"Empty challenge bank for {challenge_type}")
+
+        excluded = {_prompt_key(p) for p in (exclude_prompts or set()) if p}
+        order = list(range(len(pool)))
+        random.shuffle(order)
+        last_error: Optional[Exception] = None
+        fallback: Optional[Dict[str, Any]] = None
+
+        for idx in order:
+            item = pool[idx]
+            try:
+                prompt = item["q"]
+                result = ChallengeService._finalize_mcq(
+                    challenge_type,
+                    prompt,
+                    item["a"],
+                    item["opts"],
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                last_error = exc
+                continue
+
+            if _prompt_key(prompt) in excluded:
+                if fallback is None:
+                    fallback = result
+                continue
+            return result
+
+        if fallback is not None:
+            return fallback
+
+        raise ValueError(
+            f"No valid {challenge_type} challenge in bank"
+            + (f": {last_error}" if last_error else "")
+        )
+
+    @staticmethod
+    def _collect_recent_prompts(
+        recent_logs: Optional[list] = None,
+        exclude_prompts: Optional[list] = None,
+    ) -> set[str]:
+        """Build a set of normalized prompts to avoid repeating soon."""
+        keys: set[str] = set()
+        for raw in exclude_prompts or []:
+            key = _prompt_key(raw)
+            if key:
+                keys.add(key)
+        for log in list(recent_logs or [])[:RECENT_PROMPT_WINDOW]:
+            prompt = getattr(log, "challenge_prompt", None)
+            key = _prompt_key(prompt)
+            if key:
+                keys.add(key)
+        return keys
+
+    @staticmethod
+    def _validate_generated_challenge(result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Ensure a generated challenge is internally consistent before serving.
+
+        Raises ValueError when the payload is incomplete, inconsistent, or
+        unsafe for a general audience.
+        """
+        if not isinstance(result, dict):
+            raise ValueError("Challenge payload must be a dict")
+
+        prompt = str(result.get("prompt") or "").strip()
+        answer = str(result.get("answer") or "").strip()
+        challenge_type = str(result.get("type") or "").strip().upper()
+        if not prompt:
+            raise ValueError("Challenge prompt must be non-empty")
+        if not answer:
+            raise ValueError("Challenge answer must be non-empty")
+        if not challenge_type:
+            raise ValueError("Challenge type must be non-empty")
+
+        # Keep prompts readable on mobile alarm UI
+        if len(prompt) > 280:
+            raise ValueError("Challenge prompt is too long")
+
+        blocked = (
+            "kill", "suicide", "racist", "nazi", "porn", "nude", "sex",
+            "drugs", "cocaine", "heroin", "slur",
+        )
+        haystack = f"{prompt} {answer}".lower()
+        if any(term in haystack for term in blocked):
+            raise ValueError("Challenge content failed appropriateness check")
+
+        options = result.get("options")
+        if options is None:
+            # Memory / free-text challenges: single exact answer, no MCQ list
+            result["prompt"] = prompt
+            result["answer"] = answer
+            result["type"] = challenge_type
+            return result
+
+        if not isinstance(options, list):
+            raise ValueError("Challenge options must be a list or null")
+
+        validated = ChallengeService.validate_mcq_item(prompt, answer, options)
+        result["prompt"] = prompt
+        result["answer"] = answer
+        result["type"] = challenge_type
+        result["options"] = validated
+        return result
+
+    @staticmethod
     def _parse_preferred_types(preferred_types: Optional[list]) -> list[ChallengeType]:
         """Parse preferred type strings into ChallengeType enums."""
         if not preferred_types:
@@ -129,8 +344,9 @@ class ChallengeService:
         Resolve which concrete challenge type to serve.
 
         - Fixed alarm types are honored as-is.
-        - RANDOM (or equivalent) picks from the user's preferred types,
-          weighted toward weaker types so practice stays personalized.
+        - RANDOM picks fairly from the preferred pool (or all supported types),
+          with a light penalty for types shown in the most recent attempts so
+          the same few categories are not favored repeatedly.
         """
         requested = ChallengeService._normalize_type(requested)
         if requested != ChallengeType.RANDOM:
@@ -138,30 +354,23 @@ class ChallengeService:
 
         pool = ChallengeService._parse_preferred_types(preferred_types)
 
-        # Weight by weakness: lower accuracy → higher selection weight
-        weights = []
-        by_type: Dict[str, Dict[str, int]] = {}
-        for log in recent_logs or []:
+        # Count how recently each type appeared (newer = stronger penalty)
+        recent_hits: Dict[str, int] = {ct.value: 0 for ct in pool}
+        for position, log in enumerate(list(recent_logs or [])[:RECENT_TYPE_WINDOW]):
             ct = (getattr(log, "challenge_type", None) or "").lower()
-            if ct in ("random", "word", ""):
+            if ct in ("random", ""):
                 continue
-            if ct == "word_game" or ct.startswith("word"):
+            if ct == "word" or ct.startswith("word"):
                 ct = "word_game"
-            if ct not in by_type:
-                by_type[ct] = {"total": 0, "correct": 0}
-            by_type[ct]["total"] += 1
-            if getattr(log, "is_correct", False):
-                by_type[ct]["correct"] += 1
+            if ct in recent_hits:
+                # More recent appearances count more toward the penalty
+                recent_hits[ct] += RECENT_TYPE_WINDOW - position
 
+        weights = []
         for ct in pool:
-            stats = by_type.get(ct.value, {"total": 0, "correct": 0})
-            if stats["total"] < 3:
-                # Unexplored preferred types get a healthy chance
-                weights.append(2.5)
-            else:
-                accuracy = stats["correct"] / stats["total"]
-                # Invert accuracy: 0% → weight 3.0, 100% → weight 0.5
-                weights.append(max(0.5, 3.0 - (accuracy * 2.5)))
+            # Base weight 1.0 for every type → fair coverage of the full pool
+            penalty = recent_hits.get(ct.value, 0)
+            weights.append(max(0.35, 1.0 - (0.12 * penalty)))
 
         return random.choices(pool, weights=weights, k=1)[0]
 
@@ -239,6 +448,7 @@ class ChallengeService:
         preferred_types: Optional[list] = None,
         recent_logs: Optional[list] = None,
         apply_adaptive_difficulty: bool = True,
+        exclude_prompts: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Generate a cognitive puzzle personalized by preferences, performance,
@@ -254,16 +464,12 @@ class ChallengeService:
             recent_logs: Recent AlarmChallengeLog rows for personalization.
             apply_adaptive_difficulty: When True, shift difficulty from
                 recent performance before applying time-of-day softening.
+            exclude_prompts: Extra prompts to avoid (e.g. active session).
 
         Returns:
             A dictionary with the challenge prompt, type, correct answer,
             the effective difficulty applied, and a time_limit_seconds hint.
         """
-        # 1) Personalized type selection (RANDOM → preferred + weak-type bias)
-        resolved_type = ChallengeService.select_challenge_type(
-            challenge_type, preferred_types, recent_logs
-        )
-
         # 2) Performance-based adaptive difficulty
         adaptation = {"adjustment": 0, "reason": "Adaptive difficulty disabled."}
         working_difficulty = _clamp_difficulty(difficulty)
@@ -276,7 +482,6 @@ class ChallengeService:
         # 3) Time-of-day softening
         effective = _adjust_for_time(working_difficulty, current_hour)
 
-        # Dispatch to the appropriate generator
         generators = {
             ChallengeType.MATH: ChallengeService._generate_math,
             ChallengeType.LOGIC: ChallengeService._generate_logic,
@@ -287,24 +492,92 @@ class ChallengeService:
             ChallengeType.QUIZ: ChallengeService._generate_quiz,
         }
 
-        generator = generators.get(resolved_type)
-        if generator:
-            result = generator(effective)
-        else:
-            result = ChallengeService._generate_ai_challenge(
-                resolved_type, effective
+        recent_prompt_keys = ChallengeService._collect_recent_prompts(
+            recent_logs, exclude_prompts
+        )
+        is_random = (
+            challenge_type == ChallengeType.RANDOM
+            or ChallengeService._normalize_type(challenge_type)
+            == ChallengeType.RANDOM
+        )
+        selection_reason = (
+            "Fair rotation across supported challenge types"
+            if is_random
+            else "Alarm-configured challenge type"
+        )
+
+        last_error: Optional[Exception] = None
+        for attempt in range(MAX_GENERATION_ATTEMPTS):
+            try:
+                # 1) Fair type selection (RANDOM → all preferred / supported types)
+                resolved_type = ChallengeService.select_challenge_type(
+                    challenge_type, preferred_types, recent_logs
+                )
+
+                generator = generators.get(resolved_type)
+                if generator in (
+                    ChallengeService._generate_logic,
+                    ChallengeService._generate_riddle,
+                    ChallengeService._generate_quiz,
+                    ChallengeService._generate_word_game,
+                ):
+                    result = generator(
+                        effective, exclude_prompts=recent_prompt_keys
+                    )
+                elif generator:
+                    result = generator(effective)
+                else:
+                    result = ChallengeService._generate_ai_challenge(
+                        resolved_type, effective
+                    )
+
+                result = ChallengeService._validate_generated_challenge(result)
+
+                prompt_key = _prompt_key(result.get("prompt"))
+                # Avoid duplicates when another distinct prompt is available
+                if (
+                    prompt_key
+                    and prompt_key in recent_prompt_keys
+                    and attempt < MAX_GENERATION_ATTEMPTS - 1
+                ):
+                    last_error = ValueError("Duplicate recent prompt")
+                    continue
+
+                result["difficulty"] = effective
+                result["time_limit_seconds"] = ChallengeService._time_limit_for(
+                    effective
+                )
+                result["requested_type"] = challenge_type.value
+                result["selection_reason"] = selection_reason
+                result["adaptive_difficulty"] = adaptation
+                return result
+            except Exception as exc:  # noqa: BLE001 — regenerate gracefully
+                last_error = exc
+                continue
+
+        # Absolute last resort: simple math so the alarm flow never crashes
+        try:
+            result = ChallengeService._validate_generated_challenge(
+                ChallengeService._generate_math(effective)
             )
+        except Exception:
+            result = {
+                "type": "MATH",
+                "prompt": "What is 2 + 2?",
+                "answer": "4",
+                "options": ["4", "3", "5", "6"],
+            }
+            result = ChallengeService._validate_generated_challenge(result)
 
         result["difficulty"] = effective
         result["time_limit_seconds"] = ChallengeService._time_limit_for(effective)
         result["requested_type"] = challenge_type.value
-        result["selection_reason"] = (
-            "Preferred types + performance weighting"
-            if challenge_type == ChallengeType.RANDOM
-            or ChallengeService._normalize_type(challenge_type) == ChallengeType.RANDOM
-            else "Alarm-configured challenge type"
-        )
+        result["selection_reason"] = selection_reason
         result["adaptive_difficulty"] = adaptation
+        if last_error is not None:
+            result["generation_note"] = (
+                f"Regenerated after failure: {type(last_error).__name__}"
+            )
         return result
 
     @staticmethod
@@ -597,6 +870,15 @@ class ChallengeService:
             {"Make it extremely challenging, suitable for experts." if difficulty == "expert" else ""}
             The puzzle must be solvable but challenging enough to wake someone up.
 
+            Critical quality rules:
+            - Exactly ONE objectively correct answer; no subjective or multi-answer riddles.
+            - Wording must be unambiguous; the correct option must match the question exactly.
+            - The other 3 options must be plausible distractors that are definitively incorrect.
+            - Do not include duplicate, synonymous, partially correct, or conflicting options.
+            - Keep the prompt short (under 200 characters) and suitable for a general audience.
+            - No offensive, violent, sexual, discriminatory, or inappropriate content.
+            - All facts, numbers, dates, units, and calculations must be correct.
+
             You must return a raw JSON object with NO markdown formatting, NO backticks, and NO extra text.
             The JSON object must have exactly these keys:
             - "prompt": The question or puzzle text.
@@ -623,14 +905,14 @@ class ChallengeService:
             if "prompt" not in data or "answer" not in data or "options" not in data:
                 raise ValueError("Missing required keys in AI response")
 
-            random.shuffle(data["options"])
-
-            return {
-                "type": challenge_type.value.upper(),
-                "prompt": data["prompt"],
-                "answer": str(data["answer"]),
-                "options": [str(o) for o in data["options"]],
-            }
+            finalized = ChallengeService._finalize_mcq(
+                challenge_type.value.upper(),
+                str(data["prompt"]),
+                str(data["answer"]),
+                list(data["options"]),
+            )
+            # Discard invalid AI content before presenting to the user
+            return ChallengeService._validate_generated_challenge(finalized)
 
         except Exception as e:
             print(f"⚠️ AI Generation Failed: {e}. Falling back to procedural puzzle.")
@@ -753,69 +1035,145 @@ class ChallengeService:
                 # Follow order of operations
                 answer = str(a + b * c - d)
 
-        return {
-            "type": "MATH",
-            "prompt": f"Solve: {equation} = ?",
-            "answer": answer,
-            "options": ChallengeService._generate_options(answer),
-        }
+        return ChallengeService._finalize_mcq(
+            "MATH",
+            f"Solve: {equation} = ?",
+            answer,
+            ChallengeService._generate_options(answer),
+        )
 
-    # ── PATTERN generator (difficulty-aware) ─────────────────────────
+    # ── PATTERN generator (difficulty-aware, multi-category) ─────────
+
+    @staticmethod
+    def _build_pattern_options(answer: str, distractors: list) -> list[str]:
+        """Build 4 unique MCQ options with exactly one correct answer."""
+        answer = str(answer).strip()
+        pool: list[str] = []
+        seen = {_option_key(answer)}
+        for item in distractors:
+            text = str(item).strip()
+            if not text:
+                continue
+            key = _option_key(text)
+            if key not in seen:
+                pool.append(text)
+                seen.add(key)
+        random.shuffle(pool)
+        options = [answer] + pool[:3]
+        # Prefer numeric near-misses over placeholder pads when possible
+        if len(options) < 4:
+            try:
+                ans_val = int(answer)
+                offset = 1
+                while len(options) < 4 and offset < 50:
+                    for candidate in (ans_val + offset, ans_val - offset):
+                        text = str(candidate)
+                        key = _option_key(text)
+                        if key not in seen:
+                            options.append(text)
+                            seen.add(key)
+                        if len(options) == 4:
+                            break
+                    offset += 1
+            except ValueError:
+                # Believable non-numeric pads (never generic "Option N")
+                pads = [
+                    "◆", "●", "▲", "■", "★", "○", "◇", "✦",
+                    "A", "B", "C", "D", "X", "Y", "Z",
+                    "None", "Same", "Skip",
+                ]
+                for pad in pads:
+                    if len(options) >= 4:
+                        break
+                    key = _option_key(pad)
+                    if key not in seen:
+                        options.append(pad)
+                        seen.add(key)
+                filler = 1
+                while len(options) < 4:
+                    pad = f"?{filler}"
+                    key = _option_key(pad)
+                    if key not in seen:
+                        options.append(pad)
+                        seen.add(key)
+                    filler += 1
+        return ChallengeService.validate_mcq_item(
+            "pattern", answer, options[:4]
+        )
+
+    @staticmethod
+    def _pattern_result(seq: list, answer: Any, distractors: Optional[list] = None) -> Dict[str, Any]:
+        """Assemble a PATTERN challenge payload from a sequence and answer."""
+        answer_str = str(answer)
+        shown = ", ".join(str(x) for x in seq)
+        prompt = f"What comes next? {shown}, ...?"
+        if distractors is None:
+            options = ChallengeService._generate_options(answer_str)
+        else:
+            options = ChallengeService._build_pattern_options(answer_str, distractors)
+        return ChallengeService._finalize_mcq("PATTERN", prompt, answer_str, options)
 
     @staticmethod
     def _generate_pattern(difficulty: str = "medium") -> Dict[str, Any]:
         """
-        Generate a number sequence pattern scaled to difficulty.
+        Generate a pattern challenge with varied visual/logical styles.
 
-        Difficulty mapping:
-            beginner : simple arithmetic sequence, small numbers
-            easy     : arithmetic with moderate step
-            medium   : geometric or fibonacci
-            hard     : squares or cubes
-            expert   : mixed operations or alternating sequences
+        Randomly selects among number, symbol, emoji, shape, letter, color,
+        and other visual/logical pattern categories. Each category scales
+        with difficulty and always has one unambiguous correct answer.
         """
         difficulty = _clamp_difficulty(difficulty)
+        generators = [
+            ChallengeService._pattern_numbers,
+            ChallengeService._pattern_symbols,
+            ChallengeService._pattern_emoji,
+            ChallengeService._pattern_shapes,
+            ChallengeService._pattern_letters,
+            ChallengeService._pattern_colors,
+            ChallengeService._pattern_visual_logic,
+        ]
+        return random.choice(generators)(difficulty)
 
+    @staticmethod
+    def _pattern_numbers(difficulty: str) -> Dict[str, Any]:
+        """Classic numeric sequences scaled by difficulty."""
         if difficulty == "beginner":
             start = random.randint(1, 5)
             step = random.randint(1, 3)
             seq = [start + step * i for i in range(4)]
-            answer = str(start + step * 4)
+            answer = start + step * 4
 
         elif difficulty == "easy":
             start = random.randint(2, 15)
             step = random.randint(2, 6)
             seq = [start + step * i for i in range(4)]
-            answer = str(start + step * 4)
+            answer = start + step * 4
 
         elif difficulty == "medium":
-            pattern_type = random.choice(["geometric", "fibonacci"])
-            if pattern_type == "geometric":
+            if random.choice(["geometric", "fibonacci"]) == "geometric":
                 start = random.randint(2, 5)
                 factor = random.choice([2, 3])
                 seq = [start * (factor ** i) for i in range(4)]
-                answer = str(start * (factor ** 4))
+                answer = start * (factor ** 4)
             else:
                 a = random.randint(1, 5)
                 b = random.randint(1, 5)
                 seq = [a, b]
                 for _ in range(2):
                     seq.append(seq[-1] + seq[-2])
-                answer = str(seq[-1] + seq[-2])
+                answer = seq[-1] + seq[-2]
 
         elif difficulty == "hard":
-            pattern_type = random.choice(["squares", "cubes"])
-            if pattern_type == "squares":
+            if random.choice(["squares", "cubes"]) == "squares":
                 start_n = random.randint(2, 7)
                 seq = [(start_n + i) ** 2 for i in range(4)]
-                answer = str((start_n + 4) ** 2)
+                answer = (start_n + 4) ** 2
             else:
                 start_n = random.randint(1, 4)
                 seq = [(start_n + i) ** 3 for i in range(4)]
-                answer = str((start_n + 4) ** 3)
+                answer = (start_n + 4) ** 3
 
-        else:  # expert
-            # Alternating operation: +a, ×b, +a, ×b …
+        else:  # expert — alternating +a, ×b
             start = random.randint(1, 5)
             add_val = random.randint(2, 5)
             mul_val = random.choice([2, 3])
@@ -825,16 +1183,361 @@ class ChallengeService:
                     seq.append(seq[-1] + add_val)
                 else:
                     seq.append(seq[-1] * mul_val)
-            # seq has 5 elements; show first 4, answer is 5th
-            answer = str(seq[4])
+            answer = seq[4]
             seq = seq[:4]
 
-        return {
-            "type": "PATTERN",
-            "prompt": f"What comes next? {seq[0]}, {seq[1]}, {seq[2]}, {seq[3]}, ...?",
-            "answer": answer,
-            "options": ChallengeService._generate_options(answer),
-        }
+        return ChallengeService._pattern_result(seq, answer)
+
+    @staticmethod
+    def _cycle_pattern(items: list, length: int = 4) -> tuple[list, Any, list]:
+        """Build a cycling sequence; return (shown, answer, distractors)."""
+        full = [items[i % len(items)] for i in range(length + 1)]
+        distractors = [x for x in items if x != full[length]]
+        # Add a few extras from a rotated start so options stay plentiful
+        if len(distractors) < 3:
+            distractors = distractors + [items[(items.index(full[length]) + k) % len(items)]
+                                        for k in range(1, 4)]
+        return full[:length], full[length], distractors
+
+    @staticmethod
+    def _growing_token_pattern(token: str, start: int = 1) -> tuple[list, str, list]:
+        """Growing repetition: ★, ★★, ★★★ → ★★★★."""
+        seq = [token * (start + i) for i in range(4)]
+        answer = token * (start + 4)
+        distractors = [
+            token * (start + 3),
+            token * (start + 5),
+            token * (start + 6),
+            token * max(1, start),
+            (token + "·") * (start + 2),
+        ]
+        return seq, answer, distractors
+
+    @staticmethod
+    def _pattern_symbols(difficulty: str) -> Dict[str, Any]:
+        """Symbol sequences (stars, arrows, geometric marks)."""
+        symbols = ["★", "☆", "◆", "◇", "●", "○", "▲", "■", "→", "←", "↑", "↓", "✦"]
+
+        if difficulty == "beginner":
+            pair = random.sample(symbols, 2)
+            seq, answer, distractors = ChallengeService._cycle_pattern(pair)
+            distractors = distractors + random.sample(
+                [s for s in symbols if s not in pair], 2
+            )
+
+        elif difficulty == "easy":
+            trio = random.sample(symbols, 3)
+            seq, answer, distractors = ChallengeService._cycle_pattern(trio)
+            distractors = distractors + random.sample(
+                [s for s in symbols if s not in trio], 2
+            )
+
+        elif difficulty == "medium":
+            token = random.choice(["★", "●", "▲", "◆", "✦"])
+            seq, answer, distractors = ChallengeService._growing_token_pattern(token)
+
+        elif difficulty == "hard":
+            # Skip through an ordered symbol ring
+            ring = ["●", "◆", "▲", "■", "★", "✦"]
+            start = random.randint(0, len(ring) - 1)
+            step = random.choice([2, 3])
+            idxs = [(start + step * i) % len(ring) for i in range(5)]
+            seq = [ring[i] for i in idxs[:4]]
+            answer = ring[idxs[4]]
+            distractors = [s for s in ring if s != answer] + random.sample(symbols, 3)
+
+        else:  # expert — two interleaved symbols: A B A B … then continues
+            a, b = random.sample(symbols, 2)
+            # Pattern A A B A A B … groups of (2 A's then B), ask for next
+            pattern = [a, a, b, a, a]
+            seq = pattern[:4]
+            answer = pattern[4]
+            distractors = [b, a + b, b + a] + random.sample(
+                [s for s in symbols if s not in (a, b)], 3
+            )
+
+        return ChallengeService._pattern_result(seq, answer, distractors)
+
+    @staticmethod
+    def _pattern_emoji(difficulty: str) -> Dict[str, Any]:
+        """Emoji sequences with clear cyclic or growth rules."""
+        faces = ["😀", "😎", "🥳", "😴", "🤔"]
+        animals = ["🐶", "🐱", "🐭", "🐹", "🐰"]
+        food = ["🍎", "🍌", "🍇", "🍓", "🍒"]
+        weather = ["☀️", "⛅", "☁️", "🌧️", "⛈️"]
+        pools = [faces, animals, food, weather]
+        pool = random.choice(pools)
+
+        if difficulty == "beginner":
+            pair = random.sample(pool, 2)
+            seq, answer, distractors = ChallengeService._cycle_pattern(pair)
+            distractors = distractors + [e for e in pool if e not in pair]
+
+        elif difficulty == "easy":
+            trio = random.sample(pool, 3)
+            seq, answer, distractors = ChallengeService._cycle_pattern(trio)
+            distractors = distractors + [e for e in pool if e not in trio]
+
+        elif difficulty == "medium":
+            token = random.choice(pool)
+            seq, answer, distractors = ChallengeService._growing_token_pattern(token)
+            distractors = distractors + [e for e in pool if e != token]
+
+        elif difficulty == "hard":
+            # Walk the pool with a skip
+            start = random.randint(0, len(pool) - 1)
+            step = 2
+            idxs = [(start + step * i) % len(pool) for i in range(5)]
+            seq = [pool[i] for i in idxs[:4]]
+            answer = pool[idxs[4]]
+            distractors = [e for e in pool if e != answer]
+            for other in pools:
+                if other is not pool:
+                    distractors.extend(random.sample(other, 2))
+                    break
+
+        else:  # expert — palindrome path: A B C B A
+            trio = random.sample(pool, 3)
+            path = [trio[0], trio[1], trio[2], trio[1], trio[0]]
+            seq = path[:4]
+            answer = path[4]
+            extras = [e for e in faces + animals + food if e not in trio]
+            distractors = [e for e in pool if e != answer] + random.sample(
+                extras, min(3, len(extras))
+            )
+
+        return ChallengeService._pattern_result(seq, answer, distractors)
+
+    @staticmethod
+    def _pattern_shapes(difficulty: str) -> Dict[str, Any]:
+        """Geometric shape sequences."""
+        shapes = ["△", "□", "○", "◇", "☆", "⬠", "⬡"]
+        filled = ["▲", "■", "●", "◆", "★"]
+
+        if difficulty == "beginner":
+            pair = random.sample(shapes, 2)
+            seq, answer, distractors = ChallengeService._cycle_pattern(pair)
+            distractors = distractors + [s for s in shapes if s not in pair]
+
+        elif difficulty == "easy":
+            trio = random.sample(shapes, 3)
+            seq, answer, distractors = ChallengeService._cycle_pattern(trio)
+            distractors = distractors + [s for s in shapes + filled if s not in trio]
+
+        elif difficulty == "medium":
+            # Outline → filled pairs cycling: △ ▲ □ ■ …
+            pairs = list(zip(["△", "□", "○", "◇"], ["▲", "■", "●", "◆"]))
+            chosen = random.sample(pairs, 2)
+            stream = []
+            for outline, solid in chosen:
+                stream.extend([outline, solid])
+            # Extend by repeating the pair stream
+            stream = stream + stream
+            seq = stream[:4]
+            answer = stream[4]
+            distractors = [p[0] for p in pairs] + [p[1] for p in pairs] + shapes
+
+        elif difficulty == "hard":
+            token = random.choice(["△", "□", "○", "◇"])
+            seq, answer, distractors = ChallengeService._growing_token_pattern(token)
+            distractors = distractors + shapes + filled
+
+        else:  # expert — skip through shape ring
+            ring = shapes[:]
+            start = random.randint(0, len(ring) - 1)
+            step = random.choice([2, 3])
+            idxs = [(start + step * i) % len(ring) for i in range(5)]
+            seq = [ring[i] for i in idxs[:4]]
+            answer = ring[idxs[4]]
+            distractors = [s for s in ring + filled if s != answer]
+
+        return ChallengeService._pattern_result(seq, answer, distractors)
+
+    @staticmethod
+    def _pattern_letters(difficulty: str) -> Dict[str, Any]:
+        """Alphabetic letter sequences."""
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+        def letter_distractors(correct: str, step: int = 1) -> list:
+            idx = alphabet.index(correct)
+            candidates = []
+            for offset in (-3, -2, -1, 1, 2, 3, step, -step, step + 1):
+                candidates.append(alphabet[(idx + offset) % 26])
+            # Also sprinkle random letters
+            candidates.extend(random.sample(list(alphabet), 4))
+            return candidates
+
+        if difficulty == "beginner":
+            start = random.randint(0, 21)
+            seq = [alphabet[start + i] for i in range(4)]
+            answer = alphabet[start + 4]
+            distractors = letter_distractors(answer)
+
+        elif difficulty == "easy":
+            if random.choice(["forward_skip", "reverse"]) == "forward_skip":
+                start = random.randint(0, 16)
+                step = 2
+                seq = [alphabet[start + step * i] for i in range(4)]
+                answer = alphabet[start + step * 4]
+            else:
+                start = random.randint(4, 25)
+                seq = [alphabet[start - i] for i in range(4)]
+                answer = alphabet[start - 4]
+            distractors = letter_distractors(answer, step=2)
+
+        elif difficulty == "medium":
+            step = random.choice([2, 3])
+            max_start = 25 - step * 4
+            start = random.randint(0, max_start)
+            seq = [alphabet[start + step * i] for i in range(4)]
+            answer = alphabet[start + step * 4]
+            distractors = letter_distractors(answer, step=step)
+
+        elif difficulty == "hard":
+            # Triangular steps: +2, +3, +4, +5
+            start = random.randint(0, 10)
+            seq = [alphabet[start]]
+            pos = start
+            for delta in (2, 3, 4):
+                pos += delta
+                seq.append(alphabet[pos])
+            answer = alphabet[pos + 5]
+            distractors = letter_distractors(answer, step=5)
+
+        else:  # expert — interleaved rising + falling: A, Z, B, Y, C
+            a = random.randint(0, 10)
+            b = random.randint(15, 25)
+            stream = []
+            for i in range(5):
+                if i % 2 == 0:
+                    stream.append(alphabet[a + i // 2])
+                else:
+                    stream.append(alphabet[b - i // 2])
+            seq = stream[:4]
+            answer = stream[4]
+            distractors = letter_distractors(answer) + [
+                alphabet[a + 2], alphabet[b - 2], alphabet[(a + b) // 2]
+            ]
+
+        return ChallengeService._pattern_result(seq, answer, distractors)
+
+    @staticmethod
+    def _pattern_colors(difficulty: str) -> Dict[str, Any]:
+        """Color-circle / color-name sequences."""
+        rainbow = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣"]
+        names = ["Red", "Orange", "Yellow", "Green", "Blue", "Purple"]
+        use_emoji = random.choice([True, False])
+        items = rainbow if use_emoji else names
+
+        if difficulty == "beginner":
+            pair = random.sample(items, 2)
+            seq, answer, distractors = ChallengeService._cycle_pattern(pair)
+            distractors = distractors + [c for c in items if c not in pair]
+
+        elif difficulty == "easy":
+            start = random.randint(0, len(items) - 1)
+            seq = [items[(start + i) % len(items)] for i in range(4)]
+            answer = items[(start + 4) % len(items)]
+            distractors = [c for c in items if c != answer]
+
+        elif difficulty == "medium":
+            start = random.randint(0, len(items) - 1)
+            step = 2
+            seq = [items[(start + step * i) % len(items)] for i in range(4)]
+            answer = items[(start + step * 4) % len(items)]
+            distractors = [c for c in items if c != answer]
+
+        elif difficulty == "hard":
+            # Reverse rainbow walk
+            start = random.randint(0, len(items) - 1)
+            seq = [items[(start - i) % len(items)] for i in range(4)]
+            answer = items[(start - 4) % len(items)]
+            distractors = [c for c in items if c != answer]
+
+        else:  # expert — two interleaved color tracks: A1 B1 A2 B2 A3
+            a, b = random.sample(range(len(items)), 2)
+            stream = []
+            for i in range(5):
+                if i % 2 == 0:
+                    stream.append(items[(a + i // 2) % len(items)])
+                else:
+                    stream.append(items[(b + i // 2) % len(items)])
+            seq = stream[:4]
+            answer = stream[4]
+            distractors = [c for c in items if c != answer]
+
+        return ChallengeService._pattern_result(seq, answer, distractors)
+
+    @staticmethod
+    def _pattern_visual_logic(difficulty: str) -> Dict[str, Any]:
+        """Other visual/logical patterns: arrows, sizes, roman numerals, dots."""
+        arrows = ["↑", "→", "↓", "←"]
+        sizes = ["Tiny", "Small", "Medium", "Large", "Huge"]
+        romans = [
+            "I", "II", "III", "IV", "V", "VI",
+            "VII", "VIII", "IX", "X", "XI", "XII",
+        ]
+        dots = ["·", "··", "···", "····", "·····", "······"]
+
+        if difficulty == "beginner":
+            kind = random.choice(["arrows", "sizes", "dots"])
+            if kind == "arrows":
+                start = random.randint(0, 3)
+                seq = [arrows[(start + i) % 4] for i in range(4)]
+                answer = arrows[(start + 4) % 4]
+                distractors = [a for a in arrows if a != answer]
+            elif kind == "sizes":
+                seq = sizes[:4]
+                answer = sizes[4]
+                distractors = [s for s in sizes if s != answer] + ["Micro", "Giant"]
+            else:
+                seq = dots[:4]
+                answer = dots[4]
+                distractors = dots[:]
+
+        elif difficulty == "easy":
+            kind = random.choice(["arrows_rev", "romans", "dots"])
+            if kind == "arrows_rev":
+                start = random.randint(0, 3)
+                seq = [arrows[(start - i) % 4] for i in range(4)]
+                answer = arrows[(start - 4) % 4]
+                distractors = list(arrows)
+            elif kind == "romans":
+                start = random.randint(0, 3)
+                seq = romans[start:start + 4]
+                answer = romans[start + 4]
+                distractors = romans[:]
+            else:
+                start = random.randint(0, 1)
+                seq = dots[start:start + 4]
+                answer = dots[start + 4]
+                distractors = dots[:]
+
+        elif difficulty == "medium":
+            # Compass skip: every other direction
+            start = random.randint(0, 3)
+            seq = [arrows[(start + 2 * i) % 4] for i in range(4)]
+            answer = arrows[(start + 8) % 4]
+            distractors = list(arrows) + ["↗", "↘", "↙", "↖"]
+
+        elif difficulty == "hard":
+            # Roman numerals with skip of 1
+            start = random.randint(0, 2)
+            seq = [romans[start + i * 2] for i in range(4)]
+            answer = romans[start + 8]
+            distractors = romans[:]
+
+        else:  # expert — size words skipping one each time
+            # Tiny, Medium, Huge from sizes[0], sizes[2], sizes[4] then wrap logic:
+            # show Tiny, Medium, Huge, Small → Large  (odds then evens)
+            odd = sizes[0::2]   # Tiny, Medium, Huge
+            even = sizes[1::2]  # Small, Large
+            stream = odd + even  # Tiny, Medium, Huge, Small, Large
+            seq = stream[:4]
+            answer = stream[4]
+            distractors = sizes[:] + ["Micro", "Giant", "Normal"]
+
+        return ChallengeService._pattern_result(seq, answer, distractors)
 
     # ── MEMORY generator (difficulty-aware) ──────────────────────────
 
@@ -872,100 +1575,235 @@ class ChallengeService:
     # ── RIDDLE generator (difficulty-aware) ──────────────────────────
 
     @staticmethod
-    def _generate_riddle(difficulty: str = "medium") -> Dict[str, Any]:
+    def _riddle_banks() -> Dict[str, list]:
+        """
+        Curated riddles with one universally accepted answer each.
+
+        Distractors are plausible but definitively incorrect (no near-synonyms
+        or alternate classic answers that would also fit the wording).
+        """
+        easy = [
+            {
+                "q": "What has hands but cannot clap?",
+                "a": "A clock",
+                "opts": ["A clock", "A book", "A wall", "A window"],
+            },
+            {
+                "q": "What must be broken before you can use it?",
+                "a": "An egg",
+                "opts": ["An egg", "A spoon", "A chair", "A shoe"],
+            },
+            {
+                "q": "What gets wetter the more it dries?",
+                "a": "A towel",
+                "opts": ["A towel", "Soap", "A brush", "A comb"],
+            },
+            {
+                "q": "What has a head and a tail but no body?",
+                "a": "A coin",
+                "opts": ["A coin", "A person", "A snake", "A bird"],
+            },
+            {
+                "q": "What has keys but cannot open a lock?",
+                "a": "A piano",
+                "opts": ["A piano", "A door", "A chest", "A safe"],
+            },
+            {
+                "q": "What has four legs but cannot walk?",
+                "a": "A table",
+                "opts": ["A table", "A dog", "A cat", "A horse"],
+            },
+            {
+                "q": "What has one eye but cannot see?",
+                "a": "A needle",
+                "opts": ["A needle", "A button", "A hook", "A thread"],
+            },
+            {
+                "q": "What goes up but never comes down?",
+                "a": "Your age",
+                "opts": ["Your age", "A ball", "An elevator", "An airplane"],
+            },
+            {
+                "q": "What has words but never speaks?",
+                "a": "A book",
+                "opts": ["A book", "A radio", "A phone", "A parrot"],
+            },
+            {
+                "q": "What has a face and two hands but no arms or legs?",
+                "a": "A clock",
+                "opts": ["A clock", "A doll", "A statue", "A robot"],
+            },
+            {
+                "q": "What runs but never walks?",
+                "a": "Water",
+                "opts": ["Water", "A car", "A horse", "Wind"],
+            },
+        ]
+
+        medium = [
+            {
+                "q": "I have cities but no houses, and mountains but no trees. What am I?",
+                "a": "A map",
+                "opts": ["A map", "A novel", "A movie", "A song"],
+            },
+            {
+                "q": "What can you catch but not throw?",
+                "a": "A cold",
+                "opts": ["A cold", "A ball", "A frisbee", "A rock"],
+            },
+            {
+                "q": "What can travel around the world while staying in a corner?",
+                "a": "A stamp",
+                "opts": ["A stamp", "An airplane", "A suitcase", "A tourist"],
+            },
+            {
+                "q": "What has a neck but no head?",
+                "a": "A bottle",
+                "opts": ["A bottle", "A cup", "A bowl", "A plate"],
+            },
+            {
+                "q": "What has a bed but never sleeps?",
+                "a": "A river",
+                "opts": ["A river", "A hotel", "A tent", "A pillow"],
+            },
+            {
+                "q": "What is full of holes but still holds water?",
+                "a": "A sponge",
+                "opts": ["A sponge", "A net", "A fence", "A screen"],
+            },
+            {
+                "q": "I am not alive, but I grow; I have no lungs, but I need air. What am I?",
+                "a": "Fire",
+                "opts": ["Fire", "A rock", "Metal", "Plastic"],
+            },
+            {
+                "q": "What common invention lets you look through a wall?",
+                "a": "A window",
+                "opts": ["A window", "A door", "A curtain", "A roof"],
+            },
+            {
+                "q": "What has teeth but never bites?",
+                "a": "A comb",
+                "opts": ["A comb", "A brush", "Soap", "A mirror"],
+            },
+            {
+                "q": "What kind of room has no doors or windows?",
+                "a": "A mushroom",
+                "opts": ["A mushroom", "A cellar", "A cave", "A vault"],
+            },
+        ]
+
+        hard = [
+            {
+                "q": "What comes once in a minute, twice in a moment, but never in a thousand years?",
+                "a": "The letter M",
+                "opts": ["The letter M", "A second", "An hour", "A day"],
+            },
+            {
+                "q": "What has four legs in the morning, two at noon, and three in the evening?",
+                "a": "A human",
+                "opts": ["A human", "A dog", "A cat", "A chair"],
+            },
+            {
+                "q": "What begins with T, ends with T, and has T in it?",
+                "a": "A teapot",
+                "opts": ["A teapot", "Toast", "A tent", "Trust"],
+            },
+            {
+                "q": "What word is spelled incorrectly in every dictionary?",
+                "a": "Incorrectly",
+                "opts": ["Incorrectly", "Dictionary", "Spelling", "Error"],
+            },
+            {
+                "q": "What can you hold in your left hand but not in your right hand?",
+                "a": "Your right elbow",
+                "opts": ["Your right elbow", "Your left hand", "Your heart", "Your breath"],
+            },
+            {
+                "q": "What is always ahead of you but can never be seen?",
+                "a": "The future",
+                "opts": ["The future", "An echo", "A dream", "A wish"],
+            },
+            {
+                "q": "I have branches, but no fruit, trunk, or leaves. What am I?",
+                "a": "A bank",
+                "opts": ["A bank", "A tree", "A river", "A family"],
+            },
+            {
+                "q": "The more you take of them, the more you leave behind. What are they?",
+                "a": "Footsteps",
+                "opts": ["Footsteps", "Coins", "Words", "Shadows"],
+            },
+            {
+                "q": "What building has the most stories?",
+                "a": "A library",
+                "opts": ["A library", "A skyscraper", "A hotel", "A school"],
+            },
+            {
+                "q": "I fly without wings and cry without eyes. Whenever I go, darkness flies. What am I?",
+                "a": "A cloud",
+                "opts": ["A cloud", "An airplane", "A bird", "A kite"],
+            },
+            {
+                "q": "What has 13 hearts but no other organs?",
+                "a": "A deck of cards",
+                "opts": ["A deck of cards", "A calendar", "A clock", "A tree"],
+            },
+            {
+                "q": "Forward I am heavy, but backward I am not. What am I?",
+                "a": "A ton",
+                "opts": ["A ton", "A pound", "Lead", "Stone"],
+            },
+        ]
+
+        return {"easy": easy, "medium": medium, "hard": hard}
+
+    @staticmethod
+    def _generate_riddle(
+        difficulty: str = "medium",
+        exclude_prompts: Optional[set] = None,
+    ) -> Dict[str, Any]:
         """
         Generate a riddle scaled to difficulty.
 
-        Easier riddles use common, well-known riddles.
-        Harder riddles use more abstract and tricky ones.
+        Only curated riddles with one clear, universally accepted answer are used.
+        Each item is validated so distractors cannot also be correct.
         """
         difficulty = _clamp_difficulty(difficulty)
+        banks = ChallengeService._riddle_banks()
 
-        # Riddles grouped by difficulty tier
-        easy_riddles = [
-            {"q": "What has hands but can't clap?", "a": "Clock", "opts": ["Clock", "Statue", "Robot", "Puppet"]},
-            {"q": "What has to be broken before you can use it?", "a": "Egg", "opts": ["Egg", "Glass", "Seal", "Lock"]},
-            {"q": "What gets wetter the more it dries?", "a": "Towel", "opts": ["Towel", "Sponge", "Paper", "Sand"]},
-            {"q": "What has a head and a tail but no body?", "a": "Coin", "opts": ["Coin", "Snake", "Arrow", "Pin"]},
-            {"q": "What has keys but can't open locks?", "a": "Piano", "opts": ["Piano", "Keyboard", "Door", "Map"]},
-            {"q": "What has legs but doesn't walk?", "a": "Table", "opts": ["Table", "Chair", "Bed", "Desk"]},
-            {"q": "What has one eye but can't see?", "a": "Needle", "opts": ["Needle", "Cyclops", "Camera", "Storm"]},
-            {"q": "What goes up but never comes down?", "a": "Age", "opts": ["Age", "Balloon", "Smoke", "Temperature"]},
-        ]
-
-        medium_riddles = [
-            {"q": "I have cities, but no houses. I have mountains, but no trees. What am I?", "a": "Map", "opts": ["Map", "Globe", "Atlas", "Painting"]},
-            {"q": "What can you catch but not throw?", "a": "Cold", "opts": ["Cold", "Ball", "Fish", "Shadow"]},
-            {"q": "What can travel around the world while staying in a corner?", "a": "Stamp", "opts": ["Stamp", "Spider", "Shadow", "Wind"]},
-            {"q": "What has a neck but no head?", "a": "Bottle", "opts": ["Bottle", "Guitar", "Shirt", "Giraffe"]},
-            {"q": "What can run but never walks?", "a": "Water", "opts": ["Water", "Wind", "Time", "Horse"]},
-            {"q": "What is full of holes but still holds water?", "a": "Sponge", "opts": ["Sponge", "Net", "Bucket", "Cloud"]},
-            {"q": "I am not alive, but I grow; I don't have lungs, but I need air. What am I?", "a": "Fire", "opts": ["Fire", "Plant", "Cloud", "Balloon"]},
-            {"q": "What invention lets you look right through a wall?", "a": "Window", "opts": ["Window", "X-ray", "Mirror", "Camera"]},
-            {"q": "I have teeth but cannot eat. What am I?", "a": "Comb", "opts": ["Comb", "Saw", "Zipper", "Gear"]},
-        ]
-
-        hard_riddles = [
-            {"q": "What comes once in a minute, twice in a moment, but never in a thousand years?", "a": "Letter M", "opts": ["Letter M", "Time", "Second", "Hour"]},
-            {"q": "What has four legs in the morning, two at noon, and three in the evening?", "a": "Human", "opts": ["Human", "Dog", "Cat", "Chair"]},
-            {"q": "What begins with T, ends with T, and has T in it?", "a": "Teapot", "opts": ["Teapot", "Toast", "Tent", "Trust"]},
-            {"q": "What word is spelled incorrectly in every dictionary?", "a": "Incorrectly", "opts": ["Incorrectly", "Dictionary", "Spelling", "Error"]},
-            {"q": "What can you hold in your left hand but not your right?", "a": "Right elbow", "opts": ["Right elbow", "Left hand", "Heart", "Breath"]},
-            {"q": "What is always in front of you but can't be seen?", "a": "Future", "opts": ["Future", "Air", "Shadow", "Nose"]},
-            {"q": "I have branches but no fruit, no trunk, no leaves. What am I?", "a": "Bank", "opts": ["Bank", "Tree", "River", "Family"]},
-            {"q": "The more you take, the more you leave behind. What are they?", "a": "Footsteps", "opts": ["Footsteps", "Memories", "Photos", "Breaths"]},
-            {"q": "What building has the most stories?", "a": "Library", "opts": ["Library", "Skyscraper", "Hotel", "School"]},
-            {"q": "I fly without wings. I cry without eyes. What am I?", "a": "Cloud", "opts": ["Cloud", "Wind", "Ghost", "Onion"]},
-            {"q": "What has 13 hearts but no other organs?", "a": "Deck of cards", "opts": ["Deck of cards", "Calendar", "Clock", "Tree"]},
-        ]
-
-        # Select pool based on difficulty
         if difficulty in ("beginner", "easy"):
-            pool = easy_riddles
+            pool = banks["easy"]
         elif difficulty == "medium":
-            pool = easy_riddles + medium_riddles
+            pool = banks["easy"] + banks["medium"]
         elif difficulty == "hard":
-            pool = medium_riddles + hard_riddles
+            pool = banks["medium"] + banks["hard"]
         else:  # expert
-            pool = hard_riddles
+            pool = banks["hard"]
 
-        chosen = random.choice(pool)
-        options = chosen["opts"][:]
-        random.shuffle(options)
-
-        return {
-            "type": "RIDDLE",
-            "prompt": chosen["q"],
-            "answer": chosen["a"],
-            "options": options,
-        }
+        return ChallengeService._pick_mcq_from_bank(
+            pool, "RIDDLE", exclude_prompts=exclude_prompts
+        )
 
     # ── LOGIC generator (difficulty-aware) ───────────────────────────
 
     @staticmethod
-    def _generate_logic(difficulty: str = "medium") -> Dict[str, Any]:
-        """
-        Generate a logic puzzle scaled to difficulty.
-
-        Variants: odd-one-out, analogies, syllogisms, and ranking puzzles.
-        """
-        difficulty = _clamp_difficulty(difficulty)
-
+    def _logic_banks() -> Dict[str, list]:
+        """Curated logic items with one objectively correct answer each."""
         easy = [
             {
-                "q": "Which number does not belong? 2, 4, 6, 9, 8",
+                "q": "Which number does not belong with the even numbers? 2, 4, 6, 9, 8",
                 "a": "9",
                 "opts": ["9", "2", "6", "8"],
             },
             {
-                "q": "If all roses are flowers and some flowers fade quickly, "
-                     "which statement must be true?",
-                "a": "Some roses may fade quickly",
+                "q": "If all roses are flowers, which statement must be true?",
+                "a": "All roses are flowers",
                 "opts": [
-                    "Some roses may fade quickly",
+                    "All roses are flowers",
                     "All flowers are roses",
-                    "No roses fade",
-                    "All roses fade quickly",
+                    "No roses are flowers",
+                    "Some flowers are not plants",
                 ],
             },
             {
@@ -988,14 +1826,29 @@ class ChallengeService:
                 "a": "C",
                 "opts": ["C", "A", "B", "Cannot tell"],
             },
+            {
+                "q": "Which number comes next? 5, 10, 15, 20, ?",
+                "a": "25",
+                "opts": ["25", "22", "30", "24"],
+            },
+            {
+                "q": "If the statement 'all birds can fly' is false, which could still be true?",
+                "a": "Some birds can fly",
+                "opts": [
+                    "Some birds can fly",
+                    "No birds can fly",
+                    "All birds can fly",
+                    "Birds are not animals",
+                ],
+            },
         ]
 
         medium = [
             {
-                "q": "All A are B. Some B are C. Which conclusion follows?",
-                "a": "Some A may be C",
+                "q": "All A are B. Some B are C. Which statement is correct?",
+                "a": "We cannot be sure whether any A are C",
                 "opts": [
-                    "Some A may be C",
+                    "We cannot be sure whether any A are C",
                     "All A are C",
                     "No A are C",
                     "All C are A",
@@ -1007,7 +1860,7 @@ class ChallengeService:
                 "opts": ["Cube", "Square", "Circle", "Triangle"],
             },
             {
-                "q": "If 3 pens cost $6, how many pens can you buy for $20?",
+                "q": "If each pen costs $2, how many pens can you buy for exactly $20?",
                 "a": "10",
                 "opts": ["10", "9", "12", "8"],
             },
@@ -1017,22 +1870,21 @@ class ChallengeService:
                 "opts": ["Eating", "Cooking", "Spoon", "Kitchen"],
             },
             {
-                "q": "Which comes next in the letter series? A, C, F, J, ?",
+                "q": "Which letter comes next in the series? A, C, F, J, ?",
                 "a": "O",
                 "opts": ["O", "N", "M", "P"],
             },
             {
-                "q": "Tom is older than Sue. Sue is older than Mia. "
-                     "Who is the youngest?",
+                "q": "Tom is older than Sue. Sue is older than Mia. Who is the youngest?",
                 "a": "Mia",
                 "opts": ["Mia", "Sue", "Tom", "Cannot tell"],
             },
             {
-                "q": "If only one statement is true: "
+                "q": "Exactly one statement is true: "
                      "(1) The answer is 12  (2) The answer is 15  "
-                     "(3) The answer is not 12  — which is correct?",
-                "a": "15",
-                "opts": ["15", "12", "Neither", "Both 12 and 15"],
+                     "(3) The answer is not 12. What is the answer?",
+                "a": "12",
+                "opts": ["12", "15", "Neither", "Both 12 and 15"],
             },
         ]
 
@@ -1060,11 +1912,11 @@ class ChallengeService:
                 "opts": ["42", "40", "36", "48"],
             },
             {
-                "q": "Five friends sit in a row. Ava is not at either end. "
-                     "Ben sits to the immediate left of Ava. "
-                     "Cara sits at the right end. Who can sit at the left end?",
-                "a": "Dan or Eve",
-                "opts": ["Dan or Eve", "Ava", "Ben", "Cara"],
+                "q": "Five seats in a row: Cara sits at the right end. "
+                     "Ava is not at either end. Ben sits immediately left of Ava. "
+                     "Who cannot sit at the left end?",
+                "a": "Ava",
+                "opts": ["Ava", "Ben", "Dan", "Eve"],
             },
             {
                 "q": "If RED = 27 and BLUE = 37, what is GREEN equal to? "
@@ -1083,10 +1935,11 @@ class ChallengeService:
         expert = [
             {
                 "q": "Exactly one of these is true: "
-                     "(A) Answer is 8  (B) Answer is 11  "
-                     "(C) Answer is not 8  (D) Answer is 14. What is the answer?",
-                "a": "11",
-                "opts": ["11", "8", "14", "Cannot determine"],
+                     "(A) The answer is 8  (B) The answer is 11  "
+                     "(C) The answer is not 8  (D) The answer is 14. "
+                     "What is the answer?",
+                "a": "8",
+                "opts": ["8", "11", "14", "Cannot determine"],
             },
             {
                 "q": "Three boxes: one has apples, one has oranges, one has both. "
@@ -1107,36 +1960,53 @@ class ChallengeService:
             },
             {
                 "q": "A farmer has chickens and cows. Together they have 30 heads "
-                     "and 86 legs. How many chickens?",
+                     "and 86 legs. How many chickens are there?",
                 "a": "17",
                 "opts": ["17", "13", "15", "20"],
             },
         ]
 
-        if difficulty in ("beginner", "easy"):
-            pool = easy
-        elif difficulty == "medium":
-            pool = easy + medium
-        elif difficulty == "hard":
-            pool = medium + hard
-        else:
-            pool = hard + expert
-
-        chosen = random.choice(pool)
-        options = chosen["opts"][:]
-        random.shuffle(options)
-
         return {
-            "type": "LOGIC",
-            "prompt": chosen["q"],
-            "answer": chosen["a"],
-            "options": options,
+            "easy": easy,
+            "medium": medium,
+            "hard": hard,
+            "expert": expert,
         }
+
+    @staticmethod
+    def _generate_logic(
+        difficulty: str = "medium",
+        exclude_prompts: Optional[set] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate a logic puzzle scaled to difficulty.
+
+        Variants: odd-one-out, analogies, syllogisms, and ranking puzzles.
+        Every item is validated for a single unambiguous correct option.
+        """
+        difficulty = _clamp_difficulty(difficulty)
+        banks = ChallengeService._logic_banks()
+
+        if difficulty in ("beginner", "easy"):
+            pool = banks["easy"]
+        elif difficulty == "medium":
+            pool = banks["easy"] + banks["medium"]
+        elif difficulty == "hard":
+            pool = banks["medium"] + banks["hard"]
+        else:
+            pool = banks["hard"] + banks["expert"]
+
+        return ChallengeService._pick_mcq_from_bank(
+            pool, "LOGIC", exclude_prompts=exclude_prompts
+        )
 
     # ── WORD GAME generator (difficulty-aware) ───────────────────────
 
     @staticmethod
-    def _generate_word_game(difficulty: str = "medium") -> Dict[str, Any]:
+    def _generate_word_game(
+        difficulty: str = "medium",
+        exclude_prompts: Optional[set] = None,
+    ) -> Dict[str, Any]:
         """
         Generate a word puzzle: unscramble, missing letter, or odd-word-out.
         """
@@ -1204,21 +2074,45 @@ class ChallengeService:
 
         if variant == "odd_out":
             odd_sets = [
-                ("Which word does not belong?", "Blue", ["Blue", "Red", "Green", "Chair"]),
-                ("Which word does not belong?", "Banana", ["Dog", "Cat", "Bird", "Banana"]),
-                ("Which word does not belong?", "Shoe", ["Shoe", "Car", "Bus", "Train"]),
-                ("Which word does not belong?", "Pencil", ["Apple", "Orange", "Grape", "Pencil"]),
-                ("Which word does not belong?", "Happy", ["Happy", "Table", "Chair", "Desk"]),
+                {
+                    "q": "Which word does not belong? Blue, Red, Green, Chair",
+                    "a": "Chair",
+                    "opts": ["Chair", "Blue", "Red", "Green"],
+                },
+                {
+                    "q": "Which word does not belong? Dog, Cat, Bird, Banana",
+                    "a": "Banana",
+                    "opts": ["Banana", "Dog", "Cat", "Bird"],
+                },
+                {
+                    "q": "Which word does not belong? Car, Bus, Train, Shoe",
+                    "a": "Shoe",
+                    "opts": ["Shoe", "Car", "Bus", "Train"],
+                },
+                {
+                    "q": "Which word does not belong? Apple, Orange, Grape, Pencil",
+                    "a": "Pencil",
+                    "opts": ["Pencil", "Apple", "Orange", "Grape"],
+                },
+                {
+                    "q": "Which word does not belong? Table, Chair, Desk, Happy",
+                    "a": "Happy",
+                    "opts": ["Happy", "Table", "Chair", "Desk"],
+                },
+                {
+                    "q": "Which word does not belong? Run, Jump, Walk, Cloud",
+                    "a": "Cloud",
+                    "opts": ["Cloud", "Run", "Jump", "Walk"],
+                },
+                {
+                    "q": "Which word does not belong? Monday, Friday, Sunday, Winter",
+                    "a": "Winter",
+                    "opts": ["Winter", "Monday", "Friday", "Sunday"],
+                },
             ]
-            prompt, answer, options = random.choice(odd_sets)
-            opts = options[:]
-            random.shuffle(opts)
-            return {
-                "type": "WORD_GAME",
-                "prompt": prompt + " " + ", ".join(options),
-                "answer": answer,
-                "options": opts,
-            }
+            return ChallengeService._pick_mcq_from_bank(
+                odd_sets, "WORD_GAME", exclude_prompts=exclude_prompts
+            )
 
         word, distractors = random.choice(word_pool)
         scrambled = "".join(random.sample(list(word), len(word)))
@@ -1232,21 +2126,32 @@ class ChallengeService:
             idx = random.randint(0, len(word) - 1)
             blanked = word[:idx] + "_" + word[idx + 1 :]
             answer = word[idx]
-            # Letter options including correct
             alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            wrong = set()
+            # Prefer nearby letters as believable distractors
+            ans_pos = alphabet.index(answer) if answer in alphabet else 0
+            candidates = []
+            for offset in (1, -1, 2, -2, 3, -3, 4, -4):
+                candidates.append(alphabet[(ans_pos + offset) % len(alphabet)])
+            random.shuffle(candidates)
+            wrong: list[str] = []
+            seen = {_option_key(answer)}
+            for ch in candidates:
+                if _option_key(ch) not in seen:
+                    wrong.append(ch)
+                    seen.add(_option_key(ch))
+                if len(wrong) == 3:
+                    break
             while len(wrong) < 3:
                 ch = random.choice(alphabet)
-                if ch != answer:
-                    wrong.add(ch)
-            options = [answer] + list(wrong)
-            random.shuffle(options)
-            return {
-                "type": "WORD_GAME",
-                "prompt": f"Fill in the missing letter: {blanked}",
-                "answer": answer,
-                "options": options,
-            }
+                if _option_key(ch) not in seen:
+                    wrong.append(ch)
+                    seen.add(_option_key(ch))
+            return ChallengeService._finalize_mcq(
+                "WORD_GAME",
+                f"Fill in the missing letter: {blanked}",
+                answer,
+                [answer] + wrong,
+            )
 
         if variant == "anagram_hint":
             hint = f"(starts with {word[0]}, {len(word)} letters)"
@@ -1254,70 +2159,73 @@ class ChallengeService:
         else:
             prompt = f"Unscramble the word: {scrambled}"
 
-        options = [word] + distractors[:3]
-        # Ensure unique options
-        options = list(dict.fromkeys(options))
-        while len(options) < 4:
-            # pad with letter-swapped decoys
+        options = [word]
+        seen = {_option_key(word)}
+        for decoy in distractors:
+            key = _option_key(decoy)
+            if key not in seen and decoy != word:
+                options.append(decoy)
+                seen.add(key)
+            if len(options) == 4:
+                break
+        # Pad with letter-swapped decoys that are not the real word
+        attempts = 0
+        while len(options) < 4 and attempts < 20:
+            attempts += 1
             chars = list(word)
             i, j = random.sample(range(len(chars)), 2)
             chars[i], chars[j] = chars[j], chars[i]
             decoy = "".join(chars)
-            if decoy != word and decoy not in options:
+            key = _option_key(decoy)
+            if key not in seen:
                 options.append(decoy)
-        options = options[:4]
-        random.shuffle(options)
+                seen.add(key)
 
-        return {
-            "type": "WORD_GAME",
-            "prompt": prompt,
-            "answer": word,
-            "options": options,
-        }
+        return ChallengeService._finalize_mcq("WORD_GAME", prompt, word, options)
 
     # ── QUIZ generator (difficulty-aware) ────────────────────────────
 
     @staticmethod
-    def _generate_quiz(difficulty: str = "medium") -> Dict[str, Any]:
-        """Generate a quick general-knowledge quiz question."""
-        difficulty = _clamp_difficulty(difficulty)
-
+    def _quiz_banks() -> Dict[str, list]:
+        """Curated quiz items with one factual correct answer each."""
         easy = [
             {"q": "How many days are in a week?", "a": "7", "opts": ["7", "5", "6", "8"]},
             {"q": "What color do you get by mixing red and white?", "a": "Pink", "opts": ["Pink", "Purple", "Orange", "Brown"]},
-            {"q": "How many continents are there?", "a": "7", "opts": ["7", "5", "6", "8"]},
+            {"q": "How many continents are commonly taught in school geography?", "a": "7", "opts": ["7", "5", "6", "8"]},
             {"q": "What is the capital of France?", "a": "Paris", "opts": ["Paris", "London", "Rome", "Berlin"]},
             {"q": "How many sides does a triangle have?", "a": "3", "opts": ["3", "4", "5", "2"]},
             {"q": "Which planet is known as the Red Planet?", "a": "Mars", "opts": ["Mars", "Venus", "Jupiter", "Mercury"]},
-            {"q": "What do bees produce?", "a": "Honey", "opts": ["Honey", "Milk", "Silk", "Wax only"]},
+            {"q": "What sweet food do bees produce from nectar?", "a": "Honey", "opts": ["Honey", "Milk", "Silk", "Butter"]},
             {"q": "How many hours are in a day?", "a": "24", "opts": ["24", "12", "48", "60"]},
+            {"q": "How many months are in a year?", "a": "12", "opts": ["12", "10", "11", "13"]},
+            {"q": "What process do plants use to make food from sunlight?", "a": "Photosynthesis", "opts": ["Photosynthesis", "Digestion", "Respiration", "Evaporation"]},
         ]
 
         medium = [
-            {"q": "What is the chemical symbol for water?", "a": "H2O", "opts": ["H2O", "CO2", "O2", "NaCl"]},
+            {"q": "What is the chemical formula for water?", "a": "H2O", "opts": ["H2O", "CO2", "O2", "NaCl"]},
             {"q": "Who painted the Mona Lisa?", "a": "Leonardo da Vinci", "opts": ["Leonardo da Vinci", "Michelangelo", "Picasso", "Van Gogh"]},
             {"q": "What is the largest ocean on Earth?", "a": "Pacific", "opts": ["Pacific", "Atlantic", "Indian", "Arctic"]},
             {"q": "How many bones are in the adult human body?", "a": "206", "opts": ["206", "198", "250", "180"]},
-            {"q": "What gas do plants absorb from the air?", "a": "Carbon dioxide", "opts": ["Carbon dioxide", "Oxygen", "Nitrogen", "Helium"]},
+            {"q": "What gas do plants absorb from the air for photosynthesis?", "a": "Carbon dioxide", "opts": ["Carbon dioxide", "Oxygen", "Nitrogen", "Helium"]},
             {"q": "Which country is home to the kangaroo?", "a": "Australia", "opts": ["Australia", "Brazil", "India", "South Africa"]},
-            {"q": "What is the square root of 81?", "a": "9", "opts": ["9", "8", "7", "10"]},
+            {"q": "What is the positive square root of 81?", "a": "9", "opts": ["9", "8", "7", "10"]},
             {"q": "In which sport is the term 'love' used for a score of zero?", "a": "Tennis", "opts": ["Tennis", "Golf", "Soccer", "Cricket"]},
         ]
 
         hard = [
-            {"q": "What year did World War II end?", "a": "1945", "opts": ["1945", "1944", "1939", "1948"]},
+            {"q": "In what year did World War II end?", "a": "1945", "opts": ["1945", "1944", "1939", "1948"]},
             {"q": "What is the hardest natural substance on Earth?", "a": "Diamond", "opts": ["Diamond", "Gold", "Iron", "Quartz"]},
             {"q": "Which element has the chemical symbol Au?", "a": "Gold", "opts": ["Gold", "Silver", "Aluminum", "Argon"]},
             {"q": "What is the smallest prime number?", "a": "2", "opts": ["2", "1", "3", "0"]},
             {"q": "Who developed the theory of relativity?", "a": "Albert Einstein", "opts": ["Albert Einstein", "Newton", "Tesla", "Hawking"]},
             {"q": "What is the capital of Canada?", "a": "Ottawa", "opts": ["Ottawa", "Toronto", "Vancouver", "Montreal"]},
             {"q": "How many chambers does a human heart have?", "a": "4", "opts": ["4", "2", "3", "5"]},
-            {"q": "Which planet has the most moons?", "a": "Saturn", "opts": ["Saturn", "Jupiter", "Uranus", "Neptune"]},
+            {"q": "Which planet is famous for its prominent ring system?", "a": "Saturn", "opts": ["Saturn", "Jupiter", "Uranus", "Neptune"]},
         ]
 
         expert = [
-            {"q": "What is the powerhouse of the cell?", "a": "Mitochondria", "opts": ["Mitochondria", "Nucleus", "Ribosome", "Chloroplast"]},
-            {"q": "What is the speed of light in vacuum (approx.)?", "a": "300,000 km/s", "opts": ["300,000 km/s", "150,000 km/s", "30,000 km/s", "3,000 km/s"]},
+            {"q": "What is commonly called the powerhouse of the cell?", "a": "Mitochondria", "opts": ["Mitochondria", "Nucleus", "Ribosome", "Chloroplast"]},
+            {"q": "What is the approximate speed of light in a vacuum?", "a": "300,000 km/s", "opts": ["300,000 km/s", "150,000 km/s", "30,000 km/s", "3,000 km/s"]},
             {"q": "Which mathematician invented calculus independently of Newton?", "a": "Leibniz", "opts": ["Leibniz", "Euler", "Gauss", "Pascal"]},
             {"q": "What is the chemical formula for table salt?", "a": "NaCl", "opts": ["NaCl", "KCl", "NaOH", "CaCO3"]},
             {"q": "In which year did the Titanic sink?", "a": "1912", "opts": ["1912", "1910", "1914", "1905"]},
@@ -1326,43 +2234,72 @@ class ChallengeService:
             {"q": "What does DNA stand for?", "a": "Deoxyribonucleic acid", "opts": ["Deoxyribonucleic acid", "Dinucleic acid", "Deoxyribose acid", "Dual nucleic acid"]},
         ]
 
-        if difficulty in ("beginner", "easy"):
-            pool = easy
-        elif difficulty == "medium":
-            pool = easy + medium
-        elif difficulty == "hard":
-            pool = medium + hard
-        else:
-            pool = hard + expert
-
-        chosen = random.choice(pool)
-        options = chosen["opts"][:]
-        random.shuffle(options)
-
         return {
-            "type": "QUIZ",
-            "prompt": chosen["q"],
-            "answer": chosen["a"],
-            "options": options,
+            "easy": easy,
+            "medium": medium,
+            "hard": hard,
+            "expert": expert,
         }
+
+    @staticmethod
+    def _generate_quiz(
+        difficulty: str = "medium",
+        exclude_prompts: Optional[set] = None,
+    ) -> Dict[str, Any]:
+        """Generate a quick general-knowledge quiz with one factual answer."""
+        difficulty = _clamp_difficulty(difficulty)
+        banks = ChallengeService._quiz_banks()
+
+        if difficulty in ("beginner", "easy"):
+            pool = banks["easy"]
+        elif difficulty == "medium":
+            pool = banks["easy"] + banks["medium"]
+        elif difficulty == "hard":
+            pool = banks["medium"] + banks["hard"]
+        else:
+            pool = banks["hard"] + banks["expert"]
+
+        return ChallengeService._pick_mcq_from_bank(
+            pool, "QUIZ", exclude_prompts=exclude_prompts
+        )
 
     # ── Options generator ────────────────────────────────────────────
 
     @staticmethod
     def _generate_options(correct_answer: str) -> list[str]:
-        """Generate 3 plausible incorrect options alongside the correct one."""
+        """Generate 3 unique, incorrect numeric distractors plus the correct answer."""
+        answer_text = str(correct_answer).strip()
         try:
-            ans_val = int(correct_answer)
-            options = {ans_val}
-            while len(options) < 4:
-                offset = random.randint(-10, 10)
-                if offset != 0:
-                    options.add(ans_val + offset)
-            opts = [str(x) for x in options]
-            random.shuffle(opts)
-            return opts
+            ans_val = int(answer_text)
         except ValueError:
-            return [correct_answer]
+            # Non-numeric answers need an explicit distractor list from the caller
+            return ChallengeService.validate_mcq_item(
+                "options",
+                answer_text,
+                [answer_text, f"{answer_text}?", f"Not {answer_text}", "None"],
+            )
+
+        options = {ans_val}
+        # Prefer small near-miss offsets so distractors look believable
+        preferred_offsets = [-3, -2, -1, 1, 2, 3, -4, 4, -5, 5, -6, 6, -8, 8, -10, 10]
+        random.shuffle(preferred_offsets)
+        for offset in preferred_offsets:
+            options.add(ans_val + offset)
+            if len(options) >= 4:
+                break
+        guard = 0
+        while len(options) < 4 and guard < 40:
+            guard += 1
+            offset = random.randint(-12, 12)
+            if offset != 0:
+                options.add(ans_val + offset)
+
+        opts = [str(x) for x in options]
+        # Keep correct answer + 3 distractors only
+        distractors = [o for o in opts if o != answer_text][:3]
+        return ChallengeService.validate_mcq_item(
+            "options", answer_text, [answer_text] + distractors
+        )
 
     # ── Active challenge sessions (DB-backed) ─────────────────────────
 

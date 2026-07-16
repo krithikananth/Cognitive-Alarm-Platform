@@ -1,7 +1,8 @@
 /**
- * Challenge Analytics — performance tracking + completion analysis.
+ * Analytics — challenge performance + sleep/wake/productivity recommendations.
  */
 import React, { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
   HiOutlineChartBar,
@@ -14,6 +15,9 @@ import {
   HiOutlineArrowTrendingUp,
   HiOutlineArrowTrendingDown,
   HiOutlineMinus,
+  HiOutlineMoon,
+  HiOutlineSun,
+  HiOutlineBolt,
 } from 'react-icons/hi2';
 import {
   BarChart,
@@ -25,7 +29,16 @@ import {
   CartesianGrid,
 } from 'recharts';
 import toast from 'react-hot-toast';
-import { alarmAPI } from '../services/api';
+import { alarmAPI, recommendationAPI } from '../services/api';
+import { formatTimeDisplay } from '../utils/timeFormat';
+
+const LIFESTYLE_CATEGORY_STYLES = {
+  sleep: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/25',
+  wake: 'bg-amber-500/15 text-amber-300 border-amber-500/25',
+  habit: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25',
+  productivity: 'bg-sky-500/15 text-sky-300 border-sky-500/25',
+  challenge: 'bg-violet-500/15 text-violet-300 border-violet-500/25',
+};
 
 const fadeUp = {
   initial: { opacity: 0, y: 20 },
@@ -50,9 +63,11 @@ function formatType(type) {
 export default function Analytics() {
   const [stats, setStats] = useState(null);
   const [analysis, setAnalysis] = useState(null);
+  const [recommendations, setRecommendations] = useState(null);
   const [history, setHistory] = useState([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [recFilter, setRecFilter] = useState('all');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -60,16 +75,18 @@ export default function Analytics() {
     (async () => {
       setLoading(true);
       try {
-        const [statsRes, analysisRes, historyRes] = await Promise.all([
+        const [statsRes, analysisRes, historyRes, recRes] = await Promise.all([
           alarmAPI.getChallengeStats(),
           alarmAPI.getChallengeAnalysis(),
           alarmAPI.getChallengeHistory({ page, per_page: 15 }),
+          recommendationAPI.getAll(),
         ]);
         if (cancelled) return;
         setStats(statsRes.data);
         setAnalysis(analysisRes.data);
         setHistory(historyRes.data.history || []);
         setHistoryTotal(historyRes.data.total || 0);
+        setRecommendations(recRes.data);
       } catch (err) {
         toast.error(err.response?.data?.detail || 'Failed to load analytics');
       } finally {
@@ -80,6 +97,12 @@ export default function Analytics() {
       cancelled = true;
     };
   }, [page]);
+
+  const filteredRecs = useMemo(() => {
+    const all = recommendations?.recommendations || [];
+    if (recFilter === 'all') return all;
+    return all.filter((r) => r.category === recFilter);
+  }, [recommendations, recFilter]);
 
   const typeChartData = useMemo(() => {
     const byType = analysis?.by_type || stats?.by_type || {};
@@ -112,14 +135,142 @@ export default function Analytics() {
       <motion.div {...fadeUp}>
         <h1 className="text-2xl font-bold text-white flex items-center gap-3">
           <HiOutlineChartBar className="w-7 h-7 text-emerald-400" />
-          Challenge Analytics
+          Insights & Recommendations
         </h1>
         <p className="text-slate-400 mt-1">
-          Performance tracking, completion analysis, and personalized recommendations
+          Sleep, wake habits, productivity coaching, and challenge performance
         </p>
       </motion.div>
 
-      {/* Summary cards */}
+      {/* Lifestyle recommendation engine */}
+      <motion.div {...fadeUp} transition={{ delay: 0.03 }} className="card">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <HiOutlineBolt className="w-5 h-5 text-amber-400" />
+            Recommendation Engine
+          </h2>
+          {recommendations?.summary?.top_focus_label && (
+            <span className="text-xs px-2.5 py-1 rounded-full bg-surface-700 text-slate-300">
+              Focus: {recommendations.summary.top_focus_label}
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+          <MiniStat
+            icon={HiOutlineMoon}
+            label="Bedtime"
+            value={recommendations?.summary?.suggested_bedtime
+              ? formatTimeDisplay(recommendations.summary.suggested_bedtime)
+              : '—'}
+          />
+          <MiniStat
+            icon={HiOutlineSun}
+            label="Wake goal"
+            value={recommendations?.summary?.preferred_wake_time
+              ? formatTimeDisplay(recommendations.summary.preferred_wake_time)
+              : '—'}
+          />
+          <MiniStat
+            icon={HiOutlineTrophy}
+            label="Habit score"
+            value={
+              recommendations?.summary?.habit_score != null
+                ? Math.round(recommendations.summary.habit_score)
+                : '—'
+            }
+          />
+          <MiniStat
+            icon={HiOutlineSparkles}
+            label="Goals"
+            value={recommendations?.summary?.goals_count ?? 0}
+          />
+        </div>
+
+        {(recommendations?.insights || []).length > 0 && (
+          <div className="space-y-1.5 mb-5">
+            {recommendations.insights.map((insight, i) => (
+              <p key={i} className="text-sm text-slate-300 leading-relaxed">
+                {insight}
+              </p>
+            ))}
+          </div>
+        )}
+
+        {recommendations?.daily_plan?.priority_actions?.length > 0 && (
+          <div className="rounded-xl border border-primary-500/20 bg-primary-500/5 p-4 mb-5">
+            <p className="text-xs uppercase tracking-wider text-primary-300 mb-2">
+              Daily plan
+            </p>
+            <p className="text-sm text-slate-200 mb-2">
+              {recommendations.daily_plan.morning_focus}
+            </p>
+            <ul className="space-y-1">
+              {recommendations.daily_plan.priority_actions.map((action, i) => (
+                <li key={i} className="text-sm text-slate-400 flex gap-2">
+                  <span className="text-primary-400">•</span>
+                  {action}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2 mb-4">
+          {['all', 'sleep', 'wake', 'habit', 'productivity', 'challenge'].map((cat) => (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => setRecFilter(cat)}
+              className={`text-xs px-3 py-1.5 rounded-lg border transition ${
+                recFilter === cat
+                  ? 'bg-primary-500/20 text-primary-200 border-primary-500/40'
+                  : 'bg-surface-800 text-slate-400 border-surface-700/50 hover:text-white'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-3">
+          {filteredRecs.length === 0 ? (
+            <p className="text-sm text-slate-500 py-4 text-center">
+              No recommendations in this category yet.
+            </p>
+          ) : (
+            filteredRecs.map((rec) => (
+              <div
+                key={rec.id}
+                className="rounded-xl border border-surface-700/60 bg-surface-800/40 p-4"
+              >
+                <div className="flex flex-wrap items-center gap-2 mb-1">
+                  <span
+                    className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                      LIFESTYLE_CATEGORY_STYLES[rec.category] || LIFESTYLE_CATEGORY_STYLES.habit
+                    }`}
+                  >
+                    {rec.category}
+                  </span>
+                  <PriorityBadge priority={rec.priority} />
+                  <p className="text-sm font-medium text-white">{rec.title}</p>
+                </div>
+                <p className="text-sm text-slate-400">{rec.detail}</p>
+                {rec.action_path && (
+                  <Link
+                    to={rec.action_path}
+                    className="inline-flex mt-2 text-xs text-primary-400 hover:text-primary-300"
+                  >
+                    {rec.action_hint || 'Take action'} →
+                  </Link>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </motion.div>
+
+      {/* Challenge summary cards */}
       <motion.div {...fadeUp} transition={{ delay: 0.05 }} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="Accuracy"
@@ -203,7 +354,7 @@ export default function Analytics() {
 
             <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
               <HiOutlineExclamationTriangle className="w-4 h-4 text-amber-400" />
-              Recommendations
+              Challenge Recommendations
             </h3>
             <div className="space-y-3">
               {(analysis?.recommendations || []).map((rec, i) => (
@@ -443,5 +594,17 @@ function PriorityBadge({ priority }) {
     <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full ${styles[priority] || styles.low}`}>
       {priority}
     </span>
+  );
+}
+
+function MiniStat({ icon: Icon, label, value }) {
+  return (
+    <div className="rounded-xl border border-surface-700/40 bg-surface-900/40 px-3 py-2.5">
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+        <Icon className="w-3.5 h-3.5" />
+        {label}
+      </div>
+      <p className="text-sm font-semibold text-white truncate">{value}</p>
+    </div>
   );
 }

@@ -9,25 +9,69 @@ import {
   HiOutlineClock, HiOutlineTrophy, HiOutlineFire,
   HiOutlineChartBar, HiOutlinePuzzlePiece, HiOutlinePlus,
   HiOutlineBolt, HiOutlineMoon, HiOutlineSun,
+  HiOutlineLightBulb, HiOutlineSparkles,
 } from 'react-icons/hi2';
 import useAuthStore from '../store/authStore';
 import useAlarmStore from '../store/alarmStore';
-import { userAPI } from '../services/api';
+import { userAPI, recommendationAPI } from '../services/api';
+import { formatTimeDisplay } from '../utils/timeFormat';
 
 const fadeUp = {
   initial: { opacity: 0, y: 20 },
   animate: { opacity: 1, y: 0 },
 };
 
+const CATEGORY_STYLES = {
+  sleep: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/25',
+  wake: 'bg-amber-500/15 text-amber-300 border-amber-500/25',
+  habit: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25',
+  productivity: 'bg-sky-500/15 text-sky-300 border-sky-500/25',
+  challenge: 'bg-violet-500/15 text-violet-300 border-violet-500/25',
+};
+
 export default function Dashboard() {
   const { user } = useAuthStore();
   const { alarms, fetchAlarms, upcoming, fetchUpcoming } = useAlarmStore();
   const [stats, setStats] = useState(null);
+  const [digest, setDigest] = useState(null);
 
   useEffect(() => {
     fetchAlarms();
     fetchUpcoming();
     userAPI.getStats().then(res => setStats(res.data)).catch(() => {});
+
+    // Load daily coaching; if goals exist but productivity cards are missing,
+    // merge at least one personalized productivity recommendation for Today's Coaching.
+    (async () => {
+      try {
+        const { data: daily } = await recommendationAPI.getDaily();
+        const hasProductivity = (daily.recommendations || []).some(
+          (r) => r.category === 'productivity'
+        );
+        const goalsCount = daily.summary?.goals_count ?? 0;
+
+        if (goalsCount > 0 && !hasProductivity) {
+          try {
+            const { data: prod } = await recommendationAPI.getProductivity();
+            const tip = (prod.recommendations || []).find(
+              (r) => r.id !== 'productivity-set-goals'
+            ) || (prod.recommendations || [])[0];
+            if (tip) {
+              const merged = [...(daily.recommendations || [])];
+              if (merged.length >= 5) merged.pop();
+              merged.push(tip);
+              setDigest({ ...daily, recommendations: merged });
+              return;
+            }
+          } catch {
+            /* fall through with daily digest */
+          }
+        }
+        setDigest(daily);
+      } catch {
+        /* coaching is optional */
+      }
+    })();
   }, []);
 
   const greeting = () => {
@@ -39,6 +83,13 @@ export default function Dashboard() {
 
   const g = greeting();
   const GIcon = g.icon;
+
+  // Show personalized productivity coaching first in Today's Coaching.
+  const coachingCards = [...(digest?.recommendations || [])].sort((a, b) => {
+    const aProd = a.category === 'productivity' ? 0 : 1;
+    const bProd = b.category === 'productivity' ? 0 : 1;
+    return aProd - bProd;
+  });
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -96,7 +147,7 @@ export default function Dashboard() {
           </h2>
           {stats?.preferred_wakeup_time && (
             <span className="text-sm text-slate-400">
-              Goal: <span className="text-primary-400 font-semibold">{stats.preferred_wakeup_time?.slice(0, 5)}</span>
+              Goal: <span className="text-primary-400 font-semibold">{formatTimeDisplay(stats.preferred_wakeup_time)}</span>
             </span>
           )}
         </div>
@@ -157,6 +208,79 @@ export default function Dashboard() {
             <span className="w-2.5 h-2.5 rounded-full bg-surface-600" /> Pending
           </span>
         </div>
+      </motion.div>
+
+      {/* ─── Personalized Recommendations ─── */}
+      <motion.div {...fadeUp} transition={{ delay: 0.18 }} className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <HiOutlineLightBulb className="w-5 h-5 text-amber-400" />
+            Today&apos;s Coaching
+          </h2>
+          <Link to="/analytics" className="text-sm text-primary-400 hover:text-primary-300 transition">
+            Full insights →
+          </Link>
+        </div>
+
+        {digest?.daily_plan && (
+          <div className="grid sm:grid-cols-3 gap-3 mb-5">
+            <PlanChip
+              label="Bedtime"
+              value={digest.daily_plan.suggested_bedtime
+                ? formatTimeDisplay(digest.daily_plan.suggested_bedtime)
+                : '—'}
+              icon={HiOutlineMoon}
+            />
+            <PlanChip
+              label="Wake"
+              value={digest.daily_plan.suggested_wake_time
+                ? formatTimeDisplay(digest.daily_plan.suggested_wake_time)
+                : '—'}
+              icon={HiOutlineSun}
+            />
+            <PlanChip
+              label="Focus"
+              value={digest.summary?.top_focus_label || digest.daily_plan.morning_focus || '—'}
+              icon={HiOutlineSparkles}
+            />
+          </div>
+        )}
+
+        {!coachingCards.length ? (
+          <p className="text-sm text-slate-500 py-4 text-center">
+            Personalized sleep, wake, and productivity tips appear here as you use the app.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {coachingCards.map((rec) => (
+              <div
+                key={rec.id}
+                className={`rounded-xl border p-4 ${
+                  rec.category === 'productivity'
+                    ? 'border-sky-500/30 bg-sky-500/5'
+                    : 'border-surface-700/50 bg-surface-900/40'
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                  <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${CATEGORY_STYLES[rec.category] || CATEGORY_STYLES.habit}`}>
+                    {rec.category}
+                  </span>
+                  <PriorityBadge priority={rec.priority} />
+                  <p className="text-sm font-medium text-white">{rec.title}</p>
+                </div>
+                <p className="text-sm text-slate-400 leading-relaxed">{rec.detail}</p>
+                {rec.action_path && (
+                  <Link
+                    to={rec.action_path}
+                    className="inline-flex mt-2 text-xs text-primary-400 hover:text-primary-300"
+                  >
+                    {rec.action_hint || 'Take action'} →
+                  </Link>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </motion.div>
 
       {/* ─── Two Column Layout ─── */}
@@ -280,5 +404,30 @@ function QuickAction({ icon: Icon, label, to, onClick, color }) {
       <Icon className="w-5 h-5" />
       <span className="text-sm font-medium text-white">{label}</span>
     </Link>
+  );
+}
+
+function PlanChip({ label, value, icon: Icon }) {
+  return (
+    <div className="rounded-xl border border-surface-700/40 bg-surface-900/50 px-3 py-2.5">
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+        <Icon className="w-3.5 h-3.5" />
+        {label}
+      </div>
+      <p className="text-sm font-medium text-white truncate">{value}</p>
+    </div>
+  );
+}
+
+function PriorityBadge({ priority }) {
+  const styles = {
+    high: 'bg-red-500/15 text-red-400',
+    medium: 'bg-amber-500/15 text-amber-400',
+    low: 'bg-slate-500/20 text-slate-300',
+  };
+  return (
+    <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full ${styles[priority] || styles.low}`}>
+      {priority}
+    </span>
   );
 }
