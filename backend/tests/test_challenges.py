@@ -215,6 +215,24 @@ class TestChallengeGeneration:
                 }
             )
 
+    def test_resolve_baseline_prefers_profile(self):
+        """Profile difficulty preference is the initial baseline."""
+        class FakeProfile:
+            class Pref:
+                value = "hard"
+
+            difficulty_preference = Pref()
+
+        assert (
+            ChallengeService.resolve_baseline_difficulty(FakeProfile(), "easy")
+            == "hard"
+        )
+        assert (
+            ChallengeService.resolve_baseline_difficulty(None, "expert")
+            == "expert"
+        )
+        assert ChallengeService.resolve_baseline_difficulty(None, None) == "medium"
+
     def test_adapt_difficulty_raises_on_strong_performance(self):
         """High accuracy + fast solves should raise difficulty."""
         class FakeLog:
@@ -227,6 +245,27 @@ class TestChallengeGeneration:
         adapted = ChallengeService.adapt_difficulty("medium", logs)
         assert adapted["difficulty"] == "hard"
         assert adapted["adjustment"] == 1
+
+    def test_adapt_difficulty_centers_on_preferred_level(self):
+        """Adaptive ±1 should move around the user's preferred baseline."""
+        class FakeLog:
+            def __init__(self, correct, seconds):
+                self.is_correct = correct
+                self.time_taken_seconds = seconds
+                self.challenge_type = "math"
+
+        strong = [FakeLog(True, 8) for _ in range(10)]
+        raised = ChallengeService.adapt_difficulty("hard", strong)
+        assert raised["difficulty"] == "expert"
+        assert raised["adjustment"] == 1
+
+        weak = [FakeLog(False, 40) for _ in range(8)] + [
+            FakeLog(True, 40),
+            FakeLog(True, 40),
+        ]
+        lowered = ChallengeService.adapt_difficulty("hard", weak)
+        assert lowered["difficulty"] == "medium"
+        assert lowered["adjustment"] == -1
 
     def test_adapt_difficulty_lowers_on_weak_performance(self):
         """Low accuracy should lower difficulty."""

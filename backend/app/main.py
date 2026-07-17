@@ -17,10 +17,12 @@ from app.db.session import engine
 from app.models import user, profile, alarm  # noqa: F401
 from app.models import challenge_session  # noqa: F401
 from app.models import alarm_wake_event  # noqa: F401
+from app.models import alarm_snooze_event  # noqa: F401
+from app.models import analytics_event  # noqa: F401
 
 
 def _ensure_sqlite_columns() -> None:
-    """Add missing columns on existing SQLite tables (create_all won't alter)."""
+    """Add missing columns/indexes on existing SQLite tables (create_all won't alter)."""
     if not str(settings.DATABASE_URL).startswith("sqlite"):
         return
     statements = [
@@ -37,14 +39,56 @@ def _ensure_sqlite_columns() -> None:
         "ALTER TABLE challenge_sessions ADD COLUMN wake_confirmed BOOLEAN DEFAULT 0",
         "ALTER TABLE challenge_sessions ADD COLUMN session_started_at DATETIME",
         "ALTER TABLE alarms ADD COLUMN challenge_difficulty VARCHAR(50) DEFAULT 'medium'",
+        # Query indexes for adaptive difficulty / history / stats
+        "CREATE INDEX IF NOT EXISTS ix_alarm_challenge_logs_user_id "
+        "ON alarm_challenge_logs (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_alarm_challenge_logs_alarm_id "
+        "ON alarm_challenge_logs (alarm_id)",
+        "CREATE INDEX IF NOT EXISTS ix_alarm_challenge_logs_created_at "
+        "ON alarm_challenge_logs (created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_alarm_challenge_logs_user_created "
+        "ON alarm_challenge_logs (user_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_alarm_challenge_logs_alarm_created "
+        "ON alarm_challenge_logs (alarm_id, created_at)",
+        # Backfill legacy nullables so analytics never see incomplete rows
+        "UPDATE alarm_challenge_logs SET difficulty = 'medium' "
+        "WHERE difficulty IS NULL OR TRIM(difficulty) = ''",
+        "UPDATE alarm_challenge_logs SET challenge_prompt = '' "
+        "WHERE challenge_prompt IS NULL",
+        "UPDATE alarm_challenge_logs SET challenge_type = 'word_game' "
+        "WHERE lower(challenge_type) = 'word'",
+        "UPDATE alarm_challenge_logs SET time_taken_seconds = 0 "
+        "WHERE time_taken_seconds IS NULL OR time_taken_seconds < 0",
+        "UPDATE alarm_challenge_logs SET failed_attempts = 0 "
+        "WHERE failed_attempts IS NULL OR failed_attempts < 0",
+        "UPDATE alarm_challenge_logs SET points_earned = 0 "
+        "WHERE points_earned IS NULL OR points_earned < 0",
     ]
     with engine.begin() as conn:
         for sql in statements:
             try:
                 conn.exec_driver_sql(sql)
             except Exception:
-                # Column already exists
+                # Column already exists / statement not applicable
                 pass
+
+
+def _repair_attempt_logs_on_startup() -> None:
+    """Normalize any remaining dirty attempt-log rows after schema ensure."""
+    from app.db.session import SessionLocal
+    from app.services.attempt_log_service import AttemptLogService
+
+    db = SessionLocal()
+    try:
+        result = AttemptLogService.repair_logs(db, commit=True)
+        repaired = result.get("repaired_rows", 0)
+        if repaired:
+            print(f"✅ Attempt logs repaired: {repaired} row(s)")
+    except Exception as e:
+        db.rollback()
+        print(f"⚠️ Attempt-log repair skipped: {e}")
+    finally:
+        db.close()
 
 
 def create_app() -> FastAPI:
@@ -79,6 +123,7 @@ def create_app() -> FastAPI:
         """Create database tables on application startup."""
         Base.metadata.create_all(bind=engine)
         _ensure_sqlite_columns()
+        _repair_attempt_logs_on_startup()
 
         # Seed default admin user if not present
         from app.db.session import SessionLocal

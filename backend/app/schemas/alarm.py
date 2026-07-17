@@ -55,9 +55,12 @@ class AlarmCreate(BaseModel):
     challenge_count: int = Field(
         default=1, ge=1, le=10, description="Number of challenges"
     )
-    challenge_difficulty: str = Field(
-        default="medium",
-        description="Baseline difficulty (beginner/easy/medium/hard/expert)",
+    challenge_difficulty: Optional[str] = Field(
+        default=None,
+        description=(
+            "Baseline difficulty (beginner/easy/medium/hard/expert). "
+            "When omitted, the user's profile difficulty preference is used."
+        ),
     )
     volume: int = Field(default=80, ge=0, le=100, description="Volume level")
     vibrate: bool = Field(default=True, description="Enable vibration")
@@ -70,10 +73,12 @@ class AlarmCreate(BaseModel):
 
     @field_validator("challenge_difficulty")
     @classmethod
-    def validate_challenge_difficulty(cls, v: str) -> str:
-        """Normalize and validate difficulty labels."""
+    def validate_challenge_difficulty(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize and validate difficulty labels when provided."""
+        if v is None:
+            return None
         allowed = {"beginner", "easy", "medium", "hard", "expert"}
-        normalized = (v or "medium").strip().lower()
+        normalized = v.strip().lower()
         if normalized not in allowed:
             raise ValueError(
                 f"challenge_difficulty must be one of: {', '.join(sorted(allowed))}"

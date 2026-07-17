@@ -20,6 +20,8 @@ from app.models.profile import UserProfile  # noqa: F401 - ensure model is regis
 from app.models.alarm import Alarm  # noqa: F401 - ensure model is registered
 from app.models.challenge_session import ChallengeSession  # noqa: F401
 from app.models.alarm_wake_event import AlarmWakeEvent  # noqa: F401
+from app.models.alarm_snooze_event import AlarmSnoozeEvent  # noqa: F401
+from app.models.analytics_event import AnalyticsEvent  # noqa: F401
 from app.core.security import create_access_token
 
 # Use a single shared in-memory SQLite database for the whole test session.

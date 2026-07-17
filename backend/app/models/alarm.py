@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -131,36 +132,52 @@ class Alarm(Base):
 class AlarmChallengeLog(Base):
     """
     SQLAlchemy model representing a specific challenge attempt event.
-    
+
+    Every verify attempt (correct or incorrect) must land here with normalized
+    ``challenge_type`` / ``difficulty`` so adaptive difficulty, habit scoring,
+    and recommendations can query clean history.
+
     Attributes:
         id: Auto-incrementing primary key.
         alarm_id: Foreign key to the parent Alarm.
         user_id: Foreign key to the User (for easy analytics grouping).
-        challenge_type: The type of puzzle presented.
-        difficulty: Effective difficulty for this attempt.
+        challenge_type: Normalized puzzle type (e.g. math, word_game).
+        difficulty: Effective difficulty for this attempt (never null).
         challenge_prompt: The prompt shown to the user.
         is_correct: Whether the attempt was correct (and not timed out).
-        time_taken_seconds: How long it took the user to successfully solve.
-        failed_attempts: How many times the user got it wrong before succeeding.
-        points_earned: Score awarded for this attempt.
-        created_at: When the challenge was solved.
+        time_taken_seconds: How long the attempt took (>= 0).
+        failed_attempts: Wrong tries before this attempt (>= 0).
+        points_earned: Score awarded for this attempt (>= 0).
+        created_at: When the attempt was recorded (UTC).
     """
+
     __tablename__ = "alarm_challenge_logs"
-    
+    __table_args__ = (
+        Index("ix_alarm_challenge_logs_user_created", "user_id", "created_at"),
+        Index("ix_alarm_challenge_logs_alarm_created", "alarm_id", "created_at"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    alarm_id = Column(Integer, ForeignKey("alarms.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    alarm_id = Column(
+        Integer, ForeignKey("alarms.id"), nullable=False, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
     challenge_type = Column(String(50), nullable=False)
-    difficulty = Column(String(50), nullable=True)
-    challenge_prompt = Column(Text, nullable=True)
+    difficulty = Column(String(50), nullable=False, default="medium")
+    challenge_prompt = Column(Text, nullable=False, default="")
     is_correct = Column(Boolean, nullable=False, default=False)
     time_taken_seconds = Column(Integer, nullable=False, default=0)
     failed_attempts = Column(Integer, nullable=False, default=0)
     points_earned = Column(Integer, nullable=False, default=0)
     created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
     )
-    
+
     # Relationships
     alarm = relationship("Alarm", back_populates="challenge_logs")
 

@@ -12,6 +12,7 @@ import {
 import toast from 'react-hot-toast';
 import useAlarmStore from '../store/alarmStore';
 import useActiveAlarmStore from '../store/activeAlarmStore';
+import { userAPI } from '../services/api';
 
 const ALARM_TYPES = [
   { value: 'daily', label: 'Daily', desc: 'Every day' },
@@ -69,9 +70,21 @@ export default function AlarmManager() {
   const [editingAlarm, setEditingAlarm] = useState(null);
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [defaultDifficulty, setDefaultDifficulty] = useState('medium');
 
   useEffect(() => {
     fetchAlarms();
+    userAPI.getProfile()
+      .then((res) => {
+        const pref =
+          res.data?.profile?.difficulty_preference ||
+          res.data?.difficulty_preference ||
+          'medium';
+        setDefaultDifficulty(String(pref).toLowerCase());
+      })
+      .catch(() => {
+        setDefaultDifficulty('medium');
+      });
   }, []);
 
   const handleCreate = () => {
@@ -265,6 +278,7 @@ export default function AlarmManager() {
         {showModal && (
           <AlarmModal
             alarm={editingAlarm}
+            defaultDifficulty={defaultDifficulty}
             onClose={() => setShowModal(false)}
             onCreate={createAlarm}
             onUpdate={updateAlarm}
@@ -324,8 +338,9 @@ export default function AlarmManager() {
 // Alarm Create/Edit Modal
 // ═══════════════════════════════════════════
 
-function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
+function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, onUpdate }) {
   const isEdit = !!alarm;
+  const initialDifficulty = alarm?.challenge_difficulty || defaultDifficulty || 'medium';
   const [timeSelection, setTimeSelection] = useState(() => parseTimeTo12Hour(alarm?.alarm_time?.slice(0, 5) || '07:00'));
   const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm({
     defaultValues: alarm ? {
@@ -333,7 +348,7 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
       alarm_time: alarm.alarm_time?.slice(0, 5) || '07:00',
       alarm_type: alarm.alarm_type || 'daily',
       challenge_type: alarm.challenge_type || 'random',
-      challenge_difficulty: alarm.challenge_difficulty || 'medium',
+      challenge_difficulty: initialDifficulty,
       challenge_count: alarm.challenge_count ?? 1,
       snooze_limit: alarm.snooze_limit ?? 3,
       snooze_interval_minutes: alarm.snooze_interval_minutes ?? 5,
@@ -343,7 +358,7 @@ function AlarmModal({ alarm, onClose, onCreate, onUpdate }) {
       alarm_time: '07:00',
       alarm_type: 'daily',
       challenge_type: 'random',
-      challenge_difficulty: 'medium',
+      challenge_difficulty: initialDifficulty,
       challenge_count: 1,
       snooze_limit: 3,
       snooze_interval_minutes: 5,

@@ -139,6 +139,53 @@ class TestLogin:
         assert "Invalid email or password" in response.json()["detail"]
 
 
+class TestOAuth2Token:
+    """Tests for POST /api/v1/auth/token (Swagger OAuth2 password flow)."""
+
+    def test_token_with_email_unlocks_protected_route(self, client, test_user):
+        """Form login returns a bearer token that authorizes protected endpoints."""
+        response = client.post(
+            "/api/v1/auth/token",
+            data={"username": "test@example.com", "password": "TestPass123"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["token_type"] == "bearer"
+        assert data["access_token"]
+
+        protected = client.get(
+            "/api/v1/profiles/me/habit-score",
+            headers={"Authorization": f"Bearer {data['access_token']}"},
+        )
+        assert protected.status_code == 200
+        assert "habit_score" in protected.json()
+
+    def test_token_with_username(self, client, test_user):
+        """Swagger username field may be the account username."""
+        response = client.post(
+            "/api/v1/auth/token",
+            data={"username": "testuser", "password": "TestPass123"},
+        )
+        assert response.status_code == 200
+        assert response.json()["access_token"]
+
+    def test_token_wrong_password(self, client, test_user):
+        response = client.post(
+            "/api/v1/auth/token",
+            data={"username": "test@example.com", "password": "WrongPassword1"},
+        )
+        assert response.status_code == 401
+
+    def test_oauth2_scheme_token_url_points_to_token_endpoint(self):
+        """OpenAPI Authorize dialog must target the form token route."""
+        from app.core.security import oauth2_scheme
+        from app.core.config import settings
+
+        assert oauth2_scheme.model.flows.password.tokenUrl == (
+            f"{settings.API_V1_STR}/auth/token"
+        )
+
+
 class TestCurrentUser:
     """Tests for GET /api/v1/auth/me."""
 

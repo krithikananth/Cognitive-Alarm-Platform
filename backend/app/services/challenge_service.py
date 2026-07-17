@@ -64,6 +64,16 @@ def _difficulty_index(level: str) -> int:
         return 2  # medium
 
 
+def _preference_value(profile: Any) -> Optional[str]:
+    """Extract a difficulty preference string from a profile-like object."""
+    if profile is None:
+        return None
+    pref = getattr(profile, "difficulty_preference", None)
+    if pref is None:
+        return None
+    return pref.value if hasattr(pref, "value") else str(pref)
+
+
 def _option_key(text: str) -> str:
     """Case-insensitive key for comparing multiple-choice options."""
     return str(text).strip().lower()
@@ -375,12 +385,33 @@ class ChallengeService:
         return random.choices(pool, weights=weights, k=1)[0]
 
     @staticmethod
+    def resolve_baseline_difficulty(
+        profile: Any = None,
+        alarm_difficulty: Optional[str] = None,
+    ) -> str:
+        """
+        Resolve the initial difficulty used by the challenge engine.
+
+        Profile ``difficulty_preference`` is the primary baseline so adaptive
+        difficulty can adjust around the user's preferred level. Falls back to
+        the alarm's stored ``challenge_difficulty``, then ``medium``, so
+        existing alarms and users without a profile keep working.
+        """
+        preferred = _preference_value(profile)
+        if preferred:
+            return _clamp_difficulty(preferred)
+        return _clamp_difficulty(alarm_difficulty or "medium")
+
+    @staticmethod
     def adapt_difficulty(
         base_difficulty: str,
         recent_logs: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Adjust difficulty from recent performance before time-of-day softening.
+
+        Centers on the caller's baseline (normally the profile preference)
+        and shifts at most one level up or down.
 
         Returns dict with keys: difficulty, adjustment (-1/0/+1), reason.
         """

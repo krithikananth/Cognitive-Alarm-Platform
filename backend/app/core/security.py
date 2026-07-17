@@ -16,7 +16,8 @@ from jose import JWTError, jwt
 from app.core.config import settings
 
 # OAuth2 scheme that extracts the bearer token from the Authorization header.
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
+# tokenUrl must match POST /auth/token (OAuth2 password form) used by Swagger Authorize.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/token")
 
 
 def create_access_token(

@@ -68,7 +68,7 @@ const useAuthStore = create((set, get) => ({
       localStorage.setItem('user', JSON.stringify(user));
       set({ user, isAuthenticated: true, isLoading: false });
       syncBrowserTimezone();
-      return { success: true };
+      return { success: true, user };
     } catch (err) {
       let message = 'Login failed';
       const detail = err.response?.data?.detail;

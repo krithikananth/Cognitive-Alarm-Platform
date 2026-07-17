@@ -25,6 +25,10 @@ class Settings(BaseSettings):
         ACCESS_TOKEN_EXPIRE_MINUTES: Lifetime of access tokens in minutes.
         REFRESH_TOKEN_EXPIRE_DAYS: Lifetime of refresh tokens in days.
         DATABASE_URL: SQLAlchemy database connection string.
+        REDIS_ENABLED: Whether recommendation caching via Redis is attempted.
+        REDIS_URL: Redis connection URL (e.g. redis://localhost:6379/0).
+        REDIS_SOCKET_TIMEOUT_SECONDS: Short connect/read timeout for soft-fail.
+        RECOMMENDATION_CACHE_TTL_SECONDS: Safety TTL for cached recommendation payloads.
         CORS_ORIGINS: List of allowed CORS origins for cross-origin requests.
         FRONTEND_URL: SPA origin used for OAuth callback redirects.
         OAUTH2_GOOGLE_CLIENT_ID: Google OAuth2 client ID for social login.
@@ -52,6 +56,14 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────
     DATABASE_URL: str = "sqlite:///./icap.db"
+
+    # ── Redis / recommendation cache ──────────────────────────────────
+    # When REDIS_ENABLED is false or Redis is unreachable, recommendations
+    # recompute on every request (graceful fallback).
+    REDIS_ENABLED: bool = True
+    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 0.5
+    RECOMMENDATION_CACHE_TTL_SECONDS: int = 300
 
     # ── CORS ──────────────────────────────────────────────────────────
     CORS_ORIGINS: List[str] = [

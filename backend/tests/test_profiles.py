@@ -53,6 +53,31 @@ class TestUpdateProfile:
         assert data["sleep_duration_hours"] == 7.5
         assert data["difficulty_preference"] == "hard"
 
+    def test_difficulty_preference_syncs_existing_alarms(
+        self, client, test_user, auth_headers
+    ):
+        """Updating preference aligns existing alarms for future challenges."""
+        created = client.post(
+            "/api/v1/alarms/",
+            json={"title": "Legacy", "alarm_time": "07:00", "challenge_difficulty": "easy"},
+            headers=auth_headers,
+        )
+        assert created.status_code == 201
+        alarm_id = created.json()["id"]
+        assert created.json()["challenge_difficulty"] == "easy"
+
+        updated = client.put(
+            "/api/v1/profiles/me",
+            json={"difficulty_preference": "expert"},
+            headers=auth_headers,
+        )
+        assert updated.status_code == 200
+        assert updated.json()["difficulty_preference"] == "expert"
+
+        alarm = client.get(f"/api/v1/alarms/{alarm_id}", headers=auth_headers)
+        assert alarm.status_code == 200
+        assert alarm.json()["challenge_difficulty"] == "expert"
+
     def test_update_profile_partial(self, client, test_user, auth_headers):
         """Partial updates leave other fields at their defaults."""
         payload = {"sleep_duration_hours": 6.0}
@@ -186,8 +211,18 @@ class TestHabitScore:
         assert isinstance(data["habit_score"], (int, float))
         assert "breakdown" in data
         assert "weights" in data
-        assert "wake_up_consistency" in data["breakdown"]
-        assert data["weights"]["wake_up_consistency"] == 0.35
+        assert data["breakdown"].keys() >= {
+            "wake_up_consistency",
+            "challenge_completion",
+            "snooze_reduction",
+            "sleep_adherence",
+        }
+        assert data["weights"] == {
+            "wake_up_consistency": 0.35,
+            "challenge_completion": 0.25,
+            "snooze_reduction": 0.20,
+            "sleep_adherence": 0.20,
+        }
 
     def test_get_habit_score_unauthorized(self, client):
         """Unauthenticated access to habit score returns 401."""

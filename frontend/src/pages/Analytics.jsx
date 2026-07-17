@@ -1,5 +1,5 @@
 /**
- * Analytics — challenge performance + sleep/wake/productivity recommendations.
+ * Analytics — behavioral trends + challenge performance + recommendations.
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -18,6 +18,7 @@ import {
   HiOutlineMoon,
   HiOutlineSun,
   HiOutlineBolt,
+  HiOutlineBellAlert,
 } from 'react-icons/hi2';
 import {
   BarChart,
@@ -27,9 +28,12 @@ import {
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
+  LineChart,
+  Line,
+  Legend,
 } from 'recharts';
 import toast from 'react-hot-toast';
-import { alarmAPI, recommendationAPI } from '../services/api';
+import { alarmAPI, analyticsAPI, recommendationAPI } from '../services/api';
 import { formatTimeDisplay } from '../utils/timeFormat';
 
 const LIFESTYLE_CATEGORY_STYLES = {
@@ -57,17 +61,33 @@ const TYPE_LABELS = {
 };
 
 function formatType(type) {
-  return TYPE_LABELS[type] || (type || 'Unknown').replace(/_/g, ' ');
+  const key = (type || '').toLowerCase();
+  return TYPE_LABELS[key] || (type || 'Unknown').replace(/_/g, ' ');
+}
+
+function trendMeta(trend) {
+  if (trend === 'improving') {
+    return { Icon: HiOutlineArrowTrendingUp, label: 'Improving', color: 'text-emerald-400' };
+  }
+  if (trend === 'declining') {
+    return { Icon: HiOutlineArrowTrendingDown, label: 'Declining', color: 'text-orange-400' };
+  }
+  if (trend === 'stable') {
+    return { Icon: HiOutlineMinus, label: 'Stable', color: 'text-slate-300' };
+  }
+  return { Icon: HiOutlineMinus, label: 'Not enough data', color: 'text-slate-500' };
 }
 
 export default function Analytics() {
   const [stats, setStats] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [recommendations, setRecommendations] = useState(null);
+  const [behavioral, setBehavioral] = useState(null);
   const [history, setHistory] = useState([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [recFilter, setRecFilter] = useState('all');
+  const [trendView, setTrendView] = useState('weekly');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -75,18 +95,21 @@ export default function Analytics() {
     (async () => {
       setLoading(true);
       try {
-        const [statsRes, analysisRes, historyRes, recRes] = await Promise.all([
-          alarmAPI.getChallengeStats(),
-          alarmAPI.getChallengeAnalysis(),
-          alarmAPI.getChallengeHistory({ page, per_page: 15 }),
-          recommendationAPI.getAll(),
-        ]);
+        const [statsRes, analysisRes, historyRes, recRes, behavioralRes] =
+          await Promise.all([
+            alarmAPI.getChallengeStats(),
+            alarmAPI.getChallengeAnalysis(),
+            alarmAPI.getChallengeHistory({ page, per_page: 15 }),
+            recommendationAPI.getAll(),
+            analyticsAPI.getBehavioral(30),
+          ]);
         if (cancelled) return;
         setStats(statsRes.data);
         setAnalysis(analysisRes.data);
         setHistory(historyRes.data.history || []);
         setHistoryTotal(historyRes.data.total || 0);
         setRecommendations(recRes.data);
+        setBehavioral(behavioralRes.data);
       } catch (err) {
         toast.error(err.response?.data?.detail || 'Failed to load analytics');
       } finally {
@@ -113,6 +136,33 @@ export default function Analytics() {
     }));
   }, [analysis, stats]);
 
+  const weekdaySnoozeData = useMemo(() => {
+    return (behavioral?.snooze_pattern?.by_weekday || []).map((row) => ({
+      day: row.weekday,
+      snoozes: row.count,
+    }));
+  }, [behavioral]);
+
+  const periodSeries = useMemo(() => {
+    const block =
+      trendView === 'monthly'
+        ? behavioral?.monthly_trends
+        : behavioral?.weekly_trends;
+    return (block?.series || []).map((row) => ({
+      ...row,
+      label: trendView === 'monthly' ? row.date.slice(5) : row.weekday,
+    }));
+  }, [behavioral, trendView]);
+
+  const habitSeries = useMemo(() => {
+    return (behavioral?.habit_trends?.series || [])
+      .filter((row) => row.has_activity)
+      .map((row) => ({
+        date: row.date.slice(5),
+        score: row.habit_score,
+      }));
+  }, [behavioral]);
+
   const summary = analysis?.summary || {};
   const trendIcon =
     summary.trend === 'improving'
@@ -130,6 +180,19 @@ export default function Analytics() {
     );
   }
 
+  const snooze = behavioral?.snooze_pattern;
+  const wake = behavioral?.wake_up_consistency;
+  const sleep = behavioral?.sleep_schedule_adherence;
+  const habits = behavioral?.habit_trends;
+  const snoozeTrend = trendMeta(snooze?.trend);
+  const wakeTrend = trendMeta(wake?.trend);
+  const sleepTrend = trendMeta(sleep?.trend);
+  const habitTrend = trendMeta(habits?.trend);
+  const SnoozeTrendIcon = snoozeTrend.Icon;
+  const WakeTrendIcon = wakeTrend.Icon;
+  const SleepTrendIcon = sleepTrend.Icon;
+  const HabitTrendIcon = habitTrend.Icon;
+
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <motion.div {...fadeUp}>
@@ -138,8 +201,232 @@ export default function Analytics() {
           Insights & Recommendations
         </h1>
         <p className="text-slate-400 mt-1">
-          Sleep, wake habits, productivity coaching, and challenge performance
+          Behavioral trends, sleep/wake habits, productivity coaching, and challenge performance
         </p>
+      </motion.div>
+
+      {/* Behavioral analytics */}
+      <motion.div {...fadeUp} transition={{ delay: 0.02 }} className="card">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <HiOutlineBellAlert className="w-5 h-5 text-sky-400" />
+            Behavioral Analytics
+          </h2>
+          <span className="text-xs text-slate-400">
+            Last {behavioral?.window_days ?? 30} days
+          </span>
+        </div>
+
+        {(behavioral?.insights || []).length > 0 && (
+          <div className="space-y-1.5 mb-5">
+            {behavioral.insights.map((insight, i) => (
+              <p key={i} className="text-sm text-slate-300 leading-relaxed">
+                {insight}
+              </p>
+            ))}
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+          <MiniStat
+            icon={HiOutlineBellAlert}
+            label="Snoozes"
+            value={snooze?.total_snoozes ?? 0}
+          />
+          <MiniStat
+            icon={HiOutlineSun}
+            label="Wake consistency"
+            value={
+              wake?.consistency_score != null
+                ? Math.round(wake.consistency_score)
+                : '—'
+            }
+          />
+          <MiniStat
+            icon={HiOutlineMoon}
+            label="Schedule adherence"
+            value={
+              sleep?.adherence_rate != null
+                ? `${Math.round(sleep.adherence_rate)}%`
+                : '—'
+            }
+          />
+          <MiniStat
+            icon={HiOutlineTrophy}
+            label="Habit score"
+            value={
+              habits?.current_habit_score != null
+                ? Math.round(habits.current_habit_score)
+                : '—'
+            }
+          />
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-4 mb-5">
+          <MetricBlock
+            title="Snooze pattern"
+            trend={snoozeTrend}
+            TrendIcon={SnoozeTrendIcon}
+            rows={[
+              ['Avg / wake', snooze?.avg_snoozes_per_wake ?? 0],
+              ['Limit hits', `${snooze?.limit_hit_rate ?? 0}%`],
+              ['Peak day', snooze?.peak_weekday || '—'],
+              ['Peak hour', snooze?.peak_hour != null ? `${snooze.peak_hour}:00` : '—'],
+            ]}
+          />
+          <MetricBlock
+            title="Wake-up consistency"
+            trend={wakeTrend}
+            TrendIcon={WakeTrendIcon}
+            rows={[
+              ['Verified wakes', wake?.verified_wakes ?? 0],
+              ['Mean wake', wake?.mean_wake_time ? formatTimeDisplay(wake.mean_wake_time) : '—'],
+              ['Std (min)', wake?.std_wake_minutes ?? '—'],
+              ['On-time rate', `${wake?.on_time_rate ?? 0}%`],
+            ]}
+          />
+          <MetricBlock
+            title="Sleep schedule"
+            trend={sleepTrend}
+            TrendIcon={SleepTrendIcon}
+            rows={[
+              [
+                'Preferred wake',
+                sleep?.preferred_wake_time
+                  ? formatTimeDisplay(sleep.preferred_wake_time)
+                  : '—',
+              ],
+              [
+                'Suggested bed',
+                sleep?.suggested_bedtime
+                  ? formatTimeDisplay(sleep.suggested_bedtime)
+                  : '—',
+              ],
+              ['Adherent days', `${sleep?.adherent_days ?? 0}/${sleep?.observed_days ?? 0}`],
+              ['Avg deviation', sleep?.avg_deviation_minutes != null ? `${sleep.avg_deviation_minutes}m` : '—'],
+            ]}
+          />
+        </div>
+
+        <div className="grid lg:grid-cols-2 gap-6 mb-5">
+          <div>
+            <h3 className="text-sm font-semibold text-white mb-3">Snoozes by weekday</h3>
+            {weekdaySnoozeData.every((d) => d.snoozes === 0) ? (
+              <p className="text-sm text-slate-500 py-8 text-center">
+                Snooze an alarm to populate weekday patterns.
+              </p>
+            ) : (
+              <div className="h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={weekdaySnoozeData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis dataKey="day" stroke="#94a3b8" tick={{ fontSize: 12 }} />
+                    <YAxis stroke="#94a3b8" tick={{ fontSize: 12 }} allowDecimals={false} />
+                    <Tooltip
+                      contentStyle={{
+                        background: '#1e293b',
+                        border: '1px solid #334155',
+                        borderRadius: 12,
+                      }}
+                      labelStyle={{ color: '#e2e8f0' }}
+                    />
+                    <Bar dataKey="snoozes" fill="#38bdf8" radius={[8, 8, 0, 0]} name="Snoozes" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-white">
+                {trendView === 'monthly' ? 'Monthly' : 'Weekly'} trends
+              </h3>
+              <div className="flex gap-2">
+                {['weekly', 'monthly'].map((view) => (
+                  <button
+                    key={view}
+                    type="button"
+                    onClick={() => setTrendView(view)}
+                    className={`text-xs px-3 py-1.5 rounded-lg border transition ${
+                      trendView === view
+                        ? 'bg-sky-500/20 text-sky-200 border-sky-500/40'
+                        : 'bg-surface-800 text-slate-400 border-surface-700/50 hover:text-white'
+                    }`}
+                  >
+                    {view}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {periodSeries.every((d) => !d.verified_wakes && !d.snoozes) ? (
+              <p className="text-sm text-slate-500 py-8 text-center">
+                Complete wake cycles to see period trends.
+              </p>
+            ) : (
+              <div className="h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={periodSeries}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis dataKey="label" stroke="#94a3b8" tick={{ fontSize: 11 }} />
+                    <YAxis stroke="#94a3b8" tick={{ fontSize: 12 }} allowDecimals={false} />
+                    <Tooltip
+                      contentStyle={{
+                        background: '#1e293b',
+                        border: '1px solid #334155',
+                        borderRadius: 12,
+                      }}
+                      labelStyle={{ color: '#e2e8f0' }}
+                    />
+                    <Legend />
+                    <Line type="monotone" dataKey="verified_wakes" stroke="#34d399" strokeWidth={2} name="Wakes" dot={false} />
+                    <Line type="monotone" dataKey="snoozes" stroke="#38bdf8" strokeWidth={2} name="Snoozes" dot={false} />
+                    <Line type="monotone" dataKey="on_time_wakes" stroke="#fbbf24" strokeWidth={2} name="On time" dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              Habit trends
+              <span className={`inline-flex items-center gap-1 text-xs ${habitTrend.color}`}>
+                <HabitTrendIcon className="w-3.5 h-3.5" />
+                {habitTrend.label}
+              </span>
+            </h3>
+            <span className="text-xs text-slate-400">
+              Avg proxy {habits?.avg_proxy_score ?? 0}
+            </span>
+          </div>
+          {habitSeries.length === 0 ? (
+            <p className="text-sm text-slate-500 py-6 text-center">
+              Habit trend series fills in as you dismiss alarms and complete challenges.
+            </p>
+          ) : (
+            <div className="h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={habitSeries}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 11 }} />
+                  <YAxis stroke="#94a3b8" tick={{ fontSize: 12 }} domain={[0, 100]} />
+                  <Tooltip
+                    contentStyle={{
+                      background: '#1e293b',
+                      border: '1px solid #334155',
+                      borderRadius: 12,
+                    }}
+                    labelStyle={{ color: '#e2e8f0' }}
+                  />
+                  <Line type="monotone" dataKey="score" stroke="#a78bfa" strokeWidth={2} name="Habit proxy" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
       </motion.div>
 
       {/* Lifestyle recommendation engine */}
@@ -605,6 +892,28 @@ function MiniStat({ icon: Icon, label, value }) {
         {label}
       </div>
       <p className="text-sm font-semibold text-white truncate">{value}</p>
+    </div>
+  );
+}
+
+function MetricBlock({ title, trend, TrendIcon, rows }) {
+  return (
+    <div className="rounded-xl border border-surface-700/50 bg-surface-900/30 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-sm font-medium text-white">{title}</p>
+        <span className={`inline-flex items-center gap-1 text-[11px] ${trend.color}`}>
+          <TrendIcon className="w-3.5 h-3.5" />
+          {trend.label}
+        </span>
+      </div>
+      <dl className="space-y-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between text-sm gap-3">
+            <dt className="text-slate-400">{label}</dt>
+            <dd className="text-slate-200 font-medium truncate">{value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

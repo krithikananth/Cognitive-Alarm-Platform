@@ -72,9 +72,6 @@ export const authAPI = {
   refresh: (refreshToken) => api.post('/auth/refresh', { refresh_token: refreshToken }),
   logout: () => api.post('/auth/logout'),
   me: () => api.get('/auth/me'),
-  forgotPassword: (email) => api.post('/auth/forgot-password', { email }),
-  resetPassword: (token, newPassword) =>
-    api.post('/auth/reset-password', { token, new_password: newPassword }),
   /** Full-page redirect into the Google OAuth2 authorization flow. */
   googleLoginUrl: () => `${API_BASE}/auth/oauth/google`,
 };
@@ -124,6 +121,25 @@ export const recommendationAPI = {
   getSleep: () => api.get('/recommendations/sleep'),
   getWake: () => api.get('/recommendations/wake'),
   getProductivity: () => api.get('/recommendations/productivity'),
+};
+
+// ─── Behavioral Analytics API (pandas/numpy aggregates) ───
+export const analyticsAPI = {
+  getBehavioral: (days = 30) =>
+    api.get('/analytics/behavioral', { params: { days } }),
+  getSnoozePattern: (days = 30) =>
+    api.get('/analytics/behavioral/snooze', { params: { days } }),
+  getWakeConsistency: (days = 30) =>
+    api.get('/analytics/behavioral/wake-consistency', { params: { days } }),
+  getSleepAdherence: (days = 30) =>
+    api.get('/analytics/behavioral/sleep-adherence', { params: { days } }),
+  getWeeklyTrends: (days = 30) =>
+    api.get('/analytics/behavioral/trends/weekly', { params: { days } }),
+  getMonthlyTrends: (days = 30) =>
+    api.get('/analytics/behavioral/trends/monthly', { params: { days } }),
+  getHabitTrends: (days = 30) =>
+    api.get('/analytics/behavioral/habits', { params: { days } }),
+  getSummary: () => api.get('/analytics/summary'),
 };
 
 // ─── Admin API ───

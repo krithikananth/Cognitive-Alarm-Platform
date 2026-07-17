@@ -30,7 +30,8 @@ export default function Login() {
     const result = await login(data);
     if (result.success) {
       toast.success('Welcome back!');
-      navigate('/dashboard');
+      const role = result.user?.role;
+      navigate(role === 'admin' ? '/admin' : '/dashboard');
     } else {
       toast.error(result.error);
     }

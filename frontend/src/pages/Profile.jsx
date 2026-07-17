@@ -23,6 +23,37 @@ const TABS = [
 const CHALLENGE_TYPES = ['math', 'logic', 'memory', 'word_game', 'pattern', 'riddle', 'quiz'];
 const DIFFICULTY_LEVELS = ['beginner', 'easy', 'medium', 'hard', 'expert'];
 
+/** Nested profile object from GET/PUT /users/profile (and preference updates). */
+function getNestedProfile(bundle) {
+  return bundle?.profile ?? null;
+}
+
+/**
+ * Normalize a difficulty preference from the API.
+ * Returns null when the bundle is still loading or the value is unrecognized,
+ * so the UI never pretends a default was saved.
+ */
+function normalizeDifficultyPreference(bundle) {
+  const nested = getNestedProfile(bundle);
+  const raw = nested?.difficulty_preference ?? bundle?.difficulty_preference;
+  if (raw == null || raw === '') return null;
+  const normalized = String(raw).toLowerCase();
+  return DIFFICULTY_LEVELS.includes(normalized) ? normalized : null;
+}
+
+function readPreferredChallengeTypes(bundle) {
+  const nested = getNestedProfile(bundle);
+  const types = nested?.preferred_challenge_types;
+  return Array.isArray(types) ? types : null;
+}
+
+function readProductivityGoals(bundle) {
+  const nested = getNestedProfile(bundle);
+  const goals = nested?.productivity_goals;
+  if (goals == null) return null;
+  return typeof goals === 'string' ? goals : String(goals);
+}
+
 export default function Profile() {
   const { user, fetchProfile } = useAuthStore();
   const [activeTab, setActiveTab] = useState('profile');
@@ -37,8 +68,10 @@ export default function Profile() {
     try {
       const res = await userAPI.getProfile();
       setProfile(res.data);
+      return res.data;
     } catch (err) {
       console.error(err);
+      return null;
     }
   };
 
@@ -102,7 +135,15 @@ export default function Profile() {
       <motion.div key={activeTab} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
         {activeTab === 'profile' && <ProfileTab user={user} onUpdate={refreshAll} />}
         {activeTab === 'sleep' && <SleepTab profile={profile} onUpdate={refreshAll} />}
-        {activeTab === 'preferences' && <PreferencesTab profile={profile} onUpdate={refreshAll} />}
+        {activeTab === 'preferences' && (
+          profile
+            ? <PreferencesTab profile={profile} onUpdate={refreshAll} />
+            : (
+              <div className="card">
+                <p className="text-sm text-slate-400">Loading preferences…</p>
+              </div>
+            )
+        )}
       </motion.div>
     </div>
   );
@@ -272,13 +313,45 @@ function SleepTab({ profile, onUpdate }) {
 }
 
 function PreferencesTab({ profile, onUpdate }) {
-  const [selectedTypes, setSelectedTypes] = useState(
-    profile?.profile?.preferred_challenge_types || ['math', 'logic']
-  );
-  const [difficulty, setDifficulty] = useState(
-    profile?.profile?.difficulty_preference || 'medium'
-  );
-  const [goals, setGoals] = useState(profile?.profile?.productivity_goals || '');
+  // Saved values from the server bundle (null while profile is still loading).
+  const serverDifficulty = normalizeDifficultyPreference(profile);
+  const serverTypes = readPreferredChallengeTypes(profile);
+  const serverTypesKey = serverTypes == null ? null : JSON.stringify(serverTypes);
+  const serverGoals = readProductivityGoals(profile);
+
+  // Local draft state — never seed difficulty with a fake "medium" before the
+  // profile has loaded; that caused stale/wrong selection after refresh.
+  const [selectedTypes, setSelectedTypes] = useState(() => {
+    return readPreferredChallengeTypes(profile) ?? ['math', 'logic'];
+  });
+  const [difficulty, setDifficulty] = useState(() => serverDifficulty);
+  const [goals, setGoals] = useState(() => serverGoals ?? '');
+  const [prefsReady, setPrefsReady] = useState(() => serverDifficulty != null);
+
+  // Hydrate / re-sync when the *saved* preference value changes (initial
+  // fetch completing, hard refresh, or post-save reload). Dependency is the
+  // normalized string so unrelated profile object identity changes do not
+  // clobber an in-progress unsaved selection.
+  useEffect(() => {
+    if (serverDifficulty == null) return;
+    setDifficulty(serverDifficulty);
+    setPrefsReady(true);
+  }, [serverDifficulty]);
+
+  useEffect(() => {
+    if (serverTypesKey == null) return;
+    try {
+      const parsed = JSON.parse(serverTypesKey);
+      if (Array.isArray(parsed)) setSelectedTypes(parsed);
+    } catch {
+      // ignore malformed snapshot
+    }
+  }, [serverTypesKey]);
+
+  useEffect(() => {
+    if (serverGoals == null) return;
+    setGoals(serverGoals);
+  }, [serverGoals]);
 
   const toggleType = (type) => {
     setSelectedTypes((prev) =>
@@ -287,14 +360,33 @@ function PreferencesTab({ profile, onUpdate }) {
   };
 
   const handleSave = async () => {
+    if (!prefsReady || !difficulty) {
+      toast.error('Preferences are still loading');
+      return;
+    }
     try {
-      await userAPI.updatePreferences({
+      const res = await userAPI.updatePreferences({
         preferred_challenge_types: selectedTypes,
         difficulty_preference: difficulty,
         productivity_goals: goals,
       });
+      // Trust the write response immediately so a slow refresh cannot flash
+      // an older selection.
+      const savedDifficulty = normalizeDifficultyPreference(res.data);
+      if (savedDifficulty != null) {
+        setDifficulty(savedDifficulty);
+        setPrefsReady(true);
+      }
+      const savedTypes = readPreferredChallengeTypes(res.data);
+      if (savedTypes != null) {
+        setSelectedTypes(savedTypes);
+      }
+      const savedGoals = readProductivityGoals(res.data);
+      if (savedGoals != null) {
+        setGoals(savedGoals);
+      }
       toast.success('Preferences saved!');
-      onUpdate();
+      await onUpdate?.();
     } catch (err) {
       toast.error('Save failed');
     }

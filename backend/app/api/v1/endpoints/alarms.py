@@ -18,8 +18,12 @@ from app.models.user import User
 from app.models.profile import UserProfile
 from app.models.alarm import Alarm, AlarmType, ChallengeType, AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
+from app.models.alarm_snooze_event import AlarmSnoozeEvent
 from app.models.challenge_session import ChallengeSession
 from app.services.challenge_service import ChallengeService, VERIFY_TIME_GRACE_SECONDS
+from app.services.attempt_log_service import AttemptLogService
+from app.services.analytics_ingestion_service import AnalyticsIngestionService
+from app.services.recommendation_cache import RecommendationCache
 from app.schemas.alarm import (
     AlarmCreate,
     AlarmUpdate,
@@ -93,6 +97,16 @@ def create_alarm(
     if alarm_data.label and (not title or title == "Alarm"):
         title = alarm_data.label
 
+    # Seed baseline from profile preference when the client omits difficulty.
+    # Explicit per-alarm values are preserved for storage / UI compatibility.
+    if alarm_data.challenge_difficulty is not None:
+        challenge_difficulty = alarm_data.challenge_difficulty
+    else:
+        challenge_difficulty = ChallengeService.resolve_baseline_difficulty(
+            getattr(current_user, "profile", None),
+            None,
+        )
+
     alarm = Alarm(
         user_id=current_user.id,
         title=title,
@@ -104,7 +118,7 @@ def create_alarm(
         snooze_interval_minutes=alarm_data.snooze_interval_minutes,
         challenge_type=challenge_type,
         challenge_count=alarm_data.challenge_count,
-        challenge_difficulty=alarm_data.challenge_difficulty,
+        challenge_difficulty=challenge_difficulty,
         volume=alarm_data.volume,
         vibrate=alarm_data.vibrate,
         label=alarm_data.label,
@@ -119,6 +133,7 @@ def create_alarm(
     db.add(alarm)
     db.commit()
     db.refresh(alarm)
+    RecommendationCache.invalidate_user(current_user.id)
     return alarm
 
 
@@ -220,6 +235,41 @@ def list_wake_confirmations(
                 "wakefulness_score": e.wakefulness_score,
                 "wakefulness_level": e.wakefulness_level,
                 "verified": e.verified,
+            }
+            for e in events
+        ],
+    }
+
+
+@router.get(
+    "/snooze-history",
+    summary="List snooze audit events for the current user",
+)
+def list_snooze_history(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return recent per-snooze audit rows (Week-2 logging completeness)."""
+    events = (
+        db.query(AlarmSnoozeEvent)
+        .filter(AlarmSnoozeEvent.user_id == current_user.id)
+        .order_by(AlarmSnoozeEvent.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "total": len(events),
+        "events": [
+            {
+                "id": e.id,
+                "alarm_id": e.alarm_id,
+                "snooze_number": e.snooze_number,
+                "snooze_limit_at_event": e.snooze_limit_at_event,
+                "next_trigger_at": _utc_isoformat(e.next_trigger_at)
+                if e.next_trigger_at
+                else None,
+                "created_at": _utc_isoformat(e.created_at),
             }
             for e in events
         ],
@@ -380,6 +430,7 @@ def update_alarm(
 
     db.commit()
     db.refresh(alarm)
+    RecommendationCache.invalidate_user(current_user.id)
     return alarm
 
 
@@ -419,6 +470,7 @@ def delete_alarm(
 
     db.delete(alarm)
     db.commit()
+    RecommendationCache.invalidate_user(current_user.id)
     return None
 
 
@@ -452,6 +504,7 @@ def toggle_alarm(
 
     db.commit()
     db.refresh(alarm)
+    RecommendationCache.invalidate_user(current_user.id)
     return alarm
 
 
@@ -493,6 +546,17 @@ def snooze_alarm(
     # Anti-snooze: wipe verification progress; next challenge will escalate
     ChallengeService.clear_challenge_session(current_user.id, alarm.id, db)
 
+    # Persist a dedicated snooze audit row (does not change FE contract)
+    AttemptLogService.record_snooze(
+        db,
+        alarm_id=alarm.id,
+        user_id=current_user.id,
+        snooze_number=alarm.total_snoozes,
+        snooze_limit_at_event=alarm.snooze_limit,
+        next_trigger_at=alarm.next_trigger_at,
+        commit=False,
+    )
+
     db.commit()
     db.refresh(alarm)
     return alarm
@@ -511,10 +575,10 @@ def get_alarm_challenge(
 
     Personalization pipeline:
       1. Preferred challenge types (for RANDOM alarms)
-      2. Performance-based adaptive difficulty from recent logs
-      3. Profile difficulty preference as the baseline
-      4. Time-of-day softening (easier when groggiest)
-      5. Anti-snooze difficulty escalation
+      2. Profile difficulty preference as the initial baseline
+      3. Anti-snooze difficulty escalation
+      4. Performance-based adaptive difficulty (±1 around the baseline)
+      5. Time-of-day softening (easier when groggiest)
     """
     alarm = (
         db.query(Alarm)
@@ -527,8 +591,11 @@ def get_alarm_challenge(
             detail="Alarm not found",
         )
 
-    # ── Difficulty baseline from alarm (profile used only as soft default elsewhere) ──
-    difficulty = getattr(alarm, "challenge_difficulty", None) or "medium"
+    # ── Initial difficulty from profile preference (alarm as legacy fallback) ──
+    difficulty = ChallengeService.resolve_baseline_difficulty(
+        getattr(current_user, "profile", None),
+        getattr(alarm, "challenge_difficulty", None),
+    )
     user_tz_name = "UTC"
     preferred_types = None
     if current_user.profile:
@@ -665,10 +732,8 @@ def verify_alarm_challenge(
     time_taken = max(int(round(elapsed)), client_time)
     timed_out = time_taken > (max_time + VERIFY_TIME_GRACE_SECONDS)
 
-    # Normalize logged type (WORD → word_game)
-    log_type = str(resolved_type).lower()
-    if log_type == "word":
-        log_type = "word_game"
+    log_type = AttemptLogService.normalize_challenge_type(resolved_type)
+    difficulty = AttemptLogService.normalize_difficulty(difficulty)
 
     is_correct = ChallengeService.verify_answer(expected, data.user_answer)
     actually_correct = is_correct and not timed_out
@@ -679,7 +744,10 @@ def verify_alarm_challenge(
         is_correct=actually_correct,
     )
 
-    log = AlarmChallengeLog(
+    # Every attempt (correct or incorrect) is persisted through one write path
+    # so adaptive difficulty / analytics always see clean, queryable rows.
+    AttemptLogService.record_attempt(
+        db,
         alarm_id=alarm.id,
         user_id=current_user.id,
         challenge_type=log_type,
@@ -689,9 +757,8 @@ def verify_alarm_challenge(
         time_taken_seconds=time_taken,
         failed_attempts=data.failed_attempts,
         points_earned=score["total_points"],
+        commit=True,
     )
-    db.add(log)
-    db.commit()
 
     required_steps = max(1, int(session.get("required_correct") or alarm.challenge_count or 1))
 
@@ -935,6 +1002,20 @@ def _dismiss_alarm_internal(
         verified=True,
     )
     db.add(wake_event)
+    db.flush()
+    # Additive analytics fan-out — wake event table remains SSOT.
+    AnalyticsIngestionService.emit_alarm_dismissed(
+        db,
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        wake_event_id=wake_event.id,
+        dismiss_method=dismiss_method,
+        snooze_count=alarm.total_snoozes,
+        wakefulness_score=wakefulness.get("score"),
+        wakefulness_level=wakefulness.get("level"),
+        time_to_dismiss_seconds=time_to_dismiss,
+        commit=False,
+    )
 
     if current_user.profile:
         current_user.profile.total_alarms_dismissed += 1
@@ -959,6 +1040,7 @@ def _dismiss_alarm_internal(
 
     db.commit()
     db.refresh(alarm)
+    RecommendationCache.invalidate_user(current_user.id)
     return alarm
 
 
@@ -1025,6 +1107,32 @@ def get_challenge_history(
             for log in logs
         ],
     }
+
+
+@router.get(
+    "/challenge/log-health",
+    summary="Audit attempt-log cleanliness and queryability",
+)
+def get_challenge_log_health(
+    repair: bool = Query(
+        False,
+        description="If true, normalize dirty rows for the current user first",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Verify Week-2 attempt logs are clean and usable by ML / analytics.
+
+    Checks required fields, allowed types/difficulties, non-negative metrics,
+    orphan alarm references, and the user_id + created_at query path used by
+    adaptive difficulty and stats endpoints.
+    """
+    if repair:
+        AttemptLogService.repair_logs(db, user_id=current_user.id, commit=True)
+
+    report = AttemptLogService.audit_logs(db, user_id=current_user.id)
+    report["repaired"] = bool(repair)
+    return report
 
 
 @router.get(
@@ -1227,7 +1335,10 @@ def get_snooze_info(
 
     escalation = int(alarm.total_snoozes or 0)
     can_snooze = alarm.total_snoozes < alarm.snooze_limit
-    base_diff = getattr(alarm, "challenge_difficulty", None) or "medium"
+    base_diff = ChallengeService.resolve_baseline_difficulty(
+        getattr(current_user, "profile", None),
+        getattr(alarm, "challenge_difficulty", None),
+    )
 
     return SnoozeInfoResponse(
         alarm_id=alarm.id,

@@ -12,10 +12,10 @@ from app.models.alarm import Alarm, AlarmChallengeLog
 from app.models.profile import UserProfile, DifficultyPreference
 from app.schemas.user import UserResponse, UserUpdate, AdminUserUpdate
 from app.api.deps import get_current_user, get_current_admin
-from app.api.v1.endpoints.profiles import (
-    _get_or_create_profile,
-    _calculate_habit_score,
-)
+from app.api.v1.endpoints.profiles import _get_or_create_profile
+from app.services.habit_score import calculate_habit_score
+from app.services.profile_service import ProfileService
+from app.services.recommendation_cache import RecommendationCache
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -161,7 +161,7 @@ def get_my_stats(
 ):
     """Dashboard stats for the current user."""
     profile = _get_or_create_profile(current_user.id, db)
-    score = _calculate_habit_score(profile)
+    score = calculate_habit_score(profile)
     active_alarms = (
         db.query(Alarm)
         .filter(Alarm.user_id == current_user.id, Alarm.is_active == True)  # noqa: E712
@@ -206,6 +206,7 @@ def update_my_sleep_schedule(
         profile.sleep_duration_hours = data.sleep_duration_hours
     db.commit()
     db.refresh(profile)
+    RecommendationCache.invalidate_user(current_user.id)
     return _profile_bundle(current_user, profile)
 
 
@@ -226,7 +227,37 @@ def update_my_goals(
         profile.productivity_goals = goals
     db.commit()
     db.refresh(profile)
+    RecommendationCache.invalidate_user(current_user.id)
     return _profile_bundle(current_user, profile)
+
+
+@router.get("/profile/preferences")
+def get_my_preferences(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return difficulty / challenge preferences for the current user."""
+    profile = _get_or_create_profile(current_user.id, db)
+    habits = profile.habit_preferences or {}
+    goals = profile.productivity_goals
+    if isinstance(goals, list):
+        goals_out = goals
+    elif goals:
+        goals_out = [goals]
+    else:
+        goals_out = []
+    return {
+        "preferred_challenge_types": habits.get(
+            "preferred_challenge_types", ["math", "logic"]
+        ),
+        "difficulty_preference": (
+            profile.difficulty_preference.value
+            if profile.difficulty_preference
+            else "medium"
+        ),
+        "productivity_goals": goals_out,
+        "habit_preferences": habits,
+    }
 
 
 @router.put("/profile/preferences")
@@ -251,6 +282,13 @@ def update_my_preferences(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid difficulty: {data.difficulty_preference}",
             )
+        # Keep existing alarms aligned so future challenges use the preference
+        ProfileService.sync_alarm_difficulties(
+            db,
+            current_user.id,
+            profile.difficulty_preference,
+            commit=False,
+        )
     if data.productivity_goals is not None:
         goals = data.productivity_goals
         if isinstance(goals, str):
@@ -261,6 +299,7 @@ def update_my_preferences(
             profile.productivity_goals = goals
     db.commit()
     db.refresh(profile)
+    RecommendationCache.invalidate_user(current_user.id)
     return _profile_bundle(current_user, profile)
 
 

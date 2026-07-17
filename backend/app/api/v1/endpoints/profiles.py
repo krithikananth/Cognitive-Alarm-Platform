@@ -2,7 +2,7 @@
 User profile API endpoints.
 
 Provides profile retrieval, updates for sleep schedule, goals, habit
-preferences, and habit score calculation.
+preferences, and habit score (via ``app.services.habit_score``).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -19,6 +19,9 @@ from app.schemas.profile import (
     HabitPreferencesUpdate,
 )
 from app.api.deps import get_current_user
+from app.services.habit_score import calculate_habit_score
+from app.services.profile_service import ProfileService
+from app.services.recommendation_cache import RecommendationCache
 
 router = APIRouter(prefix="/profiles", tags=["User Profiles"])
 
@@ -47,65 +50,8 @@ def _get_or_create_profile(user_id: int, db: Session) -> UserProfile:
     return profile
 
 
-def _calculate_habit_score(profile: UserProfile) -> dict:
-    """Calculate the weighted habit score based on the project specification.
-
-    Habit Score =
-        Wake-Up Consistency (35%) +
-        Challenge Completion Success (25%) +
-        Snooze Reduction (20%) +
-        Sleep Schedule Adherence (20%)
-
-    Args:
-        profile: The user's profile instance.
-
-    Returns:
-        Dictionary with overall score and component breakdown.
-    """
-    # Wake-up consistency (0-100 scale)
-    wake_up_score = min(profile.wake_up_consistency_score, 100.0)
-
-    # Challenge completion success - based on dismissals vs total
-    total_events = profile.total_alarms_dismissed + profile.total_snoozes
-    if total_events > 0:
-        challenge_score = (profile.total_alarms_dismissed / total_events) * 100
-    else:
-        challenge_score = 50.0  # neutral default
-
-    # Snooze reduction - fewer snoozes = higher score
-    if total_events > 0:
-        snooze_ratio = profile.total_snoozes / total_events
-        snooze_score = max(0, (1 - snooze_ratio)) * 100
-    else:
-        snooze_score = 50.0
-
-    # Sleep schedule adherence - based on streak
-    max_streak_target = 30  # 30-day target for 100%
-    adherence_score = min((profile.streak_days / max_streak_target) * 100, 100.0)
-
-    # Weighted calculation
-    overall = (
-        wake_up_score * 0.35
-        + challenge_score * 0.25
-        + snooze_score * 0.20
-        + adherence_score * 0.20
-    )
-
-    return {
-        "habit_score": round(overall, 2),
-        "breakdown": {
-            "wake_up_consistency": round(wake_up_score, 2),
-            "challenge_completion": round(challenge_score, 2),
-            "snooze_reduction": round(snooze_score, 2),
-            "sleep_adherence": round(adherence_score, 2),
-        },
-        "weights": {
-            "wake_up_consistency": 0.35,
-            "challenge_completion": 0.25,
-            "snooze_reduction": 0.20,
-            "sleep_adherence": 0.20,
-        },
-    }
+# Backward-compatible alias for callers that imported the old private helper.
+_calculate_habit_score = calculate_habit_score
 
 
 @router.get(
@@ -119,7 +65,7 @@ def get_own_profile(
 ):
     """Get the current user's profile with computed habit score."""
     profile = _get_or_create_profile(current_user.id, db)
-    score_data = _calculate_habit_score(profile)
+    score_data = calculate_habit_score(profile)
     # Attach computed score for response serialization
     profile.habit_score = score_data["habit_score"]
     return profile
@@ -142,9 +88,20 @@ def update_profile(
     for field, value in update_data.items():
         setattr(profile, field, value)
 
+    if "difficulty_preference" in update_data and update_data[
+        "difficulty_preference"
+    ] is not None:
+        ProfileService.sync_alarm_difficulties(
+            db,
+            current_user.id,
+            update_data["difficulty_preference"],
+            commit=False,
+        )
+
     db.commit()
     db.refresh(profile)
-    score_data = _calculate_habit_score(profile)
+    RecommendationCache.invalidate_user(current_user.id)
+    score_data = calculate_habit_score(profile)
     profile.habit_score = score_data["habit_score"]
     return profile
 
@@ -168,7 +125,8 @@ def update_sleep_schedule(
 
     db.commit()
     db.refresh(profile)
-    score_data = _calculate_habit_score(profile)
+    RecommendationCache.invalidate_user(current_user.id)
+    score_data = calculate_habit_score(profile)
     profile.habit_score = score_data["habit_score"]
     return profile
 
@@ -188,7 +146,8 @@ def update_goals(
     profile.productivity_goals = goals_data.productivity_goals
     db.commit()
     db.refresh(profile)
-    score_data = _calculate_habit_score(profile)
+    RecommendationCache.invalidate_user(current_user.id)
+    score_data = calculate_habit_score(profile)
     profile.habit_score = score_data["habit_score"]
     return profile
 
@@ -208,7 +167,8 @@ def update_habit_preferences(
     profile.habit_preferences = habits_data.habit_preferences
     db.commit()
     db.refresh(profile)
-    score_data = _calculate_habit_score(profile)
+    RecommendationCache.invalidate_user(current_user.id)
+    score_data = calculate_habit_score(profile)
     profile.habit_score = score_data["habit_score"]
     return profile
 
@@ -230,4 +190,4 @@ def get_habit_score(
     - Sleep Schedule Adherence (20%)
     """
     profile = _get_or_create_profile(current_user.id, db)
-    return _calculate_habit_score(profile)
+    return calculate_habit_score(profile)

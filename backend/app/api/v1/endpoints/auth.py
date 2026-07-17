@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -89,6 +90,31 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     return user
 
 
+def _authenticate_active_user(
+    db: Session, identifier: str, password: str
+) -> User:
+    """Resolve email or username + password to an active user."""
+    user = AuthService.authenticate_user(db, identifier, password)
+    if user is None:
+        candidate = db.query(User).filter(User.username == identifier).first()
+        if candidate and verify_password(password, candidate.hashed_password):
+            user = candidate
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated",
+        )
+    return user
+
+
 @router.post(
     "/login",
     summary="Authenticate user",
@@ -98,26 +124,32 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
 
     Returns a pair of JWT tokens (access + refresh) on success.
     """
-    user = db.query(User).filter(User.email == credentials.email).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
-
-    if not verify_password(credentials.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is deactivated",
-        )
-
+    user = _authenticate_active_user(db, credentials.email, credentials.password)
     return AuthService.token_response(user)
+
+
+@router.post(
+    "/token",
+    response_model=Token,
+    summary="OAuth2 password token (Swagger Authorize)",
+)
+def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    """OAuth2 password-flow token endpoint for Swagger UI Authorize.
+
+    Accepts ``application/x-www-form-urlencoded`` fields ``username`` and
+    ``password`` (standard OAuth2). ``username`` may be the account email
+    or username. Returns ``access_token`` / ``refresh_token`` / ``token_type``.
+    """
+    user = _authenticate_active_user(db, form_data.username, form_data.password)
+    tokens = AuthService.create_tokens(user)
+    return Token(
+        access_token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
+        token_type=tokens["token_type"],
+    )
 
 
 class RefreshRequest(BaseModel):

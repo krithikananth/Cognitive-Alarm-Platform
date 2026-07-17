@@ -54,13 +54,70 @@ class TestCreateAlarm:
         data = response.json()
         assert data["challenge_difficulty"] == "hard"
 
-        # Challenge generation should start from the alarm difficulty baseline
+        # Without a profile preference, challenge baseline falls back to alarm
         ch = client.get(
             f"/api/v1/alarms/{data['id']}/challenge", headers=auth_headers
         )
         assert ch.status_code == 200
-        # Effective difficulty may be softened by time-of-day, but must be valid
-        assert ch.json()["difficulty"] in {
+        body = ch.json()
+        assert body["difficulty"] in {
+            "beginner", "easy", "medium", "hard", "expert"
+        }
+        assert body["adaptive_difficulty"]["difficulty"] == "hard"
+
+    def test_create_alarm_seeds_difficulty_from_profile(
+        self, client, test_user, auth_headers
+    ):
+        """Omitting challenge_difficulty seeds from profile preference."""
+        pref = client.put(
+            "/api/v1/profiles/me",
+            json={"difficulty_preference": "beginner"},
+            headers=auth_headers,
+        )
+        assert pref.status_code == 200
+
+        response = client.post(
+            "/api/v1/alarms/",
+            json={"title": "Seeded", "alarm_time": "08:00", "challenge_type": "math"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        assert response.json()["challenge_difficulty"] == "beginner"
+
+    def test_challenge_uses_profile_preference_baseline(
+        self, client, test_user, auth_headers
+    ):
+        """Future challenges use profile preference as the adaptive baseline."""
+        # Existing-style alarm stored at medium
+        created = client.post(
+            "/api/v1/alarms/",
+            json={
+                "title": "Existing",
+                "alarm_time": "09:00",
+                "challenge_type": "math",
+                "challenge_difficulty": "medium",
+            },
+            headers=auth_headers,
+        )
+        assert created.status_code == 201
+        alarm_id = created.json()["id"]
+
+        pref = client.put(
+            "/api/v1/users/profile/preferences",
+            json={"difficulty_preference": "expert"},
+            headers=auth_headers,
+        )
+        assert pref.status_code == 200
+
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        )
+        assert ch.status_code == 200
+        body = ch.json()
+        # Adaptive center (pre time-of-day) should be the preferred level
+        assert body["adaptive_difficulty"]["difficulty"] == "expert"
+        assert body["adaptive_difficulty"]["adjustment"] == 0
+        assert body["difficulty"] in {
             "beginner", "easy", "medium", "hard", "expert"
         }
 

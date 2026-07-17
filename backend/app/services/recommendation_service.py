@@ -29,6 +29,7 @@ from app.schemas.recommendation import (
 )
 from app.services.challenge_service import ChallengeService
 from app.services.profile_service import ProfileService
+from app.services.recommendation_cache import RecommendationCache
 
 WAKE_LOOKBACK = 21
 CHALLENGE_LOOKBACK = 40
@@ -150,7 +151,34 @@ class RecommendationService:
         categories: Optional[List[RecommendationCategory]] = None,
         limit: Optional[int] = None,
     ) -> RecommendationResponse:
-        """Generate a full recommendation feed for the user."""
+        """Generate a full recommendation feed for the user.
+
+        Results are served from Redis when available. Cache misses and Redis
+        outages fall through to the same computation path (logic unchanged).
+        """
+        cached = RecommendationCache.get(
+            user.id, categories=categories, limit=limit
+        )
+        if cached is not None:
+            return cached
+
+        result = RecommendationService._compute_recommendations(
+            user, db, categories=categories, limit=limit
+        )
+        RecommendationCache.set(
+            user.id, result, categories=categories, limit=limit
+        )
+        return result
+
+    @staticmethod
+    def _compute_recommendations(
+        user: User,
+        db: Session,
+        *,
+        categories: Optional[List[RecommendationCategory]] = None,
+        limit: Optional[int] = None,
+    ) -> RecommendationResponse:
+        """Compute recommendations from DB signals (no cache I/O)."""
         profile = RecommendationService._ensure_profile(user, db)
         alarms = (
             db.query(Alarm)
@@ -224,7 +252,13 @@ class RecommendationService:
         at least one personalized productivity recommendation so Dashboard
         "Today's Coaching" surfaces goal-based advice (not only Analytics).
         """
-        full = RecommendationService.generate_recommendations(user, db)
+        cached = RecommendationCache.get(user.id, digest=True)
+        if cached is not None:
+            return cached
+
+        # Compute from uncached full feed so digest shape is independent of
+        # any previously filtered cache entries.
+        full = RecommendationService._compute_recommendations(user, db)
         top = RecommendationService._ensure_productivity_in_digest(
             full.recommendations,
             goals_count=full.summary.goals_count,
@@ -236,7 +270,7 @@ class RecommendationService:
         for item in top:
             by_category[item.category.value].append(item)
 
-        return RecommendationResponse(
+        result = RecommendationResponse(
             generated_at=full.generated_at,
             summary=full.summary,
             insights=full.insights[:4],
@@ -244,6 +278,10 @@ class RecommendationService:
             by_category=by_category,
             daily_plan=full.daily_plan,
         )
+        RecommendationCache.set(user.id, result, digest=True)
+        # Also warm the full-feed cache for Analytics / category endpoints.
+        RecommendationCache.set(user.id, full)
+        return result
 
     @staticmethod
     def _ensure_productivity_in_digest(
@@ -329,7 +367,7 @@ class RecommendationService:
         challenge_logs: List[AlarmChallengeLog],
     ) -> Dict[str, Any]:
         score_data = ProfileService.calculate_habit_score(profile)
-        habit_score = RecommendationService._habit_score_from_profile(profile)
+        habit_score = score_data["habit_score"]
 
         active_alarms = [a for a in alarms if a.is_active]
         preferred = profile.preferred_wake_time
@@ -413,31 +451,6 @@ class RecommendationService:
             "challenge_accuracy": challenge_accuracy,
             "challenge_logs": challenge_logs,
         }
-
-    @staticmethod
-    def _habit_score_from_profile(profile: UserProfile) -> float:
-        """Match the live `/profiles/me/habit-score` weighting."""
-        wake_up_score = min(profile.wake_up_consistency_score or 0.0, 100.0)
-        total_events = (profile.total_alarms_dismissed or 0) + (
-            profile.total_snoozes or 0
-        )
-        if total_events > 0:
-            challenge_score = (
-                profile.total_alarms_dismissed / total_events
-            ) * 100
-            snooze_ratio = profile.total_snoozes / total_events
-            snooze_score = max(0.0, (1 - snooze_ratio) * 100)
-        else:
-            challenge_score = 50.0
-            snooze_score = 50.0
-        adherence_score = min((profile.streak_days or 0) / 30.0 * 100, 100.0)
-        overall = (
-            wake_up_score * 0.35
-            + challenge_score * 0.25
-            + snooze_score * 0.20
-            + adherence_score * 0.20
-        )
-        return round(overall, 2)
 
     @staticmethod
     def _sleep_recommendations(signals: Dict[str, Any]) -> List[RecommendationItem]:

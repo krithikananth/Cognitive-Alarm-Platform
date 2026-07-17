@@ -38,6 +38,12 @@ function GuestRoute({ children }) {
   return children;
 }
 
+// Authenticated home: admins land on Admin Panel, users on Dashboard
+function HomeRedirect() {
+  const user = useAuthStore((s) => s.user);
+  return <Navigate to={user?.role === 'admin' ? '/admin' : '/dashboard'} replace />;
+}
+
 // Component to watch time and trigger alarms
 function AlarmWatcher() {
   const { alarms, fetchAlarms } = useAlarmStore();
@@ -125,7 +131,7 @@ function App() {
 
         {/* Protected Routes (inside Layout) */}
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-          <Route index element={<Navigate to="/dashboard" replace />} />
+          <Route index element={<HomeRedirect />} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="alarms" element={<AlarmManager />} />
           <Route path="analytics" element={<Analytics />} />

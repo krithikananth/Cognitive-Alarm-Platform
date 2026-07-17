@@ -16,22 +16,28 @@ from sqlalchemy import engine_from_config, pool
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Import the declarative Base and all models so that Base.metadata is populated
-from app.core.database import Base  # noqa: E402
+from app.core.config import settings  # noqa: E402
+from app.db.base import Base  # noqa: E402
 
-# Import all model modules here so Alembic can detect them for autogenerate
-# from app.models.user import User  # noqa: E402, F401
-# from app.models.profile import Profile  # noqa: E402, F401
+# Import all model modules so Base.metadata is fully populated
+from app.models import user  # noqa: E402, F401
+from app.models import profile  # noqa: E402, F401
+from app.models import alarm  # noqa: E402, F401
+from app.models import challenge_session  # noqa: E402, F401
+from app.models import alarm_wake_event  # noqa: E402, F401
+from app.models import alarm_snooze_event  # noqa: E402, F401
+from app.models import analytics_event  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # Alembic Config object — provides access to values in alembic.ini
 # ---------------------------------------------------------------------------
 config = context.config
 
-# Override sqlalchemy.url with DATABASE_URL environment variable if set
-database_url = os.getenv("DATABASE_URL")
+# Prefer app settings / DATABASE_URL env over alembic.ini default
+database_url = os.getenv("DATABASE_URL") or settings.DATABASE_URL
 if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+    # configparser interpolates `%` — escape for URLs that contain them
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 # Set up Python logging from the config file
 if config.config_file_name is not None:
@@ -41,27 +47,15 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-# ---------------------------------------------------------------------------
-# Migration runners
-# ---------------------------------------------------------------------------
-
-
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL and not an Engine,
-    though an Engine is acceptable here as well. By skipping the Engine
-    creation we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-    """
+    """Run migrations in 'offline' mode."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        render_as_batch=True,
     )
 
     with context.begin_transaction():
@@ -69,11 +63,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine and associate a
-    connection with the context.
-    """
+    """Run migrations in 'online' mode."""
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -84,6 +74,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            render_as_batch=True,
         )
 
         with context.begin_transaction():

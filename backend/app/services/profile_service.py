@@ -1,8 +1,8 @@
 """
 Profile service layer.
 
-Handles CRUD and partial updates for ``UserProfile``, as well as
-computing the weighted habit score.
+Handles CRUD and partial updates for ``UserProfile``. Habit score
+computation is delegated to ``app.services.habit_score``.
 """
 
 from typing import Any, Dict, Optional
@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.models.alarm import Alarm
 from app.models.profile import DifficultyPreference, UserProfile
 from app.schemas.profile import (
     GoalsUpdate,
@@ -18,10 +19,49 @@ from app.schemas.profile import (
     ProfileUpdate,
     SleepScheduleUpdate,
 )
+from app.services.challenge_service import ChallengeService
+from app.services.habit_score import calculate_habit_score as _calculate_habit_score
 
 
 class ProfileService:
     """Service class for user-profile operations."""
+
+    @staticmethod
+    def sync_alarm_difficulties(
+        db: Session,
+        user_id: int,
+        difficulty: str,
+        *,
+        commit: bool = False,
+    ) -> int:
+        """
+        Align existing alarms with the user's difficulty preference.
+
+        Keeps per-alarm ``challenge_difficulty`` compatible with the challenge
+        engine baseline after a profile preference change. Returns the number
+        of alarms updated.
+        """
+        raw = (
+            difficulty.value
+            if hasattr(difficulty, "value")
+            else difficulty
+        )
+        # Reuse engine normalization (invalid → medium)
+        level = ChallengeService.resolve_baseline_difficulty(
+            None, str(raw) if raw is not None else None
+        )
+
+        updated = (
+            db.query(Alarm)
+            .filter(Alarm.user_id == user_id)
+            .update(
+                {Alarm.challenge_difficulty: level},
+                synchronize_session=False,
+            )
+        )
+        if commit:
+            db.commit()
+        return int(updated or 0)
 
     @staticmethod
     def get_profile(db: Session, user_id: int) -> UserProfile:
@@ -114,6 +154,16 @@ class ProfileService:
         for field, value in update_data.items():
             setattr(profile, field, value)
 
+        if "difficulty_preference" in update_data and update_data[
+            "difficulty_preference"
+        ] is not None:
+            ProfileService.sync_alarm_difficulties(
+                db,
+                user_id,
+                update_data["difficulty_preference"],
+                commit=False,
+            )
+
         db.commit()
         db.refresh(profile)
         return profile
@@ -197,67 +247,10 @@ class ProfileService:
     @staticmethod
     def calculate_habit_score(profile: UserProfile) -> Dict[str, Any]:
         """
-        Compute a weighted habit score (0–100) from profile statistics.
+        Compute the weighted habit score (0–100).
 
-        Weights:
-            - Wake-up consistency   : 35%
-            - Streak performance    : 25%
-            - Dismissal efficiency  : 25%
-            - Snooze discipline     : 15%
-
-        Dismissal efficiency is defined as the ratio of dismissals to
-        total interactions (dismissals + snoozes).  Snooze discipline is
-        ``1 - snooze_ratio``.
-
-        Args:
-            profile: The ``UserProfile`` to evaluate.
-
-        Returns:
-            Dictionary with ``habit_score`` (float 0–100) and a ``breakdown``
-            dict containing the individual component scores.
+        Delegates to ``app.services.habit_score`` — the single source of truth.
+        Weights: wake-up consistency 35%, challenge completion 25%,
+        snooze reduction 20%, sleep schedule adherence 20%.
         """
-        # ── Component 1: Consistency (0–100, stored directly) ────────
-        consistency_score: float = min(
-            profile.wake_up_consistency_score, 100.0
-        )
-
-        # ── Component 2: Streak performance (0–100) ─────────────────
-        # Cap at 30-day streak = 100
-        streak_score: float = min((profile.streak_days / 30.0) * 100.0, 100.0)
-
-        # ── Component 3: Dismissal efficiency (0–100) ───────────────
-        total_interactions = (
-            profile.total_alarms_dismissed + profile.total_snoozes
-        )
-        if total_interactions > 0:
-            dismissal_ratio = (
-                profile.total_alarms_dismissed / total_interactions
-            )
-        else:
-            dismissal_ratio = 1.0  # no interactions yet → perfect
-        dismissal_score: float = dismissal_ratio * 100.0
-
-        # ── Component 4: Snooze discipline (0–100) ──────────────────
-        snooze_discipline: float = (1.0 - (1.0 - dismissal_ratio)) * 100.0
-
-        # ── Weighted total ──────────────────────────────────────────
-        habit_score: float = (
-            consistency_score * 0.35
-            + streak_score * 0.25
-            + dismissal_score * 0.25
-            + snooze_discipline * 0.15
-        )
-        habit_score = round(min(habit_score, 100.0), 2)
-
-        breakdown = {
-            "consistency_score": round(consistency_score, 2),
-            "consistency_weight": 0.35,
-            "streak_score": round(streak_score, 2),
-            "streak_weight": 0.25,
-            "dismissal_score": round(dismissal_score, 2),
-            "dismissal_weight": 0.25,
-            "snooze_discipline_score": round(snooze_discipline, 2),
-            "snooze_discipline_weight": 0.15,
-        }
-
-        return {"habit_score": habit_score, "breakdown": breakdown}
+        return _calculate_habit_score(profile)
