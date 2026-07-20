@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────
     DATABASE_URL: str = "sqlite:///./icap.db"
 
+    # ── Adaptive difficulty ───────────────────────────────────────────
+    # Consecutive successes/failures required before difficulty ±1.
+    ADAPTIVE_STREAK_THRESHOLD: int = 5
+
     # ── Redis / recommendation cache ──────────────────────────────────
     # When REDIS_ENABLED is false or Redis is unreachable, recommendations
     # recompute on every request (graceful fallback).

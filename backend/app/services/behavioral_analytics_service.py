@@ -28,7 +28,10 @@ from app.models.alarm import AlarmChallengeLog
 from app.models.alarm_snooze_event import AlarmSnoozeEvent
 from app.models.alarm_wake_event import AlarmWakeEvent
 from app.models.profile import UserProfile
-from app.services.habit_score import calculate_habit_score
+from app.services.habit_score import (
+    calculate_habit_score,
+    calculate_habit_score_for_user,
+)
 
 # Default lookback windows
 DEFAULT_DAYS = 30
@@ -74,7 +77,13 @@ class BehavioralAnalyticsService:
         weekly = cls.analyze_weekly_trends(snooze_df, wake_df, challenge_df, preferred)
         monthly = cls.analyze_monthly_trends(snooze_df, wake_df, challenge_df, preferred)
         habit = cls.analyze_habit_trends(
-            snooze_df, wake_df, challenge_df, preferred, profile
+            snooze_df,
+            wake_df,
+            challenge_df,
+            preferred,
+            profile,
+            db=db,
+            user_id=user_id,
         )
 
         return {
@@ -432,18 +441,28 @@ class BehavioralAnalyticsService:
         challenge_df: pd.DataFrame,
         preferred_minutes: Optional[float],
         profile: Optional[UserProfile],
+        db: Optional[Session] = None,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Daily habit-score proxies + current SSOT habit score."""
-        current = calculate_habit_score(
-            profile
-            if profile is not None
-            else {
-                "wake_up_consistency_score": 0.0,
-                "total_alarms_dismissed": 0,
-                "total_snoozes": 0,
-                "streak_days": 0,
-            }
-        )
+        """Daily habit-score proxies + current SSOT habit score.
+
+        ``current_habit_score`` is recalculated from lifetime verified wake
+        events when ``db``/``user_id`` are provided; otherwise profile
+        counters (or empty defaults) are used.
+        """
+        if db is not None and user_id is not None:
+            current = calculate_habit_score_for_user(db, user_id, profile)
+        else:
+            current = calculate_habit_score(
+                profile
+                if profile is not None
+                else {
+                    "wake_up_consistency_score": 0.0,
+                    "total_alarms_dismissed": 0,
+                    "total_snoozes": 0,
+                    "streak_days": 0,
+                }
+            )
 
         end = pd.Timestamp.now(tz="UTC").normalize()
         start = end - pd.Timedelta(days=MONTHLY_DAYS - 1)
@@ -817,22 +836,21 @@ class BehavioralAnalyticsService:
         if not snoozes and len(day_wakes):
             snoozes = int(day_wakes["snooze_count_at_dismiss"].astype(int).sum())
 
-        # If challenges exist, blend challenge correctness into dismissed proxy
+        # Puzzle accuracy for challenge_completion (SSOT prefers logs)
+        puzzle_correct = 0
+        puzzle_attempts = 0
         if len(day_challenges):
-            correct = int(day_challenges["is_correct"].sum())
-            # Represent completion as correct attempts vs incorrect+snoozes
-            dismissed_proxy = max(dismissed, correct)
-            snooze_proxy = snoozes + (int(len(day_challenges)) - correct)
-        else:
-            dismissed_proxy = dismissed
-            snooze_proxy = snoozes
+            puzzle_correct = int(day_challenges["is_correct"].sum())
+            puzzle_attempts = int(len(day_challenges))
 
         result = calculate_habit_score(
             {
                 "wake_up_consistency_score": wake_score,
-                "total_alarms_dismissed": dismissed_proxy,
-                "total_snoozes": snooze_proxy,
+                "total_alarms_dismissed": dismissed,
+                "total_snoozes": snoozes,
                 "streak_days": streak_proxy,
+                "total_puzzle_correct": puzzle_correct,
+                "total_puzzle_attempts": puzzle_attempts,
             }
         )
         return {

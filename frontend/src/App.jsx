@@ -18,8 +18,14 @@ import AdminDashboard from './pages/AdminDashboard';
 import Layout from './components/Layout';
 
 import ActiveAlarmModal from './components/ActiveAlarmModal';
+import { trackAlarmMissed } from './services/analyticsTracker';
 import useAlarmStore from './store/alarmStore';
 import useActiveAlarmStore from './store/activeAlarmStore';
+
+/** Trigger window (ms) — matches ring detection; past this = missed. */
+const ALARM_TRIGGER_WINDOW_MS = 120000;
+/** Do not mark very stale triggers as missed (avoids spam on old data). */
+const ALARM_MISS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 // Protected Route wrapper
 function ProtectedRoute({ children }) {
@@ -60,15 +66,18 @@ function AlarmWatcher() {
     }
   }, [isAuthenticated, fetchAlarms]);
   
-  // Check every 5 seconds if any alarm should ring
+  // Check every 5 seconds if any alarm should ring (or was missed)
   React.useEffect(() => {
-    if (!isAuthenticated || isRinging) return;
+    if (!isAuthenticated) return;
 
     const checkAlarms = () => {
       const now = new Date();
+      const ringingId = useActiveAlarmStore.getState().ringingAlarmId;
 
       for (const alarm of alarms) {
         if (!alarm.is_active || !alarm.next_trigger_at) continue;
+        // Don't treat the currently ringing alarm as missed
+        if (ringingId === alarm.id) continue;
 
         // Key by id + trigger time so snooze / next-day re-rings work
         const fireKey = `${alarm.id}:${alarm.next_trigger_at}`;
@@ -87,10 +96,30 @@ function AlarmWatcher() {
         const diffMs = now.getTime() - triggerTime.getTime();
 
         // Trigger if we're within 0 to 120 seconds past the trigger time
-        if (diffMs >= 0 && diffMs < 120000) {
+        if (
+          !isRinging &&
+          diffMs >= 0 &&
+          diffMs < ALARM_TRIGGER_WINDOW_MS
+        ) {
           firedRef.current.add(fireKey);
           triggerAlarm(alarm.id);
           break;
+        }
+
+        // Past the ring window and never fired → miss (client analytics only)
+        if (
+          diffMs >= ALARM_TRIGGER_WINDOW_MS &&
+          diffMs < ALARM_MISS_MAX_AGE_MS
+        ) {
+          firedRef.current.add(fireKey);
+          trackAlarmMissed(
+            alarm.id,
+            {
+              next_trigger_at: alarm.next_trigger_at,
+              delay_seconds: Math.round(diffMs / 1000),
+            },
+            fireKey
+          );
         }
       }
     };

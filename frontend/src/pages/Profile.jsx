@@ -41,10 +41,17 @@ function normalizeDifficultyPreference(bundle) {
   return DIFFICULTY_LEVELS.includes(normalized) ? normalized : null;
 }
 
-function readPreferredChallengeTypes(bundle) {
+/**
+ * Read a single preferred challenge type from the API bundle.
+ * Backend still stores a list; we take the first valid entry so the UI
+ * is single-select and refresh always restores one chip.
+ */
+function readPreferredChallengeType(bundle) {
   const nested = getNestedProfile(bundle);
   const types = nested?.preferred_challenge_types;
-  return Array.isArray(types) ? types : null;
+  if (!Array.isArray(types) || types.length === 0) return null;
+  const first = String(types[0]).toLowerCase().trim();
+  return CHALLENGE_TYPES.includes(first) ? first : null;
 }
 
 function readProductivityGoals(bundle) {
@@ -315,14 +322,14 @@ function SleepTab({ profile, onUpdate }) {
 function PreferencesTab({ profile, onUpdate }) {
   // Saved values from the server bundle (null while profile is still loading).
   const serverDifficulty = normalizeDifficultyPreference(profile);
-  const serverTypes = readPreferredChallengeTypes(profile);
-  const serverTypesKey = serverTypes == null ? null : JSON.stringify(serverTypes);
+  const serverType = readPreferredChallengeType(profile);
   const serverGoals = readProductivityGoals(profile);
 
   // Local draft state — never seed difficulty with a fake "medium" before the
   // profile has loaded; that caused stale/wrong selection after refresh.
-  const [selectedTypes, setSelectedTypes] = useState(() => {
-    return readPreferredChallengeTypes(profile) ?? ['math', 'logic'];
+  // Challenge type is single-select; backend still receives a one-item list.
+  const [selectedType, setSelectedType] = useState(() => {
+    return readPreferredChallengeType(profile) ?? 'math';
   });
   const [difficulty, setDifficulty] = useState(() => serverDifficulty);
   const [goals, setGoals] = useState(() => serverGoals ?? '');
@@ -339,25 +346,14 @@ function PreferencesTab({ profile, onUpdate }) {
   }, [serverDifficulty]);
 
   useEffect(() => {
-    if (serverTypesKey == null) return;
-    try {
-      const parsed = JSON.parse(serverTypesKey);
-      if (Array.isArray(parsed)) setSelectedTypes(parsed);
-    } catch {
-      // ignore malformed snapshot
-    }
-  }, [serverTypesKey]);
+    if (serverType == null) return;
+    setSelectedType(serverType);
+  }, [serverType]);
 
   useEffect(() => {
     if (serverGoals == null) return;
     setGoals(serverGoals);
   }, [serverGoals]);
-
-  const toggleType = (type) => {
-    setSelectedTypes((prev) =>
-      prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type]
-    );
-  };
 
   const handleSave = async () => {
     if (!prefsReady || !difficulty) {
@@ -366,7 +362,8 @@ function PreferencesTab({ profile, onUpdate }) {
     }
     try {
       const res = await userAPI.updatePreferences({
-        preferred_challenge_types: selectedTypes,
+        // Backend accepts a list; persist exactly one preferred type.
+        preferred_challenge_types: [selectedType],
         difficulty_preference: difficulty,
         productivity_goals: goals,
       });
@@ -377,9 +374,9 @@ function PreferencesTab({ profile, onUpdate }) {
         setDifficulty(savedDifficulty);
         setPrefsReady(true);
       }
-      const savedTypes = readPreferredChallengeTypes(res.data);
-      if (savedTypes != null) {
-        setSelectedTypes(savedTypes);
+      const savedType = readPreferredChallengeType(res.data);
+      if (savedType != null) {
+        setSelectedType(savedType);
       }
       const savedGoals = readProductivityGoals(res.data);
       if (savedGoals != null) {
@@ -400,21 +397,27 @@ function PreferencesTab({ profile, onUpdate }) {
           <HiOutlinePuzzlePiece className="w-5 h-5 text-accent-400" />
           Preferred Challenge Types
         </h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {CHALLENGE_TYPES.map((type) => (
-            <button
-              key={type}
-              onClick={() => toggleType(type)}
-              className={`p-3 rounded-xl border text-sm font-medium capitalize transition-all ${
-                selectedTypes.includes(type)
-                  ? 'border-accent-500 bg-accent-500/10 text-accent-300'
-                  : 'border-surface-700/50 text-slate-400 hover:border-surface-600'
-              }`}
-            >
-              {selectedTypes.includes(type) && <HiOutlineCheckCircle className="w-4 h-4 inline mr-1" />}
-              {type}
-            </button>
-          ))}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3" role="radiogroup" aria-label="Preferred challenge type">
+          {CHALLENGE_TYPES.map((type) => {
+            const isSelected = selectedType === type;
+            return (
+              <button
+                key={type}
+                type="button"
+                role="radio"
+                aria-checked={isSelected}
+                onClick={() => setSelectedType(type)}
+                className={`p-3 rounded-xl border text-sm font-medium capitalize transition-all ${
+                  isSelected
+                    ? 'border-accent-500 bg-accent-500/10 text-accent-300'
+                    : 'border-surface-700/50 text-slate-400 hover:border-surface-600'
+                }`}
+              >
+                {isSelected && <HiOutlineCheckCircle className="w-4 h-4 inline mr-1" />}
+                {type}
+              </button>
+            );
+          })}
         </div>
       </div>
 

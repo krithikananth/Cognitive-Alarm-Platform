@@ -13,7 +13,11 @@ from app.models.profile import UserProfile, DifficultyPreference
 from app.schemas.user import UserResponse, UserUpdate, AdminUserUpdate
 from app.api.deps import get_current_user, get_current_admin
 from app.api.v1.endpoints.profiles import _get_or_create_profile
-from app.services.habit_score import calculate_habit_score
+from app.services.habit_score import (
+    calculate_habit_score_for_user,
+    load_verified_wake_events,
+    resolve_habit_score_inputs,
+)
 from app.services.profile_service import ProfileService
 from app.services.recommendation_cache import RecommendationCache
 
@@ -161,15 +165,26 @@ def get_my_stats(
 ):
     """Dashboard stats for the current user."""
     profile = _get_or_create_profile(current_user.id, db)
-    score = calculate_habit_score(profile)
+    score = calculate_habit_score_for_user(db, current_user.id, profile)
     active_alarms = (
         db.query(Alarm)
         .filter(Alarm.user_id == current_user.id, Alarm.is_active == True)  # noqa: E712
         .count()
     )
-    total_events = profile.total_alarms_dismissed + profile.total_snoozes
+    # Derive dismiss/snooze totals from the same wake-event replay as habit score
+    # so success rate cannot drift from stale profile counters.
+    inputs = resolve_habit_score_inputs(
+        profile, load_verified_wake_events(db, current_user.id)
+    )
+    if isinstance(inputs, dict):
+        dismissed = int(inputs.get("total_alarms_dismissed", 0) or 0)
+        snoozes = int(inputs.get("total_snoozes", 0) or 0)
+    else:
+        dismissed = int(getattr(inputs, "total_alarms_dismissed", 0) or 0)
+        snoozes = int(getattr(inputs, "total_snoozes", 0) or 0)
+    total_events = dismissed + snoozes
     if total_events > 0:
-        success_rate = (profile.total_alarms_dismissed / total_events) * 100
+        success_rate = (dismissed / total_events) * 100
     else:
         success_rate = 0.0
 

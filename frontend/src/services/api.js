@@ -123,7 +123,7 @@ export const recommendationAPI = {
   getProductivity: () => api.get('/recommendations/productivity'),
 };
 
-// ─── Behavioral Analytics API (pandas/numpy aggregates) ───
+// ─── Behavioral Analytics API (pandas/numpy aggregates) + event ingest ───
 export const analyticsAPI = {
   getBehavioral: (days = 30) =>
     api.get('/analytics/behavioral', { params: { days } }),
@@ -140,6 +140,10 @@ export const analyticsAPI = {
   getHabitTrends: (days = 30) =>
     api.get('/analytics/behavioral/habits', { params: { days } }),
   getSummary: () => api.get('/analytics/summary'),
+  /** POST /analytics/events — single client event ingest */
+  postEvent: (event) => api.post('/analytics/events', event),
+  /** POST /analytics/events/batch — up to 100 events */
+  postEventsBatch: (events) => api.post('/analytics/events/batch', { events }),
 };
 
 // ─── Admin API ───

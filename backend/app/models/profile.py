@@ -53,6 +53,10 @@ class UserProfile(Base):
         total_snoozes: Lifetime count of snooze events.
         streak_days: Current consecutive-day wake-up streak.
         best_streak: Highest streak ever achieved.
+        consecutive_success_streak: Consecutive full wake dismissals used by
+            strict adaptive difficulty (resets on failure / adapt).
+        consecutive_failure_streak: Consecutive wrong/timeout verifies used
+            by strict adaptive difficulty (resets on full wake / adapt).
         created_at: Timestamp of record creation (UTC).
         updated_at: Timestamp of last update (UTC).
         user: Back-reference to the parent ``User`` model.
@@ -79,6 +83,8 @@ class UserProfile(Base):
     total_snoozes = Column(Integer, default=0, nullable=False)
     streak_days = Column(Integer, default=0, nullable=False)
     best_streak = Column(Integer, default=0, nullable=False)
+    consecutive_success_streak = Column(Integer, default=0, nullable=False)
+    consecutive_failure_streak = Column(Integer, default=0, nullable=False)
     created_at = Column(
         DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )

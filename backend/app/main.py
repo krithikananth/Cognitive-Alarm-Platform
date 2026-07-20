@@ -39,6 +39,11 @@ def _ensure_sqlite_columns() -> None:
         "ALTER TABLE challenge_sessions ADD COLUMN wake_confirmed BOOLEAN DEFAULT 0",
         "ALTER TABLE challenge_sessions ADD COLUMN session_started_at DATETIME",
         "ALTER TABLE alarms ADD COLUMN challenge_difficulty VARCHAR(50) DEFAULT 'medium'",
+        # Strict consecutive-streak adaptive difficulty counters
+        "ALTER TABLE user_profiles ADD COLUMN consecutive_success_streak "
+        "INTEGER DEFAULT 0",
+        "ALTER TABLE user_profiles ADD COLUMN consecutive_failure_streak "
+        "INTEGER DEFAULT 0",
         # Query indexes for adaptive difficulty / history / stats
         "CREATE INDEX IF NOT EXISTS ix_alarm_challenge_logs_user_id "
         "ON alarm_challenge_logs (user_id)",

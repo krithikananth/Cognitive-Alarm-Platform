@@ -24,6 +24,7 @@ from app.services.challenge_service import ChallengeService, VERIFY_TIME_GRACE_S
 from app.services.attempt_log_service import AttemptLogService
 from app.services.analytics_ingestion_service import AnalyticsIngestionService
 from app.services.recommendation_cache import RecommendationCache
+from app.services.profile_service import ProfileService
 from app.schemas.alarm import (
     AlarmCreate,
     AlarmUpdate,
@@ -576,8 +577,8 @@ def get_alarm_challenge(
     Personalization pipeline:
       1. Preferred challenge types (for RANDOM alarms)
       2. Profile difficulty preference as the initial baseline
-      3. Anti-snooze difficulty escalation
-      4. Performance-based adaptive difficulty (±1 around the baseline)
+      3. Strict consecutive-streak adaptive difficulty (±1 around the baseline)
+      4. Anti-snooze difficulty escalation (applied after adaptive)
       5. Time-of-day softening (easier when groggiest)
     """
     alarm = (
@@ -592,23 +593,29 @@ def get_alarm_challenge(
         )
 
     # ── Initial difficulty from profile preference (alarm as legacy fallback) ──
-    difficulty = ChallengeService.resolve_baseline_difficulty(
-        getattr(current_user, "profile", None),
+    profile = ProfileService.get_or_create_profile(db, current_user.id)
+    baseline = ChallengeService.resolve_baseline_difficulty(
+        profile,
         getattr(alarm, "challenge_difficulty", None),
     )
-    user_tz_name = "UTC"
-    preferred_types = None
-    if current_user.profile:
-        if current_user.profile.timezone:
-            user_tz_name = current_user.profile.timezone
-        habits = current_user.profile.habit_preferences or {}
-        preferred_types = habits.get("preferred_challenge_types")
+    user_tz_name = profile.timezone or "UTC"
+    habits = profile.habit_preferences or {}
+    preferred_types = habits.get("preferred_challenge_types")
+    success_streak = int(profile.consecutive_success_streak or 0)
+    failure_streak = int(profile.consecutive_failure_streak or 0)
 
-    # ── Anti-snooze escalation ──
+    # Adapt around the preference baseline (not snooze-escalated level),
+    # then apply anti-snooze escalation on top of the adapted level.
+    adaptation = ChallengeService.adapt_difficulty(
+        baseline,
+        success_streak=success_streak,
+        failure_streak=failure_streak,
+    )
+    difficulty = adaptation["difficulty"]
     escalation = int(alarm.total_snoozes or 0)
     difficulty = ChallengeService.escalate_difficulty(difficulty, escalation)
 
-    # ── Recent performance logs (newest first) ──
+    # ── Recent performance logs (newest first; type weighting / anti-repeat) ──
     recent_logs = (
         db.query(AlarmChallengeLog)
         .filter(AlarmChallengeLog.user_id == current_user.id)
@@ -634,6 +641,17 @@ def get_alarm_challenge(
         preferred_types=preferred_types,
         recent_logs=recent_logs,
         exclude_prompts=exclude_prompts or None,
+        # Already adapted above from stored counters; avoid double-adapt.
+        apply_adaptive_difficulty=False,
+    )
+    challenge["adaptive_difficulty"] = adaptation
+    # When adaptive difficulty shifts ±1, persist into the profile so the
+    # next login/session continues from the updated preference.
+    ProfileService.persist_adaptive_difficulty_if_needed(
+        db,
+        profile,
+        recent_logs,
+        alarm_difficulty=getattr(alarm, "challenge_difficulty", None),
     )
     # Persist answer + progress server-side (preserve consecutive streak)
     session = ChallengeService.store_challenge_session(
@@ -761,9 +779,29 @@ def verify_alarm_challenge(
     )
 
     required_steps = max(1, int(session.get("required_correct") or alarm.challenge_count or 1))
+    profile = ProfileService.get_or_create_profile(db, current_user.id)
+
+    def _apply_adaptive_outcome(*, completed_wake: bool) -> None:
+        """
+        Adaptive streaks count full wake dismissals as successes and
+        wrong/timeout verifies as failures. Intermediate correct steps
+        (multi-step progress) do not change adaptive counters.
+        """
+        ProfileService.update_adaptive_streaks(
+            db,
+            profile,
+            is_correct=completed_wake,
+            commit=True,
+        )
+        ProfileService.persist_adaptive_difficulty_if_needed(
+            db,
+            profile,
+            alarm_difficulty=getattr(alarm, "challenge_difficulty", None),
+        )
 
     # ── Timeout / wrong answer → reset consecutive streak ──
     if timed_out or not is_correct:
+        _apply_adaptive_outcome(completed_wake=False)
         progress = ChallengeService.record_failed_attempt(
             current_user.id, alarm_id, db, reset_streak=True
         )
@@ -828,6 +866,7 @@ def verify_alarm_challenge(
     )
 
     if consecutive < required_steps:
+        # Mid multi-step progress: not a wake completion — no adaptive update.
         return {
             "status": "step_complete",
             "message": (
@@ -845,6 +884,8 @@ def verify_alarm_challenge(
         }
 
     # ── All consecutive challenges solved — confirm wake & dismiss ──
+    # Full wake dismissal counts as one adaptive success.
+    _apply_adaptive_outcome(completed_wake=True)
     # Anti-snooze audit: mark when the user only woke after exhausting snoozes
     dismiss_method = (
         "snooze_exhausted"
@@ -1295,7 +1336,19 @@ def get_challenge_analysis(
         if current_user.profile.difficulty_preference:
             difficulty = current_user.profile.difficulty_preference.value
 
-    adaptation = ChallengeService.adapt_difficulty(difficulty, logs[:20])
+    if current_user.profile:
+        adaptation = ChallengeService.adapt_difficulty(
+            difficulty,
+            logs[:20],
+            success_streak=int(
+                current_user.profile.consecutive_success_streak or 0
+            ),
+            failure_streak=int(
+                current_user.profile.consecutive_failure_streak or 0
+            ),
+        )
+    else:
+        adaptation = ChallengeService.adapt_difficulty(difficulty, logs[:20])
     analysis["personalization"] = {
         "preferred_challenge_types": preferred,
         "difficulty_preference": difficulty,

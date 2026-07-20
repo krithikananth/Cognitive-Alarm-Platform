@@ -697,7 +697,7 @@ export default function Analytics() {
             </p>
             <p className="text-sm text-slate-300 mb-4">
               {analysis?.personalization?.adaptive_difficulty?.reason ||
-                'Adaptive difficulty activates after 5+ recent attempts.'}
+                'Adaptive difficulty shifts after 5 consecutive wake completions or failures.'}
             </p>
             <div className="flex items-center justify-between text-sm mb-4">
               <span className="text-slate-400">Profile preference</span>

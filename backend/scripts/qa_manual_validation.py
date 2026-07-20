@@ -136,11 +136,14 @@ def validate_habit_score() -> list[dict]:
 
 def validate_analytics() -> list[dict]:
     rows = []
-    # Wake consistency: 3 wakes at 07:00, 07:10, 07:20 → mean 07:10, std known
+    # Wake consistency: 3 wakes at 07:00, 07:10, 07:20 → mean 07:10, std known.
+    # Service rounds std first, then derives score so displayed std reconstructs it.
     minutes = np.array([7 * 60, 7 * 60 + 10, 7 * 60 + 20], dtype=float)
     mean_m = float(np.mean(minutes))
-    std_m = float(np.std(minutes))
-    consistency = float(np.clip(100.0 - (std_m * (100.0 / 60.0)), 0.0, 100.0))
+    std_m = float(np.round(float(np.std(minutes)), 2))
+    consistency = float(
+        np.round(float(np.clip(100.0 - (std_m * (100.0 / 60.0)), 0.0, 100.0)), 2)
+    )
     preferred = 7 * 60.0
     deviations = BehavioralAnalyticsService._circular_minute_delta(minutes, preferred)
     on_time = int((np.abs(deviations) <= ON_TIME_TOLERANCE_MINUTES).sum())
@@ -149,9 +152,11 @@ def validate_analytics() -> list[dict]:
     now = pd.Timestamp.now(tz="UTC")
     wake_rows = []
     for i, m in enumerate(minutes):
-        dismissed = now.replace(hour=int(m // 60), minute=int(m % 60), second=0, microsecond=0)
-        if dismissed > now:
-            dismissed = dismissed - pd.Timedelta(days=1)
+        # Distinct calendar days so sleep adherence observes one wake per day
+        day = now - pd.Timedelta(days=i + 1)
+        dismissed = day.replace(
+            hour=int(m // 60), minute=int(m % 60), second=0, microsecond=0
+        )
         wake_rows.append(
             {
                 "id": i + 1,
@@ -186,9 +191,9 @@ def validate_analytics() -> list[dict]:
     rows.append(
         {
             "metric": "wake_consistency_score",
-            "expected": round(consistency, 2),
+            "expected": consistency,
             "actual": result["consistency_score"],
-            "pass": result["consistency_score"] == round(consistency, 2),
+            "pass": result["consistency_score"] == consistency,
         }
     )
     rows.append(
@@ -202,9 +207,9 @@ def validate_analytics() -> list[dict]:
     rows.append(
         {
             "metric": "wake_std_minutes",
-            "expected": round(std_m, 2),
+            "expected": std_m,
             "actual": result["std_wake_minutes"],
-            "pass": result["std_wake_minutes"] == round(std_m, 2),
+            "pass": result["std_wake_minutes"] == std_m,
         }
     )
 
@@ -265,15 +270,11 @@ def validate_analytics() -> list[dict]:
         }
     )
 
-    # Sleep adherence: 2 of 3 days within 15 min of preferred
+    # Sleep adherence: 2 of 3 days within 15 min of preferred (distinct days)
     sleep = BehavioralAnalyticsService.analyze_sleep_adherence(
         wake_df, preferred, _P()
     )
-    # Each wake on different "day" depending on timestamps — recompute from service inputs
-    expected_adherence = round((on_time / len(minutes)) * 100.0, 2) if len(
-        # daily groupby may collapse if same calendar day
-        set(wake_df["dismissed_at"].dt.normalize())
-    ) == len(minutes) else sleep["adherence_rate"]
+    expected_adherence = on_time_rate
     rows.append(
         {
             "metric": "sleep_adherence_rate",

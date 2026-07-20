@@ -42,7 +42,7 @@ class TestCreateAlarm:
         assert "id" in data
 
     def test_create_alarm_with_difficulty(self, client, test_user, auth_headers):
-        """Per-alarm challenge_difficulty is persisted and returned."""
+        """Per-alarm challenge_difficulty is persisted for storage/UI."""
         payload = {
             "title": "Hard Morning",
             "alarm_time": "06:00",
@@ -54,7 +54,8 @@ class TestCreateAlarm:
         data = response.json()
         assert data["challenge_difficulty"] == "hard"
 
-        # Without a profile preference, challenge baseline falls back to alarm
+        # Challenge adaptive baseline uses profile preference (default medium),
+        # not the per-alarm stored value — profile is the adaptive SSOT.
         ch = client.get(
             f"/api/v1/alarms/{data['id']}/challenge", headers=auth_headers
         )
@@ -63,7 +64,8 @@ class TestCreateAlarm:
         assert body["difficulty"] in {
             "beginner", "easy", "medium", "hard", "expert"
         }
-        assert body["adaptive_difficulty"]["difficulty"] == "hard"
+        assert body["adaptive_difficulty"]["difficulty"] == "medium"
+        assert body["adaptive_difficulty"]["adjustment"] == 0
 
     def test_create_alarm_seeds_difficulty_from_profile(
         self, client, test_user, auth_headers
@@ -120,6 +122,63 @@ class TestCreateAlarm:
         assert body["difficulty"] in {
             "beginner", "easy", "medium", "hard", "expert"
         }
+
+    def test_adaptive_difficulty_persists_to_profile(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Adaptive ±1 is saved to difficulty_preference for the next session."""
+        from app.models.profile import DifficultyPreference, UserProfile
+        from app.services.challenge_service import _adaptive_streak_threshold
+
+        # Ensure profile exists at medium
+        pref = client.get("/api/v1/profiles/me", headers=auth_headers)
+        assert pref.status_code == 200
+        assert pref.json()["difficulty_preference"] == "medium"
+
+        created = client.post(
+            "/api/v1/alarms/",
+            json={
+                "title": "Adaptive Persist",
+                "alarm_time": "07:30",
+                "challenge_type": "math",
+                "challenge_difficulty": "medium",
+            },
+            headers=auth_headers,
+        )
+        assert created.status_code == 201
+        alarm_id = created.json()["id"]
+
+        # Seed N consecutive successes on the stored streak counters
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        profile.consecutive_success_streak = _adaptive_streak_threshold()
+        profile.consecutive_failure_streak = 0
+        db_session.commit()
+
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        )
+        assert ch.status_code == 200
+        assert ch.json()["adaptive_difficulty"]["adjustment"] == 1
+        assert ch.json()["adaptive_difficulty"]["difficulty"] == "hard"
+
+        db_session.refresh(profile)
+        assert profile.difficulty_preference == DifficultyPreference.HARD
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 0
+
+        # Preference API also reflects the persisted adaptive value
+        again = client.get("/api/v1/profiles/me", headers=auth_headers)
+        assert again.status_code == 200
+        assert again.json()["difficulty_preference"] == "hard"
+
+        # Alarm baseline stays aligned for future sessions
+        alarm = client.get(f"/api/v1/alarms/{alarm_id}", headers=auth_headers)
+        assert alarm.status_code == 200
+        assert alarm.json()["challenge_difficulty"] == "hard"
 
     def test_create_alarm_minimal(self, client, test_user, auth_headers):
         """Creating an alarm with only the required fields uses sensible defaults."""

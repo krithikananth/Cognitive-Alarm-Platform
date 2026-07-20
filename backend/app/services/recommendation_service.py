@@ -202,7 +202,7 @@ class RecommendationService:
         )
 
         signals = RecommendationService._build_signals(
-            profile, alarms, wake_events, challenge_logs
+            profile, alarms, wake_events, challenge_logs, db=db
         )
 
         items: List[RecommendationItem] = []
@@ -365,8 +365,24 @@ class RecommendationService:
         alarms: List[Alarm],
         wake_events: List[AlarmWakeEvent],
         challenge_logs: List[AlarmChallengeLog],
+        db: Optional[Session] = None,
     ) -> Dict[str, Any]:
-        score_data = ProfileService.calculate_habit_score(profile)
+        # Habit score must use the lifetime SSOT path (wake replay + puzzle logs)
+        # so recommendations agree with dashboard / analytics habit score.
+        if db is not None and getattr(profile, "user_id", None) is not None:
+            score_data = ProfileService.calculate_habit_score(profile, db=db)
+        else:
+            puzzle_stats = None
+            if challenge_logs:
+                puzzle_stats = {
+                    "total_puzzle_correct": sum(
+                        1 for log in challenge_logs if log.is_correct
+                    ),
+                    "total_puzzle_attempts": len(challenge_logs),
+                }
+            score_data = ProfileService.calculate_habit_score(
+                profile, events=wake_events, puzzle_stats=puzzle_stats
+            )
         habit_score = score_data["habit_score"]
 
         active_alarms = [a for a in alarms if a.is_active]
@@ -408,7 +424,9 @@ class RecommendationService:
             if e.time_to_dismiss_seconds is not None
         ]
         avg_dismiss = (
-            int(sum(dismiss_times) / len(dismiss_times)) if dismiss_times else None
+            int(round(sum(dismiss_times) / len(dismiss_times)))
+            if dismiss_times
+            else None
         )
 
         goals = RecommendationService._normalize_goals(profile.productivity_goals)

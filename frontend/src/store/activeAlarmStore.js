@@ -4,6 +4,13 @@
  */
 import { create } from 'zustand';
 import { alarmAPI } from '../services/api';
+import {
+  trackAlarmDismissed,
+  trackAlarmSnoozed,
+  trackChallengeCompleted,
+  trackChallengeFailed,
+  trackWakeVerified,
+} from '../services/analyticsTracker';
 import useAlarmStore from './alarmStore';
 
 const useActiveAlarmStore = create((set, get) => ({
@@ -145,9 +152,10 @@ const useActiveAlarmStore = create((set, get) => ({
 
     set({ isLoading: true });
     try {
+      const prevSnoozeCount = get().snoozeCount;
       await alarmAPI.snooze(alarmId);
       get()._stopTimer();
-      const newSnoozeCount = get().snoozeCount + 1;
+      const newSnoozeCount = prevSnoozeCount + 1;
       const limit = get().snoozeLimit;
       const canStillSnooze = newSnoozeCount < limit;
       set({
@@ -162,6 +170,16 @@ const useActiveAlarmStore = create((set, get) => ({
         canSnooze: canStillSnooze,
         antiSnoozeEnforced: !canStillSnooze,
       });
+      trackAlarmSnoozed(
+        alarmId,
+        {
+          snooze_count: newSnoozeCount,
+          snooze_limit: limit,
+          interval_minutes: get().snoozeIntervalMinutes,
+          escalation_level: newSnoozeCount,
+        },
+        `${alarmId}:snooze:${newSnoozeCount}`
+      );
       try {
         await useAlarmStore.getState().fetchAlarms();
       } catch (e) { /* ignore */ }
@@ -194,6 +212,18 @@ const useActiveAlarmStore = create((set, get) => ({
       ? Math.max(0, timeTakenSeconds)
       : elapsedFromTimer;
 
+    const challengeStep = get().currentStep;
+    const attemptNonce = `${Date.now()}:${get().failedAttempts}:${timeTaken}`;
+    const challengeMeta = {
+      challenge_type: challenge.type || null,
+      challenge_difficulty: challenge.difficulty || 'medium',
+      challenge_step: challengeStep,
+      challenge_total_steps: get().totalSteps,
+      time_taken_seconds: timeTaken,
+      failed_attempts: failedAttempts || 0,
+      attempt_nonce: attemptNonce,
+    };
+
     set({ isLoading: true, error: null });
     try {
       const res = await alarmAPI.verifyChallenge(alarmId, {
@@ -203,14 +233,36 @@ const useActiveAlarmStore = create((set, get) => ({
         failed_attempts: failedAttempts || 0,
         challenge_prompt: challenge.prompt || "",
         challenge_difficulty: challenge.difficulty || "medium",
-        challenge_step: get().currentStep,
+        challenge_step: challengeStep,
         challenge_total_steps: get().totalSteps,
       });
 
       const data = res.data;
 
+      trackChallengeCompleted(
+        alarmId,
+        challengeMeta,
+        `${alarmId}:challenge_ok:${challengeStep}:${attemptNonce}`
+      );
+
       if (data.is_dismissed) {
         get()._stopTimer();
+        const wakePayload = {
+          dismiss_method: 'challenge',
+          wakefulness_score: data.wakefulness?.score ?? null,
+          wakefulness_level: data.wakefulness?.level ?? null,
+          consecutive_correct: data.consecutive_correct ?? get().totalSteps,
+        };
+        trackAlarmDismissed(
+          alarmId,
+          wakePayload,
+          `${alarmId}:dismiss:${attemptNonce}`
+        );
+        trackWakeVerified(
+          alarmId,
+          wakePayload,
+          `${alarmId}:wake:${attemptNonce}`
+        );
         set({
           ringingAlarmId: null,
           isRinging: false,
@@ -276,6 +328,18 @@ const useActiveAlarmStore = create((set, get) => ({
         (typeof payload.detail === 'string' ? payload.detail : null) ||
         "Incorrect answer. Try again.";
       const streakReset = payload.streak_reset === true;
+
+      // Only treat verification/validation failures as challenge fails.
+      // Network/5xx errors should not emit a failed-challenge analytics event.
+      const status = err.response?.status;
+      if (status === 400 || status === 422) {
+        trackChallengeFailed(
+          alarmId,
+          challengeMeta,
+          `${alarmId}:challenge_fail:${challengeStep}:${attemptNonce}`
+        );
+      }
+
       set({
         error: msg,
         isLoading: false,

@@ -40,6 +40,21 @@ VERIFY_TIME_GRACE_SECONDS = 5
 # Recent attempts used for adaptive difficulty / type weighting
 PERFORMANCE_WINDOW = 20
 
+
+def _adaptive_streak_threshold() -> int:
+    """Resolve N for strict consecutive adaptive difficulty (env-overridable)."""
+    try:
+        from app.core.config import settings
+
+        value = int(getattr(settings, "ADAPTIVE_STREAK_THRESHOLD", 5) or 5)
+    except Exception:
+        value = 5
+    return value if value >= 1 else 5
+
+
+# Default N; prefer ``_adaptive_streak_threshold()`` / settings at runtime.
+ADAPTIVE_STREAK_THRESHOLD = 5
+
 # Avoid repeating the same prompt across consecutive alarms / multi-step sessions
 RECENT_PROMPT_WINDOW = 25
 
@@ -403,62 +418,98 @@ class ChallengeService:
         return _clamp_difficulty(alarm_difficulty or "medium")
 
     @staticmethod
+    def compute_trailing_streaks(recent_logs: Optional[list] = None) -> Dict[str, int]:
+        """
+        Derive strict trailing consecutive success/failure counts.
+
+        ``recent_logs`` must be newest-first. The streak is the run of identical
+        outcomes at the head of the list; the opposite counter is always 0.
+        """
+        logs = list(recent_logs or [])[:PERFORMANCE_WINDOW]
+        if not logs:
+            return {"success_streak": 0, "failure_streak": 0}
+
+        leading_correct = bool(getattr(logs[0], "is_correct", False))
+        count = 0
+        for log in logs:
+            if bool(getattr(log, "is_correct", False)) == leading_correct:
+                count += 1
+            else:
+                break
+
+        if leading_correct:
+            return {"success_streak": count, "failure_streak": 0}
+        return {"success_streak": 0, "failure_streak": count}
+
+    @staticmethod
     def adapt_difficulty(
         base_difficulty: str,
         recent_logs: Optional[list] = None,
+        *,
+        success_streak: Optional[int] = None,
+        failure_streak: Optional[int] = None,
+        streak_threshold: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Adjust difficulty from recent performance before time-of-day softening.
+        Adjust difficulty from strict consecutive success/failure streaks.
 
-        Centers on the caller's baseline (normally the profile preference)
-        and shifts at most one level up or down.
+        Difficulty rises only after ``N`` consecutive successes and falls only
+        after ``N`` consecutive failures (``ADAPTIVE_STREAK_THRESHOLD`` by
+        default). Centers on the caller's baseline and shifts at most ±1.
 
-        Returns dict with keys: difficulty, adjustment (-1/0/+1), reason.
+        When ``success_streak`` / ``failure_streak`` are provided they are used
+        directly (stored profile counters). Otherwise streaks are derived from
+        trailing ``recent_logs`` (newest-first).
+
+        Returns dict with keys: difficulty, adjustment (-1/0/+1), reason,
+        success_streak, failure_streak, streak_threshold.
         """
         base = _clamp_difficulty(base_difficulty)
-        logs = list(recent_logs or [])[:PERFORMANCE_WINDOW]
+        threshold = int(
+            streak_threshold
+            if streak_threshold is not None
+            else _adaptive_streak_threshold()
+        )
+        if threshold < 1:
+            threshold = _adaptive_streak_threshold()
 
-        if len(logs) < 5:
-            return {
-                "difficulty": base,
-                "adjustment": 0,
-                "reason": "Not enough recent attempts to adapt (need 5+).",
-            }
-
-        correct = sum(1 for l in logs if getattr(l, "is_correct", False))
-        accuracy = correct / len(logs)
-        avg_time = sum(getattr(l, "time_taken_seconds", 0) or 0 for l in logs) / len(logs)
-
-        # Compare average solve time to medium baseline (30s) as a speed signal
-        speed_ratio = avg_time / 30.0
+        if success_streak is not None and failure_streak is not None:
+            succ = max(0, int(success_streak))
+            fail = max(0, int(failure_streak))
+            # Strict invariant: only one streak direction can be active.
+            if succ > 0 and fail > 0:
+                # Prefer the explicitly larger streak; tie → treat as reset.
+                if succ > fail:
+                    fail = 0
+                elif fail > succ:
+                    succ = 0
+                else:
+                    succ = 0
+                    fail = 0
+        else:
+            derived = ChallengeService.compute_trailing_streaks(recent_logs)
+            succ = derived["success_streak"]
+            fail = derived["failure_streak"]
 
         idx = _difficulty_index(base)
         adjustment = 0
-        reason = "Performance stable — keeping preferred difficulty."
+        reason = (
+            f"Streak building — need {threshold} consecutive "
+            f"wake completions or failures to adapt "
+            f"(success={succ}, failure={fail})."
+        )
 
-        if accuracy >= 0.85 and speed_ratio <= 0.55:
+        if succ >= threshold:
             adjustment = 1
             reason = (
-                f"Strong recent form ({round(accuracy * 100)}% accuracy, "
-                f"fast solves) — raising difficulty."
+                f"{succ} consecutive wake completions "
+                f"(threshold {threshold}) — raising difficulty."
             )
-        elif accuracy >= 0.75 and speed_ratio <= 0.4:
-            adjustment = 1
-            reason = (
-                f"Consistently fast and accurate ({round(accuracy * 100)}%) "
-                f"— raising difficulty."
-            )
-        elif accuracy <= 0.35:
+        elif fail >= threshold:
             adjustment = -1
             reason = (
-                f"Low recent accuracy ({round(accuracy * 100)}%) "
-                f"— lowering difficulty."
-            )
-        elif accuracy <= 0.5 and speed_ratio >= 0.9:
-            adjustment = -1
-            reason = (
-                f"Struggling on time and accuracy ({round(accuracy * 100)}%) "
-                f"— lowering difficulty."
+                f"{fail} consecutive failures "
+                f"(threshold {threshold}) — lowering difficulty."
             )
 
         new_idx = max(0, min(len(DIFFICULTY_LEVELS) - 1, idx + adjustment))
@@ -466,9 +517,10 @@ class ChallengeService:
             "difficulty": DIFFICULTY_LEVELS[new_idx],
             "adjustment": new_idx - idx,
             "reason": reason,
-            "recent_accuracy": round(accuracy * 100, 1),
-            "recent_avg_time": round(avg_time, 1),
-            "sample_size": len(logs),
+            "success_streak": succ,
+            "failure_streak": fail,
+            "streak_threshold": threshold,
+            "sample_size": succ + fail,
         }
 
     @staticmethod
@@ -480,6 +532,8 @@ class ChallengeService:
         recent_logs: Optional[list] = None,
         apply_adaptive_difficulty: bool = True,
         exclude_prompts: Optional[list] = None,
+        success_streak: Optional[int] = None,
+        failure_streak: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Generate a cognitive puzzle personalized by preferences, performance,
@@ -494,19 +548,25 @@ class ChallengeService:
             preferred_types: Profile preferred challenge type strings.
             recent_logs: Recent AlarmChallengeLog rows for personalization.
             apply_adaptive_difficulty: When True, shift difficulty from
-                recent performance before applying time-of-day softening.
+                consecutive streak counters (or trailing logs) before
+                applying time-of-day softening.
             exclude_prompts: Extra prompts to avoid (e.g. active session).
+            success_streak: Stored consecutive success counter (preferred).
+            failure_streak: Stored consecutive failure counter (preferred).
 
         Returns:
             A dictionary with the challenge prompt, type, correct answer,
             the effective difficulty applied, and a time_limit_seconds hint.
         """
-        # 2) Performance-based adaptive difficulty
+        # 2) Strict consecutive-streak adaptive difficulty
         adaptation = {"adjustment": 0, "reason": "Adaptive difficulty disabled."}
         working_difficulty = _clamp_difficulty(difficulty)
         if apply_adaptive_difficulty:
             adaptation = ChallengeService.adapt_difficulty(
-                working_difficulty, recent_logs
+                working_difficulty,
+                recent_logs,
+                success_streak=success_streak,
+                failure_streak=failure_streak,
             )
             working_difficulty = adaptation["difficulty"]
 

@@ -19,7 +19,10 @@ from app.schemas.profile import (
     HabitPreferencesUpdate,
 )
 from app.api.deps import get_current_user
-from app.services.habit_score import calculate_habit_score
+from app.services.habit_score import (
+    calculate_habit_score,
+    calculate_habit_score_for_user,
+)
 from app.services.profile_service import ProfileService
 from app.services.recommendation_cache import RecommendationCache
 
@@ -54,6 +57,13 @@ def _get_or_create_profile(user_id: int, db: Session) -> UserProfile:
 _calculate_habit_score = calculate_habit_score
 
 
+def _attach_habit_score(profile: UserProfile, db: Session) -> UserProfile:
+    """Attach habit score recalculated from behavioral data when available."""
+    score_data = calculate_habit_score_for_user(db, profile.user_id, profile)
+    profile.habit_score = score_data["habit_score"]
+    return profile
+
+
 @router.get(
     "/me",
     response_model=ProfileResponse,
@@ -65,10 +75,7 @@ def get_own_profile(
 ):
     """Get the current user's profile with computed habit score."""
     profile = _get_or_create_profile(current_user.id, db)
-    score_data = calculate_habit_score(profile)
-    # Attach computed score for response serialization
-    profile.habit_score = score_data["habit_score"]
-    return profile
+    return _attach_habit_score(profile, db)
 
 
 @router.put(
@@ -101,9 +108,7 @@ def update_profile(
     db.commit()
     db.refresh(profile)
     RecommendationCache.invalidate_user(current_user.id)
-    score_data = calculate_habit_score(profile)
-    profile.habit_score = score_data["habit_score"]
-    return profile
+    return _attach_habit_score(profile, db)
 
 
 @router.patch(
@@ -126,9 +131,7 @@ def update_sleep_schedule(
     db.commit()
     db.refresh(profile)
     RecommendationCache.invalidate_user(current_user.id)
-    score_data = calculate_habit_score(profile)
-    profile.habit_score = score_data["habit_score"]
-    return profile
+    return _attach_habit_score(profile, db)
 
 
 @router.patch(
@@ -147,9 +150,7 @@ def update_goals(
     db.commit()
     db.refresh(profile)
     RecommendationCache.invalidate_user(current_user.id)
-    score_data = calculate_habit_score(profile)
-    profile.habit_score = score_data["habit_score"]
-    return profile
+    return _attach_habit_score(profile, db)
 
 
 @router.patch(
@@ -168,9 +169,7 @@ def update_habit_preferences(
     db.commit()
     db.refresh(profile)
     RecommendationCache.invalidate_user(current_user.id)
-    score_data = calculate_habit_score(profile)
-    profile.habit_score = score_data["habit_score"]
-    return profile
+    return _attach_habit_score(profile, db)
 
 
 @router.get(
@@ -188,6 +187,8 @@ def get_habit_score(
     - Challenge Completion Success (25%)
     - Snooze Reduction (20%)
     - Sleep Schedule Adherence (20%)
+
+    Inputs are recalculated from verified wake events when available.
     """
     profile = _get_or_create_profile(current_user.id, db)
-    return calculate_habit_score(profile)
+    return calculate_habit_score_for_user(db, current_user.id, profile)

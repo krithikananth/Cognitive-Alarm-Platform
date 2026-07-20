@@ -101,6 +101,158 @@ class TestUpdateProfile:
         assert response.status_code == 422
 
 
+class TestAdaptiveDifficultyPersistence:
+    """Tests for persisting adaptive difficulty onto the profile preference."""
+
+    def test_persist_raises_preference_on_consecutive_success(
+        self, db_session, test_user
+    ):
+        """N consecutive successes should write the raised level to the profile."""
+        from app.models.profile import UserProfile, DifficultyPreference
+        from app.services.challenge_service import _adaptive_streak_threshold
+        from app.services.profile_service import ProfileService
+
+        profile = UserProfile(
+            user_id=test_user.id,
+            sleep_duration_hours=8.0,
+            timezone="UTC",
+            difficulty_preference=DifficultyPreference.MEDIUM,
+            consecutive_success_streak=_adaptive_streak_threshold(),
+            consecutive_failure_streak=0,
+        )
+        db_session.add(profile)
+        db_session.commit()
+        db_session.refresh(profile)
+
+        updated = ProfileService.persist_adaptive_difficulty_if_needed(
+            db_session, profile
+        )
+        assert updated is True
+        db_session.refresh(profile)
+        assert profile.difficulty_preference == DifficultyPreference.HARD
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 0
+
+    def test_persist_lowers_preference_on_consecutive_failure(
+        self, db_session, test_user
+    ):
+        """N consecutive failures should write the lowered level to the profile."""
+        from app.models.profile import UserProfile, DifficultyPreference
+        from app.services.challenge_service import _adaptive_streak_threshold
+        from app.services.profile_service import ProfileService
+
+        profile = UserProfile(
+            user_id=test_user.id,
+            sleep_duration_hours=8.0,
+            timezone="UTC",
+            difficulty_preference=DifficultyPreference.HARD,
+            consecutive_success_streak=0,
+            consecutive_failure_streak=_adaptive_streak_threshold(),
+        )
+        db_session.add(profile)
+        db_session.commit()
+        db_session.refresh(profile)
+
+        updated = ProfileService.persist_adaptive_difficulty_if_needed(
+            db_session, profile
+        )
+        assert updated is True
+        db_session.refresh(profile)
+        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 0
+
+    def test_persist_noop_below_streak_threshold(self, db_session, test_user):
+        """Streaks below N must not change the saved preference."""
+        from app.models.profile import UserProfile, DifficultyPreference
+        from app.services.challenge_service import _adaptive_streak_threshold
+        from app.services.profile_service import ProfileService
+
+        below = _adaptive_streak_threshold() - 1
+        profile = UserProfile(
+            user_id=test_user.id,
+            sleep_duration_hours=8.0,
+            timezone="UTC",
+            difficulty_preference=DifficultyPreference.MEDIUM,
+            consecutive_success_streak=below,
+            consecutive_failure_streak=0,
+        )
+        db_session.add(profile)
+        db_session.commit()
+        db_session.refresh(profile)
+
+        updated = ProfileService.persist_adaptive_difficulty_if_needed(
+            db_session, profile
+        )
+        assert updated is False
+        db_session.refresh(profile)
+        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.consecutive_success_streak == below
+
+    def test_persist_noop_when_profile_missing(self, db_session):
+        """Missing profile is a no-op (does not raise)."""
+        from app.services.profile_service import ProfileService
+
+        assert (
+            ProfileService.persist_adaptive_difficulty_if_needed(
+                db_session, None, []
+            )
+            is False
+        )
+
+    def test_update_adaptive_streaks_success_and_reset(
+        self, db_session, test_user
+    ):
+        """Success increments success streak and clears failure streak."""
+        from app.models.profile import UserProfile, DifficultyPreference
+        from app.services.profile_service import ProfileService
+
+        profile = UserProfile(
+            user_id=test_user.id,
+            sleep_duration_hours=8.0,
+            timezone="UTC",
+            difficulty_preference=DifficultyPreference.MEDIUM,
+            consecutive_success_streak=2,
+            consecutive_failure_streak=3,
+        )
+        db_session.add(profile)
+        db_session.commit()
+        db_session.refresh(profile)
+
+        ProfileService.update_adaptive_streaks(
+            db_session, profile, is_correct=True
+        )
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 3
+        assert profile.consecutive_failure_streak == 0
+
+    def test_update_adaptive_streaks_failure_resets_success(
+        self, db_session, test_user
+    ):
+        """Failure increments failure streak and clears success streak."""
+        from app.models.profile import UserProfile, DifficultyPreference
+        from app.services.profile_service import ProfileService
+
+        profile = UserProfile(
+            user_id=test_user.id,
+            sleep_duration_hours=8.0,
+            timezone="UTC",
+            difficulty_preference=DifficultyPreference.MEDIUM,
+            consecutive_success_streak=4,
+            consecutive_failure_streak=0,
+        )
+        db_session.add(profile)
+        db_session.commit()
+        db_session.refresh(profile)
+
+        ProfileService.update_adaptive_streaks(
+            db_session, profile, is_correct=False
+        )
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 1
+
+
 class TestSleepSchedule:
     """Tests for PATCH /api/v1/profiles/me/sleep-schedule."""
 

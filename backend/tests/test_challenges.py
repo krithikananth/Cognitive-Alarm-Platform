@@ -11,7 +11,12 @@ Covers:
 """
 
 import pytest
-from app.services.challenge_service import ChallengeService, _adjust_for_time, DIFFICULTY_LEVELS
+from app.services.challenge_service import (
+    ChallengeService,
+    _adjust_for_time,
+    _adaptive_streak_threshold,
+    DIFFICULTY_LEVELS,
+)
 from app.models.alarm import ChallengeType, AlarmChallengeLog
 
 
@@ -233,52 +238,141 @@ class TestChallengeGeneration:
         )
         assert ChallengeService.resolve_baseline_difficulty(None, None) == "medium"
 
-    def test_adapt_difficulty_raises_on_strong_performance(self):
-        """High accuracy + fast solves should raise difficulty."""
+    def test_adapt_difficulty_raises_on_consecutive_success(self):
+        """N consecutive successes should raise difficulty."""
+        n = _adaptive_streak_threshold()
+
         class FakeLog:
-            def __init__(self, correct, seconds):
+            def __init__(self, correct):
                 self.is_correct = correct
-                self.time_taken_seconds = seconds
+                self.time_taken_seconds = 8
                 self.challenge_type = "math"
 
-        logs = [FakeLog(True, 8) for _ in range(10)]
+        logs = [FakeLog(True) for _ in range(n)]
         adapted = ChallengeService.adapt_difficulty("medium", logs)
         assert adapted["difficulty"] == "hard"
         assert adapted["adjustment"] == 1
+        assert adapted["success_streak"] == n
+        assert adapted["failure_streak"] == 0
 
     def test_adapt_difficulty_centers_on_preferred_level(self):
         """Adaptive ±1 should move around the user's preferred baseline."""
-        class FakeLog:
-            def __init__(self, correct, seconds):
-                self.is_correct = correct
-                self.time_taken_seconds = seconds
-                self.challenge_type = "math"
+        n = _adaptive_streak_threshold()
 
-        strong = [FakeLog(True, 8) for _ in range(10)]
-        raised = ChallengeService.adapt_difficulty("hard", strong)
+        raised = ChallengeService.adapt_difficulty(
+            "hard",
+            success_streak=n,
+            failure_streak=0,
+        )
         assert raised["difficulty"] == "expert"
         assert raised["adjustment"] == 1
 
-        weak = [FakeLog(False, 40) for _ in range(8)] + [
-            FakeLog(True, 40),
-            FakeLog(True, 40),
-        ]
-        lowered = ChallengeService.adapt_difficulty("hard", weak)
+        lowered = ChallengeService.adapt_difficulty(
+            "hard",
+            success_streak=0,
+            failure_streak=n,
+        )
         assert lowered["difficulty"] == "medium"
         assert lowered["adjustment"] == -1
 
-    def test_adapt_difficulty_lowers_on_weak_performance(self):
-        """Low accuracy should lower difficulty."""
+    def test_adapt_difficulty_lowers_on_consecutive_failure(self):
+        """N consecutive failures should lower difficulty."""
+        n = _adaptive_streak_threshold()
+
         class FakeLog:
             def __init__(self, correct):
                 self.is_correct = correct
                 self.time_taken_seconds = 40
                 self.challenge_type = "math"
 
-        logs = [FakeLog(False) for _ in range(8)] + [FakeLog(True), FakeLog(True)]
+        logs = [FakeLog(False) for _ in range(n)]
         adapted = ChallengeService.adapt_difficulty("medium", logs)
         assert adapted["difficulty"] == "easy"
         assert adapted["adjustment"] == -1
+        assert adapted["failure_streak"] == n
+        assert adapted["success_streak"] == 0
+
+    def test_adapt_difficulty_no_change_below_threshold(self):
+        """Fewer than N consecutive outcomes must not adapt."""
+        n = _adaptive_streak_threshold()
+
+        adapted = ChallengeService.adapt_difficulty(
+            "medium",
+            success_streak=n - 1,
+            failure_streak=0,
+        )
+        assert adapted["adjustment"] == 0
+        assert adapted["difficulty"] == "medium"
+
+    def test_adapt_difficulty_streak_reset_breaks_consecutive(self):
+        """Opposite outcome in trailing logs must break the streak."""
+        n = _adaptive_streak_threshold()
+
+        class FakeLog:
+            def __init__(self, correct):
+                self.is_correct = correct
+
+        # Newest-first: N-1 successes then a failure → success streak < N
+        logs = [FakeLog(True) for _ in range(n - 1)] + [
+            FakeLog(False)
+        ] + [FakeLog(True) for _ in range(n)]
+        adapted = ChallengeService.adapt_difficulty("medium", logs)
+        assert adapted["success_streak"] == n - 1
+        assert adapted["failure_streak"] == 0
+        assert adapted["adjustment"] == 0
+
+    def test_adapt_difficulty_stored_counters_override_logs(self):
+        """Explicit streak counters take precedence over log derivation."""
+        n = _adaptive_streak_threshold()
+
+        class FakeLog:
+            def __init__(self, correct):
+                self.is_correct = correct
+
+        # Logs alone would raise; stored counters say not yet.
+        logs = [FakeLog(True) for _ in range(n)]
+        adapted = ChallengeService.adapt_difficulty(
+            "medium",
+            logs,
+            success_streak=2,
+            failure_streak=0,
+        )
+        assert adapted["adjustment"] == 0
+        assert adapted["success_streak"] == 2
+
+    def test_adapt_difficulty_edge_ceiling_and_floor(self):
+        """At expert/beginner the level clamps even when streak hits N."""
+        n = _adaptive_streak_threshold()
+
+        at_top = ChallengeService.adapt_difficulty(
+            "expert",
+            success_streak=n,
+            failure_streak=0,
+        )
+        assert at_top["difficulty"] == "expert"
+        assert at_top["adjustment"] == 0
+
+        at_bottom = ChallengeService.adapt_difficulty(
+            "beginner",
+            success_streak=0,
+            failure_streak=n,
+        )
+        assert at_bottom["difficulty"] == "beginner"
+        assert at_bottom["adjustment"] == 0
+
+    def test_compute_trailing_streaks_empty_and_mixed(self):
+        """Trailing streak helper covers empty and mixed edge cases."""
+        class FakeLog:
+            def __init__(self, correct):
+                self.is_correct = correct
+
+        empty = ChallengeService.compute_trailing_streaks([])
+        assert empty == {"success_streak": 0, "failure_streak": 0}
+
+        mixed = ChallengeService.compute_trailing_streaks(
+            [FakeLog(False), FakeLog(False), FakeLog(True)]
+        )
+        assert mixed == {"success_streak": 0, "failure_streak": 2}
 
     def test_analyze_completion_returns_recommendations(self):
         """Analysis should include summary, insights, and recommendations."""
@@ -630,6 +724,126 @@ class TestVerifyChallengeEndpoint:
         assert data["status"] == "dismissed"
         assert data["wake_confirmed"] is True
         assert "wakefulness" in data
+
+    def test_verify_updates_adaptive_streak_and_persists_on_threshold(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """N consecutive full wake dismissals should raise and persist difficulty."""
+        from app.models.profile import DifficultyPreference, UserProfile
+
+        alarm_id = self._create_alarm(client, auth_headers, challenge_count=1)
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+
+        for _ in range(_adaptive_streak_threshold()):
+            ch = client.get(
+                f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+            ).json()
+            answer = _session_answer(db_session, test_user.id, alarm_id)
+            res = client.post(
+                f"/api/v1/alarms/{alarm_id}/verify",
+                json={
+                    "user_answer": answer,
+                    "time_taken_seconds": 5,
+                    "challenge_prompt": ch["prompt"],
+                    "challenge_difficulty": ch["difficulty"],
+                },
+                headers=auth_headers,
+            )
+            assert res.status_code == 200
+            assert res.json()["is_dismissed"] is True
+
+        db_session.refresh(profile)
+        assert profile.difficulty_preference == DifficultyPreference.HARD
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 0
+
+        # Opposite outcome resets success streak and starts failure streak.
+        profile.consecutive_success_streak = 3
+        profile.consecutive_failure_streak = 0
+        db_session.commit()
+
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        bad = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": "definitely_wrong_answer_xyz",
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
+        assert bad.status_code == 400
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 1
+
+    def test_multi_step_intermediate_correct_skips_adaptive_success(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Mid multi-step corrects must not increment adaptive success streak."""
+        from app.models.profile import UserProfile
+
+        alarm_id = self._create_alarm(client, auth_headers, challenge_count=3)
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        assert profile.consecutive_success_streak == 0
+
+        # Complete first of three steps — progress only, not a wake dismissal.
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        step = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
+        assert step.status_code == 200
+        assert step.json()["status"] == "step_complete"
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 0
+
+        # Finish remaining steps → one adaptive success for the full wake.
+        for _ in range(2):
+            ch = client.get(
+                f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+            ).json()
+            answer = _session_answer(db_session, test_user.id, alarm_id)
+            res = client.post(
+                f"/api/v1/alarms/{alarm_id}/verify",
+                json={
+                    "user_answer": answer,
+                    "time_taken_seconds": 5,
+                    "challenge_prompt": ch["prompt"],
+                    "challenge_difficulty": ch["difficulty"],
+                },
+                headers=auth_headers,
+            )
+            assert res.status_code == 200
+
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 1
+        assert profile.consecutive_failure_streak == 0
 
     def test_verify_incorrect_answer_returns_400(
         self, client, test_user, auth_headers, db_session
