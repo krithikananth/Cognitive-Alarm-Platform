@@ -63,6 +63,32 @@ def create_refresh_token(data: Dict[str, Any]) -> str:
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_password_reset_token(user_id: int) -> str:
+    """Create a short-lived JWT used exclusively for password reset."""
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+    )
+    to_encode = {
+        "sub": str(user_id),
+        "type": "password_reset",
+        "exp": expire,
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_email_verification_token(user_id: int) -> str:
+    """Create a short-lived JWT used exclusively for email verification."""
+    expire = datetime.now(timezone.utc) + timedelta(
+        hours=settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS
+    )
+    to_encode = {
+        "sub": str(user_id),
+        "type": "email_verification",
+        "exp": expire,
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
 def verify_token(token: str) -> Dict[str, Any]:
     """
     Decode and verify a JWT token.

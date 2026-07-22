@@ -260,8 +260,8 @@ def test_derive_inputs_snooze_exhausted_resets_streak():
     assert inputs["streak_days"] == 1
 
 
-def test_derive_inputs_mid_cycle_snooze_leaves_streak_unchanged():
-    """BUG-005: partial snoozes still count toward totals but not streak."""
+def test_derive_inputs_mid_cycle_snooze_breaks_streak():
+    """BUG-005: mid-cycle snoozes reset streak and apply a mild penalty."""
     events = [
         {
             "verified": True,
@@ -277,8 +277,9 @@ def test_derive_inputs_mid_cycle_snooze_leaves_streak_unchanged():
     inputs = derive_habit_score_inputs_from_events(events)
     assert inputs["total_alarms_dismissed"] == 2
     assert inputs["total_snoozes"] == 2
-    assert inputs["wake_up_consistency_score"] == 5.0
-    assert inputs["streak_days"] == 1
+    # +5 then −5 mid-cycle penalty
+    assert inputs["wake_up_consistency_score"] == 0.0
+    assert inputs["streak_days"] == 0
 
 
 def test_derive_ignores_unverified_events():

@@ -22,7 +22,7 @@ This approach gives us:
 ```mermaid
 graph TB
     subgraph Client["🖥️ Client Layer"]
-        WEB["Next.js Web App"]
+        WEB["React SPA (CRA)"]
         MOBILE["Mobile App (Future)"]
     end
 
@@ -39,13 +39,14 @@ graph TB
         ALARM["⏰ Alarm Service"]
         CHALLENGE["🧩 Challenge Engine"]
         ANALYTICS["📊 Analytics Engine"]
+        RECS["💡 Recommendations"]
         NOTIFICATION["🔔 Notification Service"]
     end
 
     subgraph Data["💾 Data Layer"]
         ORM["SQLAlchemy ORM"]
         ALEMBIC["Alembic Migrations"]
-        CACHE["Redis Cache (Future)"]
+        CACHE["Redis Cache"]
     end
 
     subgraph Storage["🗄️ Storage"]
@@ -63,12 +64,15 @@ graph TB
     FASTAPI --> ALARM
     FASTAPI --> CHALLENGE
     FASTAPI --> ANALYTICS
+    FASTAPI --> RECS
     FASTAPI --> NOTIFICATION
     AUTH --> ORM
     USER --> ORM
     ALARM --> ORM
     CHALLENGE --> ORM
     ANALYTICS --> ORM
+    RECS --> ORM
+    RECS --> CACHE
     ORM --> POSTGRES
     ORM --> SQLITE
     ALEMBIC --> POSTGRES
@@ -124,23 +128,24 @@ Core alarm management functionality:
 - Alarm-to-challenge linking
 - Timezone-aware scheduling
 
-### 3.5 Challenge Engine *(Milestone 3)*
+### 3.5 Challenge Engine *(Milestone 3 — Implemented)*
 
 Cognitive challenge generation and evaluation:
 
-- Multiple challenge types (math, memory, pattern, word)
-- Difficulty scaling based on user performance
-- Challenge attempt tracking and scoring
-- Adaptive difficulty algorithms
+- Multiple challenge types (math, logic, memory, pattern, word, riddle, quiz)
+- Per-alarm and profile difficulty preference (`beginner` → `expert`)
+- Attempt logging via `alarm_challenge_logs` (queryable + `/alarms/challenge/log-health` audit)
+- Rule-based adaptive difficulty: raise after N consecutive successes, lower after N consecutive failures (±1 around baseline)
 
-### 3.6 Analytics Engine *(Milestone 4)*
+### 3.6 Analytics, Habit Score & Recommendations *(Milestone 3 — Implemented)*
 
-Sleep and performance analytics:
+Behavioral analytics and coaching (rule-based; deeper ML personalization remains later):
 
-- Wake-up time tracking and trends
-- Challenge performance metrics
-- Sleep pattern analysis
-- Personalized insights and recommendations
+- Analytics ingestion: `POST /analytics/events` (+ batch) and summary reads
+- Behavioral analytics (pandas/numpy): snooze patterns, wake consistency, sleep adherence, trends
+- Weighted habit score SSOT (35% wake consistency / 25% challenge completion / 20% snooze reduction / 20% sleep adherence)
+- Recommendation engine: sleep / wake / habit / productivity suggestions (`GET /recommendations*`)
+- Redis cache for recommendation results (TTL + invalidation on preference changes)
 
 ### 3.7 Notification Service *(Milestone 6)*
 

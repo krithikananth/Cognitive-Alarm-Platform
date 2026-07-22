@@ -1,8 +1,8 @@
 """
 Authentication API endpoints.
 
-Provides user registration, login, token refresh, Google OAuth2, and
-current-user retrieval.
+Provides user registration, login, token refresh, Google OAuth2,
+password reset, email verification, and current-user retrieval.
 """
 
 from urllib.parse import urlencode
@@ -24,6 +24,13 @@ from app.core.security import (
 from app.db.session import get_db
 from app.models.profile import DifficultyPreference, UserProfile
 from app.models.user import User, UserRole
+from app.schemas.auth import (
+    ForgotPasswordRequest,
+    MessageResponse,
+    ResendVerificationRequest,
+    ResetPasswordRequest,
+    VerifyEmailRequest,
+)
 from app.schemas.token import Token
 from app.schemas.user import UserCreate, UserLogin, UserResponse, UserUpdate
 from app.services.auth_service import AuthService
@@ -87,7 +94,62 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
+    # Best-effort verification email — registration still succeeds if mail fails.
+    AuthService.send_verification_email(user)
+
     return user
+
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    summary="Request a password reset email",
+)
+def forgot_password(body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Send a password-reset link when the email matches an active account.
+
+    Always returns a generic success message to prevent email enumeration.
+    """
+    message = AuthService.request_password_reset(db, body.email)
+    return MessageResponse(message=message)
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    summary="Reset password with a one-time token",
+)
+def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Validate the reset JWT and update the account password."""
+    message = AuthService.reset_password(db, body.token, body.new_password)
+    return MessageResponse(message=message)
+
+
+@router.post(
+    "/verify-email",
+    response_model=MessageResponse,
+    summary="Verify email with a one-time token",
+)
+def verify_email(body: VerifyEmailRequest, db: Session = Depends(get_db)):
+    """Validate the verification JWT and mark the account as verified."""
+    message = AuthService.verify_email(db, body.token)
+    return MessageResponse(message=message)
+
+
+@router.post(
+    "/resend-verification",
+    response_model=MessageResponse,
+    summary="Resend email verification link",
+)
+def resend_verification(
+    body: ResendVerificationRequest, db: Session = Depends(get_db)
+):
+    """Resend a verification email for an unverified account.
+
+    Always returns a generic success message to prevent email enumeration.
+    """
+    message = AuthService.resend_verification_email(db, body.email)
+    return MessageResponse(message=message)
 
 
 def _authenticate_active_user(

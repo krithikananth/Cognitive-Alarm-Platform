@@ -24,13 +24,22 @@ class Settings(BaseSettings):
         ALGORITHM: JWT signing algorithm (HS256).
         ACCESS_TOKEN_EXPIRE_MINUTES: Lifetime of access tokens in minutes.
         REFRESH_TOKEN_EXPIRE_DAYS: Lifetime of refresh tokens in days.
+        PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: Lifetime of password-reset JWTs.
+        EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: Lifetime of email-verification JWTs.
         DATABASE_URL: SQLAlchemy database connection string.
         REDIS_ENABLED: Whether recommendation caching via Redis is attempted.
         REDIS_URL: Redis connection URL (e.g. redis://localhost:6379/0).
         REDIS_SOCKET_TIMEOUT_SECONDS: Short connect/read timeout for soft-fail.
         RECOMMENDATION_CACHE_TTL_SECONDS: Safety TTL for cached recommendation payloads.
         CORS_ORIGINS: List of allowed CORS origins for cross-origin requests.
-        FRONTEND_URL: SPA origin used for OAuth callback redirects.
+        FRONTEND_URL: SPA origin used for OAuth and email-link redirects.
+        SMTP_HOST: SMTP server hostname (optional; emails logged when unset).
+        SMTP_PORT: SMTP server port.
+        SMTP_USER: SMTP username.
+        SMTP_PASSWORD: SMTP password.
+        SMTP_FROM_EMAIL: From address for outbound mail.
+        SMTP_FROM_NAME: Display name for outbound mail.
+        SMTP_USE_TLS: Whether to issue STARTTLS after connecting.
         OAUTH2_GOOGLE_CLIENT_ID: Google OAuth2 client ID for social login.
         OAUTH2_GOOGLE_CLIENT_SECRET: Google OAuth2 client secret for social login.
         OAUTH2_GOOGLE_REDIRECT_URI: Backend callback URL registered with Google.
@@ -53,6 +62,8 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
 
     # ── Database ──────────────────────────────────────────────────────
     DATABASE_URL: str = "sqlite:///./icap.db"
@@ -94,6 +105,15 @@ class Settings(BaseSettings):
 
     # ── Frontend ──────────────────────────────────────────────────────
     FRONTEND_URL: str = "http://localhost:3000"
+
+    # ── Email / SMTP (optional — links are logged when unset) ─────────
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    SMTP_FROM_EMAIL: Optional[str] = None
+    SMTP_FROM_NAME: str = "Intelligent Cognitive Alarm"
+    SMTP_USE_TLS: bool = True
 
     # ── External APIs ─────────────────────────────────────────────────
     OAUTH2_GOOGLE_CLIENT_ID: Optional[str] = None

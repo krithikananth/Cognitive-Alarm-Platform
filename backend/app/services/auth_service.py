@@ -2,23 +2,44 @@
 Authentication service layer.
 
 Encapsulates registration, login, token creation / refresh, OAuth account
-linking, and user look-up logic, keeping endpoint handlers thin.
+linking, password reset, email verification, and user look-up logic,
+keeping endpoint handlers thin.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.security import create_access_token, create_refresh_token, verify_token
+from app.core.config import settings
+from app.core.security import (
+    create_access_token,
+    create_email_verification_token,
+    create_password_reset_token,
+    create_refresh_token,
+    verify_token,
+)
 from app.models.profile import DifficultyPreference, UserProfile
 from app.models.user import User, UserRole
 from app.schemas.user import UserCreate
+from app.services.email_service import EmailService
 from app.utils.hashing import get_password_hash, verify_password
+
+logger = logging.getLogger(__name__)
+
+# Generic responses — never reveal whether an email exists on the system.
+_FORGOT_PASSWORD_MESSAGE = (
+    "If an account with that email exists, a password reset link has been sent."
+)
+_RESEND_VERIFICATION_MESSAGE = (
+    "If an unverified account with that email exists, a verification link has been sent."
+)
 
 
 class AuthService:
@@ -73,6 +94,7 @@ class AuthService:
         db.commit()
         db.refresh(new_user)
 
+        AuthService.send_verification_email(new_user)
         return new_user
 
     @staticmethod
@@ -148,6 +170,134 @@ class AuthService:
     def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
         """Look up a user by primary key."""
         return db.query(User).filter(User.id == user_id).first()
+
+    @staticmethod
+    def _frontend_url(path: str, **query: str) -> str:
+        """Build an absolute SPA URL with optional query parameters."""
+        base = settings.FRONTEND_URL.rstrip("/")
+        suffix = path if path.startswith("/") else f"/{path}"
+        url = f"{base}{suffix}"
+        if query:
+            url = f"{url}?{urlencode(query)}"
+        return url
+
+    @staticmethod
+    def send_verification_email(user: User) -> None:
+        """Issue a verification JWT and email the link (best-effort)."""
+        if user.is_verified:
+            return
+        token = create_email_verification_token(user.id)
+        verify_url = AuthService._frontend_url("/verify-email", token=token)
+        try:
+            EmailService.send_verification_email(
+                to_email=user.email, verify_url=verify_url
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send verification email to user_id=%s", user.id
+            )
+
+    @staticmethod
+    def request_password_reset(db: Session, email: str) -> str:
+        """
+        Start a password-reset flow.
+
+        Always returns the same generic message to avoid email enumeration.
+        """
+        user = AuthService.get_user_by_email(db, email)
+        if user is not None and user.is_active:
+            token = create_password_reset_token(user.id)
+            reset_url = AuthService._frontend_url("/reset-password", token=token)
+            try:
+                EmailService.send_password_reset_email(
+                    to_email=user.email, reset_url=reset_url
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send password-reset email to user_id=%s", user.id
+                )
+        return _FORGOT_PASSWORD_MESSAGE
+
+    @staticmethod
+    def reset_password(db: Session, token: str, new_password: str) -> str:
+        """Validate a reset JWT and update the user's password hash."""
+        try:
+            payload = verify_token(token)
+        except HTTPException:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired password reset token",
+            )
+
+        if payload.get("type") != "password_reset":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired password reset token",
+            )
+
+        user_id = payload.get("sub")
+        try:
+            user = AuthService.get_user_by_id(db, int(user_id))
+        except (TypeError, ValueError):
+            user = None
+
+        if user is None or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired password reset token",
+            )
+
+        user.hashed_password = get_password_hash(new_password)
+        db.commit()
+        return "Password has been reset successfully. You can now sign in."
+
+    @staticmethod
+    def verify_email(db: Session, token: str) -> str:
+        """Validate a verification JWT and mark the user as verified."""
+        try:
+            payload = verify_token(token)
+        except HTTPException:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired email verification token",
+            )
+
+        if payload.get("type") != "email_verification":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired email verification token",
+            )
+
+        user_id = payload.get("sub")
+        try:
+            user = AuthService.get_user_by_id(db, int(user_id))
+        except (TypeError, ValueError):
+            user = None
+
+        if user is None or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired email verification token",
+            )
+
+        if not user.is_verified:
+            user.is_verified = True
+            db.commit()
+            db.refresh(user)
+
+        return "Email verified successfully. You can now sign in."
+
+    @staticmethod
+    def resend_verification_email(db: Session, email: str) -> str:
+        """
+        Resend a verification email when the account is unverified.
+
+        Always returns the same generic message to avoid email enumeration.
+        """
+        user = AuthService.get_user_by_email(db, email)
+        if user is not None and user.is_active and not user.is_verified:
+            AuthService.send_verification_email(user)
+        return _RESEND_VERIFICATION_MESSAGE
 
     @staticmethod
     def _unique_username(db: Session, email: str) -> str:

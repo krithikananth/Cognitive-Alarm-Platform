@@ -52,6 +52,7 @@ _NEUTRAL_COMPONENT_SCORE = 50.0
 
 # Consistency deltas applied on verified dismiss (mirrors alarms.py)
 _CONSISTENCY_CLEAN_WAKE_DELTA = 5.0
+_CONSISTENCY_MID_CYCLE_SNOOZE_DELTA = 5.0
 _CONSISTENCY_SNOOZE_EXHAUSTED_DELTA = 10.0
 
 
@@ -128,8 +129,8 @@ def derive_habit_score_inputs_from_events(
     - every verified wake increments ``total_alarms_dismissed``
     - ``snooze_count_at_dismiss`` is summed into ``total_snoozes``
     - clean wake (0 snoozes): streak +1, consistency +5 (cap 100)
+    - mid-cycle snoozes (1..limit-1): streak reset, consistency −5 (floor 0)
     - snooze-exhausted: streak reset, consistency −10 (floor 0)
-    - mid-cycle snoozes: streak/consistency unchanged
 
     When wake events carry puzzle step snapshots (``challenges_completed`` /
     ``failed_attempts``), also derive ``total_puzzle_*`` so challenge
@@ -164,6 +165,13 @@ def derive_habit_score_inputs_from_events(
             streak_days = 0
             consistency = max(
                 0.0, consistency - _CONSISTENCY_SNOOZE_EXHAUSTED_DELTA
+            )
+        else:
+            # Mid-cycle snoozes: still count toward totals, break streak,
+            # and apply a milder consistency penalty than limit-exhaustion.
+            streak_days = 0
+            consistency = max(
+                0.0, consistency - _CONSISTENCY_MID_CYCLE_SNOOZE_DELTA
             )
 
     inputs: Dict[str, Any] = {

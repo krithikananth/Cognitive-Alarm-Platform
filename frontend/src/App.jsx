@@ -9,6 +9,9 @@ import useAuthStore from './store/authStore';
 // Pages
 import Login from './pages/Login';
 import Register from './pages/Register';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import VerifyEmail from './pages/VerifyEmail';
 import OAuthCallback from './pages/OAuthCallback';
 import Dashboard from './pages/Dashboard';
 import AlarmManager from './pages/AlarmManager';
@@ -156,6 +159,9 @@ function App() {
         {/* Guest Routes */}
         <Route path="/login" element={<GuestRoute><Login /></GuestRoute>} />
         <Route path="/register" element={<GuestRoute><Register /></GuestRoute>} />
+        <Route path="/forgot-password" element={<GuestRoute><ForgotPassword /></GuestRoute>} />
+        <Route path="/reset-password" element={<GuestRoute><ResetPassword /></GuestRoute>} />
+        <Route path="/verify-email" element={<VerifyEmail />} />
         <Route path="/oauth/callback" element={<OAuthCallback />} />
 
         {/* Protected Routes (inside Layout) */}

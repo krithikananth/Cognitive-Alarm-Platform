@@ -34,7 +34,11 @@ api.interceptors.response.use(
       !originalRequest._retry &&
       !originalRequest.url.includes('/auth/login') &&
       !originalRequest.url.includes('/auth/register') &&
-      !originalRequest.url.includes('/auth/oauth/')
+      !originalRequest.url.includes('/auth/oauth/') &&
+      !originalRequest.url.includes('/auth/forgot-password') &&
+      !originalRequest.url.includes('/auth/reset-password') &&
+      !originalRequest.url.includes('/auth/verify-email') &&
+      !originalRequest.url.includes('/auth/resend-verification')
     ) {
       originalRequest._retry = true;
 
@@ -72,6 +76,10 @@ export const authAPI = {
   refresh: (refreshToken) => api.post('/auth/refresh', { refresh_token: refreshToken }),
   logout: () => api.post('/auth/logout'),
   me: () => api.get('/auth/me'),
+  forgotPassword: (data) => api.post('/auth/forgot-password', data),
+  resetPassword: (data) => api.post('/auth/reset-password', data),
+  verifyEmail: (data) => api.post('/auth/verify-email', data),
+  resendVerification: (data) => api.post('/auth/resend-verification', data),
   /** Full-page redirect into the Google OAuth2 authorization flow. */
   googleLoginUrl: () => `${API_BASE}/auth/oauth/google`,
 };

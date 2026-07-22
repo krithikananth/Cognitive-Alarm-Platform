@@ -24,7 +24,7 @@ export default function Register() {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
     if (result.success) {
-      toast.success('Account created! Please log in.');
+      toast.success('Account created! Check your email to verify, then log in.');
       navigate('/login');
     } else {
       toast.error(result.error);
@@ -160,6 +160,10 @@ export default function Register() {
           Already have an account?{' '}
           <Link to="/login" className="text-primary-400 hover:text-primary-300 font-medium transition">
             Sign in
+          </Link>
+          <span className="mx-2 text-slate-600">·</span>
+          <Link to="/verify-email" className="text-primary-400 hover:text-primary-300 font-medium transition">
+            Verify email
           </Link>
         </p>
       </motion.div>

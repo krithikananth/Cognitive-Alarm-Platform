@@ -25,6 +25,7 @@ from app.services.attempt_log_service import AttemptLogService
 from app.services.analytics_ingestion_service import AnalyticsIngestionService
 from app.services.recommendation_cache import RecommendationCache
 from app.services.profile_service import ProfileService
+from app.services.adaptive_scheduling_service import AdaptiveSchedulingService
 from app.schemas.alarm import (
     AlarmCreate,
     AlarmUpdate,
@@ -128,7 +129,11 @@ def create_alarm(
 
     user_tz = _user_timezone(db, current_user.id)
     alarm.next_trigger_at = _calculate_next_trigger(
-        alarm, user_tz=user_tz, one_time_date=alarm_data.one_time_date
+        alarm,
+        user_tz=user_tz,
+        one_time_date=alarm_data.one_time_date,
+        db=db,
+        user_id=current_user.id,
     )
 
     db.add(alarm)
@@ -426,7 +431,11 @@ def update_alarm(
     if "alarm_time" in update_data or "alarm_type" in update_data or one_time_date is not None:
         user_tz = _user_timezone(db, current_user.id)
         alarm.next_trigger_at = _calculate_next_trigger(
-            alarm, user_tz=user_tz, one_time_date=one_time_date
+            alarm,
+            user_tz=user_tz,
+            one_time_date=one_time_date,
+            db=db,
+            user_id=current_user.id,
         )
 
     db.commit()
@@ -501,7 +510,9 @@ def toggle_alarm(
     alarm.is_active = toggle_data.is_active
     if toggle_data.is_active:
         user_tz = _user_timezone(db, current_user.id)
-        alarm.next_trigger_at = _calculate_next_trigger(alarm, user_tz=user_tz)
+        alarm.next_trigger_at = _calculate_next_trigger(
+            alarm, user_tz=user_tz, db=db, user_id=current_user.id
+        )
 
     db.commit()
     db.refresh(alarm)
@@ -1004,7 +1015,9 @@ def _dismiss_alarm_internal(
         alarm.is_active = False
         alarm.next_trigger_at = None
     else:
-        alarm.next_trigger_at = _calculate_next_trigger(alarm, user_tz=user_tz)
+        alarm.next_trigger_at = _calculate_next_trigger(
+            alarm, user_tz=user_tz, db=db, user_id=current_user.id
+        )
 
     consecutive = int((verification or {}).get("consecutive_correct") or alarm.challenge_count or 1)
     required = int((verification or {}).get("required_correct") or alarm.challenge_count or 1)
@@ -1068,10 +1081,20 @@ def _dismiss_alarm_internal(
             current_user.profile.wake_up_consistency_score = min(
                 100.0, current_user.profile.wake_up_consistency_score + 5.0
             )
-        elif alarm.total_snoozes >= alarm.snooze_limit:
+        elif (
+            alarm.snooze_limit > 0
+            and alarm.total_snoozes >= alarm.snooze_limit
+        ):
+            # Hit the snooze ceiling this cycle.
             current_user.profile.streak_days = 0
             current_user.profile.wake_up_consistency_score = max(
                 0.0, current_user.profile.wake_up_consistency_score - 10.0
+            )
+        elif alarm.total_snoozes > 0:
+            # Mid-cycle snoozes (1..limit-1): break streak + milder penalty.
+            current_user.profile.streak_days = 0
+            current_user.profile.wake_up_consistency_score = max(
+                0.0, current_user.profile.wake_up_consistency_score - 5.0
             )
 
         current_user.profile.total_snoozes += alarm.total_snoozes
@@ -1411,11 +1434,17 @@ def _calculate_next_trigger(
     alarm: Alarm,
     user_tz: str = "UTC",
     one_time_date: Optional[date] = None,
+    db: Optional[Session] = None,
+    user_id: Optional[int] = None,
 ) -> Optional[datetime]:
     """Calculate the next trigger datetime for an alarm in UTC.
 
     ``alarm.alarm_time`` is interpreted as wall-clock time in the user's
     local timezone, then converted to UTC for storage/comparison.
+
+    Smart Adaptive alarms optionally use ``db`` / ``user_id`` to shift the
+    ring time from habit, snooze, wake-consistency, and sleep-schedule signals.
+    Other alarm types ignore those arguments and keep fixed schedules.
     """
     tz = _resolve_timezone(user_tz)
     now_utc = datetime.now(timezone.utc)
@@ -1457,6 +1486,12 @@ def _calculate_next_trigger(
         return _to_utc_naive(local_dt + timedelta(days=1))
 
     if alarm.alarm_type == AlarmType.SMART_ADAPTIVE:
+        if db is not None and user_id is not None:
+            adapted_local = AdaptiveSchedulingService.compute_next_local_trigger(
+                db, user_id, alarm, now_local, tz
+            )
+            return _to_utc_naive(adapted_local)
+        # Fallback when called without DB context — same as daily at alarm_time
         if local_dt > now_local:
             return _to_utc_naive(local_dt)
         return _to_utc_naive(local_dt + timedelta(days=1))

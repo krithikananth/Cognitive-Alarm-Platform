@@ -425,3 +425,169 @@ class TestGoogleOAuth:
         assert response.headers["location"].startswith(
             "http://localhost:3000/login?error="
         )
+
+
+class TestPasswordReset:
+    """Tests for forgot-password and reset-password flows."""
+
+    def test_forgot_password_unknown_email_still_ok(self, client):
+        """Unknown emails get a generic 200 to avoid enumeration."""
+        response = client.post(
+            "/api/v1/auth/forgot-password",
+            json={"email": "nobody@example.com"},
+        )
+        assert response.status_code == 200
+        assert "message" in response.json()
+
+    def test_forgot_and_reset_password_success(self, client, test_user, db_session):
+        """A valid reset token allows changing the password and logging in."""
+        from app.core.security import create_password_reset_token
+        from app.utils.hashing import verify_password
+
+        forgot = client.post(
+            "/api/v1/auth/forgot-password",
+            json={"email": test_user.email},
+        )
+        assert forgot.status_code == 200
+
+        token = create_password_reset_token(test_user.id)
+        reset = client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": token, "new_password": "NewPass456"},
+        )
+        assert reset.status_code == 200
+        assert "reset successfully" in reset.json()["message"].lower()
+
+        db_session.refresh(test_user)
+        assert verify_password("NewPass456", test_user.hashed_password)
+
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": test_user.email, "password": "NewPass456"},
+        )
+        assert login.status_code == 200
+        assert "access_token" in login.json()
+
+    def test_reset_password_rejects_access_token(self, client, test_user, auth_headers):
+        """Access tokens must not be usable as password-reset tokens."""
+        access = auth_headers["Authorization"].split(" ", 1)[1]
+        response = client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": access, "new_password": "NewPass456"},
+        )
+        assert response.status_code == 400
+
+    def test_reset_password_rejects_weak_password(self, client, test_user):
+        """Reset still enforces password complexity rules."""
+        from app.core.security import create_password_reset_token
+
+        token = create_password_reset_token(test_user.id)
+        response = client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": token, "new_password": "weak"},
+        )
+        assert response.status_code == 422
+
+    def test_reset_password_rejects_invalid_token(self, client):
+        """Garbage tokens are rejected with 400."""
+        response = client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": "not-a-jwt", "new_password": "NewPass456"},
+        )
+        assert response.status_code == 400
+
+
+class TestEmailVerification:
+    """Tests for verify-email and resend-verification flows."""
+
+    def test_verify_email_success(self, client, db_session):
+        """A valid verification token flips is_verified to True."""
+        from app.core.security import create_email_verification_token
+        from app.models.user import User, UserRole
+        from app.utils.hashing import get_password_hash
+
+        user = User(
+            email="unverified@example.com",
+            username="unverified",
+            hashed_password=get_password_hash("TestPass123"),
+            full_name="Unverified User",
+            role=UserRole.USER,
+            is_active=True,
+            is_verified=False,
+        )
+        db_session.add(user)
+        db_session.commit()
+        db_session.refresh(user)
+
+        token = create_email_verification_token(user.id)
+        response = client.post(
+            "/api/v1/auth/verify-email",
+            json={"token": token},
+        )
+        assert response.status_code == 200
+        assert "verified" in response.json()["message"].lower()
+
+        db_session.refresh(user)
+        assert user.is_verified is True
+
+    def test_verify_email_idempotent(self, client, test_user):
+        """Re-verifying an already-verified user still returns success."""
+        from app.core.security import create_email_verification_token
+
+        token = create_email_verification_token(test_user.id)
+        response = client.post(
+            "/api/v1/auth/verify-email",
+            json={"token": token},
+        )
+        assert response.status_code == 200
+
+    def test_verify_email_rejects_wrong_token_type(self, client, test_user):
+        """Password-reset tokens cannot verify email."""
+        from app.core.security import create_password_reset_token
+
+        token = create_password_reset_token(test_user.id)
+        response = client.post(
+            "/api/v1/auth/verify-email",
+            json={"token": token},
+        )
+        assert response.status_code == 400
+
+    def test_resend_verification_generic_response(self, client, db_session):
+        """Resend always returns the same style of message."""
+        from app.models.user import User, UserRole
+        from app.utils.hashing import get_password_hash
+
+        user = User(
+            email="needsverify@example.com",
+            username="needsverify",
+            hashed_password=get_password_hash("TestPass123"),
+            role=UserRole.USER,
+            is_active=True,
+            is_verified=False,
+        )
+        db_session.add(user)
+        db_session.commit()
+
+        known = client.post(
+            "/api/v1/auth/resend-verification",
+            json={"email": "needsverify@example.com"},
+        )
+        unknown = client.post(
+            "/api/v1/auth/resend-verification",
+            json={"email": "missing@example.com"},
+        )
+        assert known.status_code == 200
+        assert unknown.status_code == 200
+        assert known.json()["message"] == unknown.json()["message"]
+
+    def test_register_leaves_user_unverified(self, client):
+        """New registrations start unverified (verification email is best-effort)."""
+        payload = {
+            "email": "freshverify@example.com",
+            "username": "freshverify",
+            "password": "StrongPass1",
+            "full_name": "Fresh Verify",
+        }
+        response = client.post("/api/v1/auth/register", json=payload)
+        assert response.status_code == 201
+        assert response.json()["is_verified"] is False

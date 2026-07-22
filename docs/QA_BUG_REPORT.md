@@ -14,7 +14,7 @@
 | Critical | 0 | — |
 | High | 0 | — |
 | Medium | 0 | BUG-001 / BUG-002 resolved |
-| Low | 1 | BUG-005 mid-cycle snooze streak edge case (product intent) |
+| Low | 0 | BUG-005 fixed (mid-cycle snooze streak/consistency) |
 | Info | 2 | Dual profile APIs; SPA unused focused analytics endpoints |
 
 No calculation defects in Habit Score SSOT or behavioral analytics formulas after rounding fix.
@@ -43,13 +43,15 @@ Documented in `habit_score.py`: component is verified-dismiss share of (dismisse
 
 Password login and `/` home redirect now send `role === 'admin'` to `/admin` (aligned with OAuth callback).
 
+### BUG-005 — Mid-cycle snoozes ignored for streak/consistency → Fixed
+
+On verified dismiss, mid-cycle snoozes (`1 .. snooze_limit-1`) now reset `streak_days` and apply a milder consistency penalty (−5). Clean wakes still +5 / streak++; snooze-exhausted still −10 / streak reset. Mirrored in `habit_score.derive_habit_score_inputs_from_events` and `alarms.py` dismiss path.
+
 ---
 
 ## Open (accepted for demo)
 
-### BUG-005 — Mid-cycle snoozes do not change streak/consistency (Low)
-
-On verified dismiss: streak/consistency update only if `total_snoozes == 0` (+5, streak++) or `>= snooze_limit` (−10, streak reset). Partial snoozes leave both unchanged while still adding to `total_snoozes`. Treated as intentional product behavior for now.
+None.
 
 ---
 

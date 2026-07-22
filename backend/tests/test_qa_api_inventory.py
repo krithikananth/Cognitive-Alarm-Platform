@@ -25,10 +25,11 @@ EXPECTED_AUTHENTICATED_GETS = [
     "/api/v1/analytics/events",
 ]
 
-# Password reset is intentionally not shipped (Login shows "not available yet")
-UNIMPLEMENTED_AUTH_ROUTES = [
+PASSWORD_RESET_AND_VERIFY_ROUTES = [
     ("POST", "/api/v1/auth/forgot-password"),
     ("POST", "/api/v1/auth/reset-password"),
+    ("POST", "/api/v1/auth/verify-email"),
+    ("POST", "/api/v1/auth/resend-verification"),
 ]
 
 
@@ -163,21 +164,35 @@ class TestQaApiInventory:
         assert "productivity_goals" in body
         assert isinstance(body["preferred_challenge_types"], list)
 
-    def test_password_reset_routes_not_implemented(self, client):
-        """Password reset is deferred; Login UI shows a not-available toast."""
-        forgot = client.post(
-            "/api/v1/auth/forgot-password", json={"email": "a@b.com"}
-        )
-        assert forgot.status_code in (404, 405)
-
-        reset = client.post(
-            "/api/v1/auth/reset-password",
-            json={"token": "x", "new_password": "Password1!"},
-        )
-        assert reset.status_code in (404, 405)
-
+    def test_password_reset_and_verify_routes_implemented(self, client):
+        """Password reset and email verification routes are registered."""
         from app.main import app
 
         registered = _route_set(app)
-        for method, path in UNIMPLEMENTED_AUTH_ROUTES:
-            assert (method, path) not in registered
+        for method, path in PASSWORD_RESET_AND_VERIFY_ROUTES:
+            assert (method, path) in registered
+
+        forgot = client.post(
+            "/api/v1/auth/forgot-password", json={"email": "a@b.com"}
+        )
+        assert forgot.status_code == 200
+        assert "message" in forgot.json()
+
+        reset = client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": "x", "new_password": "Password1"},
+        )
+        assert reset.status_code == 400
+
+        verify = client.post(
+            "/api/v1/auth/verify-email",
+            json={"token": "x"},
+        )
+        assert verify.status_code == 400
+
+        resend = client.post(
+            "/api/v1/auth/resend-verification",
+            json={"email": "a@b.com"},
+        )
+        assert resend.status_code == 200
+        assert "message" in resend.json()
