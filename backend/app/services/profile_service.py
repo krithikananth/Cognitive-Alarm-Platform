@@ -46,8 +46,11 @@ class ProfileService:
             sleep_duration_hours=8.0,
             timezone="UTC",
             difficulty_preference=DifficultyPreference.MEDIUM,
+            adapted_difficulty=DifficultyPreference.MEDIUM,
             consecutive_success_streak=0,
             consecutive_failure_streak=0,
+            last_adapted_success_streak=0,
+            last_adapted_failure_streak=0,
         )
         db.add(profile)
         db.commit()
@@ -151,6 +154,10 @@ class ProfileService:
             user_id=user_id,
             **data.model_dump(exclude_unset=True),
         )
+        # Adaptive working level always starts at the user preference.
+        profile.adapted_difficulty = (
+            profile.difficulty_preference or DifficultyPreference.MEDIUM
+        )
         db.add(profile)
         db.commit()
         db.refresh(profile)
@@ -185,15 +192,47 @@ class ProfileService:
         if "difficulty_preference" in update_data and update_data[
             "difficulty_preference"
         ] is not None:
-            ProfileService.sync_alarm_difficulties(
+            ProfileService.apply_user_difficulty_preference(
                 db,
-                user_id,
+                profile,
                 update_data["difficulty_preference"],
                 commit=False,
             )
 
         db.commit()
         db.refresh(profile)
+        return profile
+
+    @staticmethod
+    def apply_user_difficulty_preference(
+        db: Session,
+        profile: UserProfile,
+        preference: Any,
+        *,
+        commit: bool = False,
+    ) -> UserProfile:
+        """
+        Apply a user-controlled difficulty preference change.
+
+        Sets ``difficulty_preference``, resets ``adapted_difficulty`` to match,
+        clears adaptive streaks/watermarks, and syncs alarm baselines. The
+        adaptive engine must never call this — it only updates adapted level.
+        """
+        if hasattr(preference, "value"):
+            pref = preference
+        else:
+            pref = DifficultyPreference(str(preference).lower())
+        profile.difficulty_preference = pref
+        profile.adapted_difficulty = pref
+        ProfileService.reset_adaptive_streaks(db, profile, commit=False)
+        ProfileService.sync_alarm_difficulties(
+            db, profile.user_id, pref, commit=False
+        )
+        if commit:
+            db.commit()
+            db.refresh(profile)
+        else:
+            db.flush()
         return profile
 
     @staticmethod
@@ -281,32 +320,26 @@ class ProfileService:
         commit: bool = True,
     ) -> Optional[UserProfile]:
         """
-        Update strict consecutive adaptive-difficulty streak counters.
+        Update Success / Failure Streak counters for a *final* wake outcome.
 
         ``is_correct=True`` means a full wake dismissal (all required steps
-        completed). Intermediate correct steps must not call this. A failure
-        (wrong/timeout verify) increments the failure streak and resets
-        success. Returns the profile, or ``None`` when no profile exists.
+        completed). ``is_correct=False`` means a failed wake completion.
+        Mid-cycle wrong/timeout, ring, and snooze must not call this — those
+        are not final outcomes. Adaptive difficulty reads these counters but
+        never resets them (watermarks only). Returns the profile, or ``None``
+        when no profile exists.
         """
         if profile is None:
             return None
 
-        if is_correct:
-            profile.consecutive_success_streak = (
-                int(profile.consecutive_success_streak or 0) + 1
-            )
-            profile.consecutive_failure_streak = 0
-        else:
-            profile.consecutive_failure_streak = (
-                int(profile.consecutive_failure_streak or 0) + 1
-            )
-            profile.consecutive_success_streak = 0
+        from app.services.success_streak import SuccessStreakService
 
-        if commit:
-            db.commit()
-            db.refresh(profile)
-        else:
-            db.flush()
+        SuccessStreakService.record_wake_outcome(
+            db,
+            profile,
+            completed_wake=bool(is_correct),
+            commit=commit,
+        )
         return profile
 
     @staticmethod
@@ -316,16 +349,34 @@ class ProfileService:
         *,
         commit: bool = False,
     ) -> None:
-        """Clear both adaptive streak counters after a difficulty adjustment."""
+        """Clear adaptive streak counters and adapt watermarks."""
         if profile is None:
             return
         profile.consecutive_success_streak = 0
         profile.consecutive_failure_streak = 0
+        profile.last_adapted_success_streak = 0
+        profile.last_adapted_failure_streak = 0
         if commit:
             db.commit()
             db.refresh(profile)
         else:
             db.flush()
+
+    @staticmethod
+    def _consume_adaptive_watermarks(
+        profile: UserProfile,
+        *,
+        success_streak: int,
+        failure_streak: int,
+        effective_success: int,
+        effective_failure: int,
+        threshold: int,
+    ) -> None:
+        """Advance adapt watermarks so the same window cannot re-fire."""
+        if effective_success >= threshold:
+            profile.last_adapted_success_streak = success_streak
+        if effective_failure >= threshold:
+            profile.last_adapted_failure_streak = failure_streak
 
     @staticmethod
     def persist_adaptive_difficulty_if_needed(
@@ -337,17 +388,21 @@ class ProfileService:
         commit: bool = True,
     ) -> bool:
         """
-        Persist an adaptive-engine difficulty change onto the user profile.
+        Persist an adaptive-engine difficulty change onto ``adapted_difficulty``.
 
         Uses stored consecutive streak counters (strict N-in-a-row rules) with
-        the profile preference as the baseline. When the preference changes,
-        streak counters reset and existing alarms are synced the same way as a
-        manual preference update.
+        the adapted working level as the baseline. Display streaks keep climbing
+        after an adapt; watermarks (``last_adapted_*``) advance so another full
+        N successes/failures are required before the next ±1.
+
+        Never mutates ``difficulty_preference`` — that field is user-controlled
+        only. Existing alarms are synced to the new adapted level so challenge
+        baselines stay aligned.
 
         ``recent_logs`` is retained for call-site compatibility but unused when
         a profile is present (counters are authoritative).
 
-        Returns True when ``difficulty_preference`` was updated.
+        Returns True when ``adapted_difficulty`` was updated.
         """
         if profile is None:
             return False
@@ -357,51 +412,87 @@ class ProfileService:
         )
         success_streak = int(profile.consecutive_success_streak or 0)
         failure_streak = int(profile.consecutive_failure_streak or 0)
+        last_succ = int(getattr(profile, "last_adapted_success_streak", 0) or 0)
+        last_fail = int(getattr(profile, "last_adapted_failure_streak", 0) or 0)
         adaptation = ChallengeService.adapt_difficulty(
             base,
             recent_logs,
             success_streak=success_streak,
             failure_streak=failure_streak,
+            last_adapted_success_streak=last_succ,
+            last_adapted_failure_streak=last_fail,
         )
         threshold = int(
             adaptation.get("streak_threshold") or _adaptive_streak_threshold()
         )
+        effective_success = int(adaptation.get("effective_success_streak") or 0)
+        effective_failure = int(adaptation.get("effective_failure_streak") or 0)
         threshold_met = (
-            success_streak >= threshold or failure_streak >= threshold
+            effective_success >= threshold or effective_failure >= threshold
         )
 
         if not adaptation.get("adjustment"):
-            # Ceiling/floor: still consume the streak so it cannot re-fire.
+            # Ceiling/floor: still consume the watermark so it cannot re-fire.
             if threshold_met:
-                ProfileService.reset_adaptive_streaks(
-                    db, profile, commit=commit
+                ProfileService._consume_adaptive_watermarks(
+                    profile,
+                    success_streak=success_streak,
+                    failure_streak=failure_streak,
+                    effective_success=effective_success,
+                    effective_failure=effective_failure,
+                    threshold=threshold,
                 )
+                if commit:
+                    db.commit()
+                    db.refresh(profile)
+                else:
+                    db.flush()
             return False
 
         adapted = ChallengeService.resolve_baseline_difficulty(
             None, adaptation.get("difficulty")
         )
         try:
-            new_pref = DifficultyPreference(adapted)
+            new_adapted = DifficultyPreference(adapted)
         except ValueError:
             return False
 
-        current = profile.difficulty_preference
+        current = getattr(profile, "adapted_difficulty", None) or (
+            profile.difficulty_preference
+        )
         current_val = (
             current.value if hasattr(current, "value") else str(current or "")
         )
-        if current_val == new_pref.value:
+        if current_val == new_adapted.value:
             if threshold_met:
-                ProfileService.reset_adaptive_streaks(
-                    db, profile, commit=commit
+                ProfileService._consume_adaptive_watermarks(
+                    profile,
+                    success_streak=success_streak,
+                    failure_streak=failure_streak,
+                    effective_success=effective_success,
+                    effective_failure=effective_failure,
+                    threshold=threshold,
                 )
+                if commit:
+                    db.commit()
+                    db.refresh(profile)
+                else:
+                    db.flush()
             return False
 
-        profile.difficulty_preference = new_pref
+        # Adaptive engine updates working level only — never preference.
+        profile.adapted_difficulty = new_adapted
         ProfileService.sync_alarm_difficulties(
-            db, profile.user_id, new_pref, commit=False
+            db, profile.user_id, new_adapted, commit=False
         )
-        ProfileService.reset_adaptive_streaks(db, profile, commit=False)
+        ProfileService._consume_adaptive_watermarks(
+            profile,
+            success_streak=success_streak,
+            failure_streak=failure_streak,
+            effective_success=effective_success,
+            effective_failure=effective_failure,
+            threshold=threshold,
+        )
 
         if commit:
             db.commit()

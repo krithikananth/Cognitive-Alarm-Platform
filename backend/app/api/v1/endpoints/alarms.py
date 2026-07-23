@@ -26,6 +26,7 @@ from app.services.analytics_ingestion_service import AnalyticsIngestionService
 from app.services.recommendation_cache import RecommendationCache
 from app.services.profile_service import ProfileService
 from app.services.adaptive_scheduling_service import AdaptiveSchedulingService
+from app.services.day_streak import DayStreakService
 from app.schemas.alarm import (
     AlarmCreate,
     AlarmUpdate,
@@ -533,6 +534,10 @@ def snooze_alarm(
     """Snooze an alarm. Increments snooze count and postpones trigger time.
 
     Raises 400 if the maximum snooze limit has been reached.
+
+    Day Streak is intentionally NOT updated here — snooze is not a final
+    wake outcome. Streak changes only after verified challenge dismiss
+    (or an explicit final failure) via ``DayStreakService.record_wake_outcome``.
     """
     alarm = (
         db.query(Alarm)
@@ -587,7 +592,8 @@ def get_alarm_challenge(
 
     Personalization pipeline:
       1. Preferred challenge types (for RANDOM alarms)
-      2. Profile difficulty preference as the initial baseline
+      2. Profile adapted difficulty as the initial baseline
+         (anchored to user preference; preference itself is never auto-changed)
       3. Strict consecutive-streak adaptive difficulty (±1 around the baseline)
       4. Anti-snooze difficulty escalation (applied after adaptive)
       5. Time-of-day softening (easier when groggiest)
@@ -603,7 +609,7 @@ def get_alarm_challenge(
             detail="Alarm not found",
         )
 
-    # ── Initial difficulty from profile preference (alarm as legacy fallback) ──
+    # ── Initial difficulty from adapted level (preference as fallback) ──
     profile = ProfileService.get_or_create_profile(db, current_user.id)
     baseline = ChallengeService.resolve_baseline_difficulty(
         profile,
@@ -615,12 +621,18 @@ def get_alarm_challenge(
     success_streak = int(profile.consecutive_success_streak or 0)
     failure_streak = int(profile.consecutive_failure_streak or 0)
 
-    # Adapt around the preference baseline (not snooze-escalated level),
+    # Adapt around the working adapted baseline (not snooze-escalated level),
     # then apply anti-snooze escalation on top of the adapted level.
     adaptation = ChallengeService.adapt_difficulty(
         baseline,
         success_streak=success_streak,
         failure_streak=failure_streak,
+        last_adapted_success_streak=int(
+            getattr(profile, "last_adapted_success_streak", 0) or 0
+        ),
+        last_adapted_failure_streak=int(
+            getattr(profile, "last_adapted_failure_streak", 0) or 0
+        ),
     )
     difficulty = adaptation["difficulty"]
     escalation = int(alarm.total_snoozes or 0)
@@ -656,8 +668,7 @@ def get_alarm_challenge(
         apply_adaptive_difficulty=False,
     )
     challenge["adaptive_difficulty"] = adaptation
-    # When adaptive difficulty shifts ±1, persist into the profile so the
-    # next login/session continues from the updated preference.
+    # Persist ±1 into adapted_difficulty only — never difficulty_preference.
     ProfileService.persist_adaptive_difficulty_if_needed(
         db,
         profile,
@@ -792,11 +803,18 @@ def verify_alarm_challenge(
     required_steps = max(1, int(session.get("required_correct") or alarm.challenge_count or 1))
     profile = ProfileService.get_or_create_profile(db, current_user.id)
 
-    def _apply_adaptive_outcome(*, completed_wake: bool) -> None:
+    def _apply_adaptive_outcome(*, completed_wake: bool) -> dict:
         """
-        Adaptive streaks count full wake dismissals as successes and
-        wrong/timeout verifies as failures. Intermediate correct steps
-        (multi-step progress) do not change adaptive counters.
+        Success Streak updates only on a *final* wake outcome:
+        - successful wake completion → +1
+        - failed wake completion → reset to 0
+
+        Mid-cycle wrong/timeout, ring, and snooze must not call this.
+        Intermediate correct steps also must not. Adaptive difficulty may
+        read the counters afterward but never mutates them.
+
+        Returns the post-update streak counters so the verify toast can
+        report the Success Streak achieved on this outcome.
         """
         ProfileService.update_adaptive_streaks(
             db,
@@ -804,15 +822,22 @@ def verify_alarm_challenge(
             is_correct=completed_wake,
             commit=True,
         )
+        outcome = {
+            "success_streak": int(profile.consecutive_success_streak or 0),
+            "failure_streak": int(profile.consecutive_failure_streak or 0),
+        }
         ProfileService.persist_adaptive_difficulty_if_needed(
             db,
             profile,
             alarm_difficulty=getattr(alarm, "challenge_difficulty", None),
         )
+        return outcome
 
-    # ── Timeout / wrong answer → reset consecutive streak ──
+    # ── Timeout / wrong answer → reset in-session consecutive challenge ──
+    # Success Streak and Day Streak are NOT updated here: mid-cycle
+    # wrong/timeout is not a final wake outcome. Streaks wait for verified
+    # dismiss (or an explicit final failure).
     if timed_out or not is_correct:
-        _apply_adaptive_outcome(completed_wake=False)
         progress = ChallengeService.record_failed_attempt(
             current_user.id, alarm_id, db, reset_streak=True
         )
@@ -823,6 +848,9 @@ def verify_alarm_challenge(
             time_taken_seconds=time_taken,
             time_limit_seconds=max_time,
         )
+        # Report current Success Streak SSOT without mutating it.
+        current_success = int(profile.consecutive_success_streak or 0)
+        current_failure = int(profile.consecutive_failure_streak or 0)
         if timed_out:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -844,6 +872,8 @@ def verify_alarm_challenge(
                 "required_correct": required_steps,
                 "streak_reset": True,
                 "wakefulness": wakefulness,
+                "success_streak": current_success,
+                "failure_streak": current_failure,
             },
         )
 
@@ -896,7 +926,9 @@ def verify_alarm_challenge(
 
     # ── All consecutive challenges solved — confirm wake & dismiss ──
     # Full wake dismissal counts as one adaptive success.
-    _apply_adaptive_outcome(completed_wake=True)
+    adaptive_outcome = _apply_adaptive_outcome(completed_wake=True)
+    success_streak = adaptive_outcome["success_streak"]
+    alarm_word = "alarm" if success_streak == 1 else "alarms"
     # Anti-snooze audit: mark when the user only woke after exhausting snoozes
     dismiss_method = (
         "snooze_exhausted"
@@ -917,8 +949,8 @@ def verify_alarm_challenge(
     return {
         "status": "dismissed",
         "message": (
-            f"Wake-up verified! {required_steps} consecutive challenges "
-            f"solved. Alarm dismissed."
+            f"Wake-up verified! {success_streak} consecutive "
+            f"{alarm_word} solved. Alarm dismissed."
         ),
         "current_step": consecutive,
         "total_steps": required_steps,
@@ -930,6 +962,9 @@ def verify_alarm_challenge(
         "score": score,
         "wakefulness": wakefulness,
         "wake_confirmed": True,
+        # Adaptive consecutive wake streak (keeps climbing across adapts).
+        "success_streak": success_streak,
+        "failure_streak": adaptive_outcome["failure_streak"],
     }
 
 
@@ -1074,10 +1109,17 @@ def _dismiss_alarm_internal(
     if current_user.profile:
         current_user.profile.total_alarms_dismissed += 1
 
+        # Final wake outcome only — Day Streak updates exactly once here.
+        # Ring / snooze / mid-cycle wrong+timeout must never call this.
+        # Same calendar day: at most one increment (record_wake_outcome no-op).
+        DayStreakService.record_wake_outcome(
+            current_user.profile,
+            outcome="success",
+            at=now,
+            timezone_name=user_tz,
+        )
+
         if alarm.total_snoozes == 0:
-            current_user.profile.streak_days += 1
-            if current_user.profile.streak_days > current_user.profile.best_streak:
-                current_user.profile.best_streak = current_user.profile.streak_days
             current_user.profile.wake_up_consistency_score = min(
                 100.0, current_user.profile.wake_up_consistency_score + 5.0
             )
@@ -1086,13 +1128,11 @@ def _dismiss_alarm_internal(
             and alarm.total_snoozes >= alarm.snooze_limit
         ):
             # Hit the snooze ceiling this cycle.
-            current_user.profile.streak_days = 0
             current_user.profile.wake_up_consistency_score = max(
                 0.0, current_user.profile.wake_up_consistency_score - 10.0
             )
         elif alarm.total_snoozes > 0:
-            # Mid-cycle snoozes (1..limit-1): break streak + milder penalty.
-            current_user.profile.streak_days = 0
+            # Mid-cycle snoozes (1..limit-1): milder consistency penalty.
             current_user.profile.wake_up_consistency_score = max(
                 0.0, current_user.profile.wake_up_consistency_score - 5.0
             )
@@ -1360,14 +1400,33 @@ def get_challenge_analysis(
             difficulty = current_user.profile.difficulty_preference.value
 
     if current_user.profile:
+        # Adapt around the working adapted level; preference stays separate.
+        # Success Streak SSOT: stored consecutive_success_streak only.
+        from app.services.success_streak import SuccessStreakService
+
+        baseline = ChallengeService.resolve_baseline_difficulty(
+            current_user.profile
+        )
         adaptation = ChallengeService.adapt_difficulty(
-            difficulty,
+            baseline,
             logs[:20],
-            success_streak=int(
-                current_user.profile.consecutive_success_streak or 0
+            success_streak=SuccessStreakService.read_stored_streak(
+                current_user.profile
             ),
             failure_streak=int(
                 current_user.profile.consecutive_failure_streak or 0
+            ),
+            last_adapted_success_streak=int(
+                getattr(
+                    current_user.profile, "last_adapted_success_streak", 0
+                )
+                or 0
+            ),
+            last_adapted_failure_streak=int(
+                getattr(
+                    current_user.profile, "last_adapted_failure_streak", 0
+                )
+                or 0
             ),
         )
     else:

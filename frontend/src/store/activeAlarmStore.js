@@ -278,11 +278,17 @@ const useActiveAlarmStore = create((set, get) => ({
           // next_trigger_at; only one-time alarms are deactivated.
           await useAlarmStore.getState().fetchAlarms();
         } catch (e) { /* ignore refresh errors */ }
+        // Notify listeners (e.g. Dashboard) to refresh Day Streak / habit score.
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('icap:wake-completed'));
+        }
         return {
           success: true,
           dismissed: true,
           message: data.message,
           wakefulness: data.wakefulness,
+          success_streak: data.success_streak,
+          failure_streak: data.failure_streak,
         };
       }
 

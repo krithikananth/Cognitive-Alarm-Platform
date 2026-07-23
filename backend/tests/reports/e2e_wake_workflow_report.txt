@@ -1,16 +1,16 @@
 E2E Wake Workflow — Pass/Fail Report
-Generated (UTC): 2026-07-20T17:10:26.269371+00:00
+Generated (UTC): 2026-07-23T16:16:29.946347+00:00
 ============================================================
 01. [PASS] User login
      login ok
 02. [PASS] Ensure profile + seed adaptive streak
-     {'difficulty': 'medium', 'success_streak': 4, 'threshold': 5}
+     {'difficulty': 'medium', 'adapted': 'medium', 'success_streak': 4, 'threshold': 5}
 03. [PASS] Create alarm
      alarm_id=1
 04. [PASS] Capture pre-wake baselines
      {'habit_score': 22.5, 'dismissed': 0, 'analytics': {}}
 05. [PASS] Alarm triggers / challenge starts
-     {'type': 'MATH', 'difficulty': 'medium', 'prompt': 'Solve: 30 + 10 - 10 = ?'}
+     {'type': 'MATH', 'difficulty': 'medium', 'prompt': 'Solve: 25 - 5 + 3 = ?'}
 06. [PASS] Challenge solved → alarm dismissed
      {'status': 'dismissed', 'wakefulness': 'sharp'}
 07. [PASS] Analytics updated
@@ -18,7 +18,7 @@ Generated (UTC): 2026-07-20T17:10:26.269371+00:00
 08. [PASS] Habit score recalculated
      {'before': 22.5, 'after': 47.42}
 09. [PASS] Adaptive difficulty updated
-     {'before': 'medium', 'after': 'hard', 'success_streak': 0}
+     {'before': 'medium', 'after': 'hard', 'preference': 'medium', 'success_streak': 5}
 10. [PASS] Recommendations updated
      {'summary_habit_score': 47.42, 'recommendation_count': 10}
 11. [PASS] Dashboard reflects latest values

@@ -69,6 +69,7 @@ def create_default_admin() -> None:
             sleep_duration_hours=8.0,
             timezone="UTC",
             difficulty_preference=DifficultyPreference.MEDIUM,
+            adapted_difficulty=DifficultyPreference.MEDIUM,
         )
         db.add(admin_profile)
         db.commit()

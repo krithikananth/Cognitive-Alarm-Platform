@@ -43,9 +43,13 @@ Documented in `habit_score.py`: component is verified-dismiss share of (dismisse
 
 Password login and `/` home redirect now send `role === 'admin'` to `/admin` (aligned with OAuth callback).
 
-### BUG-005 — Mid-cycle snoozes ignored for streak/consistency → Fixed
+### BUG-005 — Mid-cycle snoozes ignored for consistency → Fixed
 
-On verified dismiss, mid-cycle snoozes (`1 .. snooze_limit-1`) now reset `streak_days` and apply a milder consistency penalty (−5). Clean wakes still +5 / streak++; snooze-exhausted still −10 / streak reset. Mirrored in `habit_score.derive_habit_score_inputs_from_events` and `alarms.py` dismiss path.
+On verified dismiss, mid-cycle snoozes (`1 .. snooze_limit-1`) apply a milder
+consistency penalty (−5). Clean wakes still +5; snooze-exhausted still −10.
+**Day Streak** is calendar-day based (see Day Streak feature): verified challenge
+completion counts as a successful day regardless of snoozes; streak increments
+at most once per local day and resets after a missed day.
 
 ---
 

@@ -17,6 +17,7 @@ from app.services.challenge_service import (
     _adaptive_streak_threshold,
     DIFFICULTY_LEVELS,
 )
+from app.services.profile_service import ProfileService
 from app.models.alarm import ChallengeType, AlarmChallengeLog
 
 
@@ -303,6 +304,38 @@ class TestChallengeGeneration:
         )
         assert adapted["adjustment"] == 0
         assert adapted["difficulty"] == "medium"
+
+    def test_adapt_difficulty_watermark_blocks_refire(self):
+        """Already-consumed streak windows must not raise difficulty again."""
+        n = _adaptive_streak_threshold()
+
+        pending = ChallengeService.adapt_difficulty(
+            "medium",
+            success_streak=n,
+            failure_streak=0,
+            last_adapted_success_streak=0,
+        )
+        assert pending["adjustment"] == 1
+        assert pending["effective_success_streak"] == n
+
+        consumed = ChallengeService.adapt_difficulty(
+            "hard",
+            success_streak=n,
+            failure_streak=0,
+            last_adapted_success_streak=n,
+        )
+        assert consumed["adjustment"] == 0
+        assert consumed["success_streak"] == n
+        assert consumed["effective_success_streak"] == 0
+
+        next_window = ChallengeService.adapt_difficulty(
+            "hard",
+            success_streak=n * 2,
+            failure_streak=0,
+            last_adapted_success_streak=n,
+        )
+        assert next_window["adjustment"] == 1
+        assert next_window["effective_success_streak"] == n
 
     def test_adapt_difficulty_streak_reset_breaks_consecutive(self):
         """Opposite outcome in trailing logs must break the streak."""
@@ -725,6 +758,59 @@ class TestVerifyChallengeEndpoint:
         assert data["wake_confirmed"] is True
         assert "wakefulness" in data
 
+    def test_verify_message_uses_adaptive_success_streak(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Dismiss toast must report adaptive wake streak, not challenge_count."""
+        from app.models.profile import UserProfile
+
+        alarm_id = self._create_alarm(client, auth_headers, challenge_count=1)
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+
+        messages = []
+        for expected in (1, 2, 3):
+            ch = client.get(
+                f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+            ).json()
+            answer = _session_answer(db_session, test_user.id, alarm_id)
+            res = client.post(
+                f"/api/v1/alarms/{alarm_id}/verify",
+                json={
+                    "user_answer": answer,
+                    "time_taken_seconds": 5,
+                    "challenge_prompt": ch["prompt"],
+                    "challenge_difficulty": ch["difficulty"],
+                },
+                headers=auth_headers,
+            )
+            assert res.status_code == 200
+            data = res.json()
+            assert data["is_dismissed"] is True
+            assert data["success_streak"] == expected
+            word = "alarm" if expected == 1 else "alarms"
+            assert (
+                data["message"]
+                == (
+                    f"Wake-up verified! {expected} consecutive "
+                    f"{word} solved. Alarm dismissed."
+                )
+            )
+            messages.append(data["message"])
+            db_session.refresh(profile)
+            assert profile.consecutive_success_streak == expected
+
+        assert messages[0] == (
+            "Wake-up verified! 1 consecutive alarm solved. "
+            "Alarm dismissed."
+        )
+        assert "2 consecutive alarms solved" in messages[1]
+        assert "3 consecutive alarms solved" in messages[2]
+
     def test_verify_updates_adaptive_streak_and_persists_on_threshold(
         self, client, test_user, auth_headers, db_session
     ):
@@ -741,7 +827,7 @@ class TestVerifyChallengeEndpoint:
         )
         assert profile.difficulty_preference == DifficultyPreference.MEDIUM
 
-        for _ in range(_adaptive_streak_threshold()):
+        for i in range(_adaptive_streak_threshold()):
             ch = client.get(
                 f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
             ).json()
@@ -757,14 +843,56 @@ class TestVerifyChallengeEndpoint:
                 headers=auth_headers,
             )
             assert res.status_code == 200
-            assert res.json()["is_dismissed"] is True
+            body = res.json()
+            assert body["is_dismissed"] is True
+            expected_streak = i + 1
+            assert body["success_streak"] == expected_streak
+            word = "alarm" if expected_streak == 1 else "alarms"
+            assert (
+                f"{expected_streak} consecutive {word} solved" in body["message"]
+            )
 
         db_session.refresh(profile)
-        assert profile.difficulty_preference == DifficultyPreference.HARD
-        assert profile.consecutive_success_streak == 0
+        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.adapted_difficulty == DifficultyPreference.HARD
+        # Streak keeps climbing past the adapt threshold.
+        assert profile.consecutive_success_streak == _adaptive_streak_threshold()
         assert profile.consecutive_failure_streak == 0
+        assert (
+            profile.last_adapted_success_streak == _adaptive_streak_threshold()
+        )
 
-        # Opposite outcome resets success streak and starts failure streak.
+        # Next success continues the display streak (6, not reset to 1).
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        cont = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
+        assert cont.status_code == 200
+        cont_body = cont.json()
+        assert cont_body["success_streak"] == _adaptive_streak_threshold() + 1
+        assert (
+            f"{_adaptive_streak_threshold() + 1} consecutive alarms solved"
+            in cont_body["message"]
+        )
+        db_session.refresh(profile)
+        assert (
+            profile.consecutive_success_streak
+            == _adaptive_streak_threshold() + 1
+        )
+
+        # Opposite mid-cycle wrong must NOT reset Success Streak — only a
+        # final wake failure may. Wrong answers only reset in-session
+        # consecutive challenge progress.
         profile.consecutive_success_streak = 3
         profile.consecutive_failure_streak = 0
         db_session.commit()
@@ -783,6 +911,38 @@ class TestVerifyChallengeEndpoint:
             headers=auth_headers,
         )
         assert bad.status_code == 400
+        assert bad.json().get("streak_reset") is True
+        assert bad.json().get("success_streak") == 3
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 3
+        assert profile.consecutive_failure_streak == 0
+
+        # Recovering from the wrong answer and completing the wake continues
+        # the Success Streak (3 → 4), it does not restart at 1.
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        answer = _session_answer(db_session, test_user.id, alarm_id)
+        recovered = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": answer,
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
+        assert recovered.status_code == 200
+        assert recovered.json()["success_streak"] == 4
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 4
+        assert profile.consecutive_failure_streak == 0
+
+        # Explicit final wake failure resets Success Streak.
+        ProfileService.update_adaptive_streaks(
+            db_session, profile, is_correct=False, commit=True
+        )
         db_session.refresh(profile)
         assert profile.consecutive_success_streak == 0
         assert profile.consecutive_failure_streak == 1

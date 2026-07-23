@@ -23,6 +23,7 @@ from app.services.habit_score import (
     calculate_habit_score,
     calculate_habit_score_for_user,
 )
+from app.services.day_streak import DayStreakService
 from app.services.profile_service import ProfileService
 from app.services.recommendation_cache import RecommendationCache
 
@@ -46,6 +47,7 @@ def _get_or_create_profile(user_id: int, db: Session) -> UserProfile:
             sleep_duration_hours=8.0,
             timezone="UTC",
             difficulty_preference=DifficultyPreference.MEDIUM,
+            adapted_difficulty=DifficultyPreference.MEDIUM,
         )
         db.add(profile)
         db.commit()
@@ -58,7 +60,8 @@ _calculate_habit_score = calculate_habit_score
 
 
 def _attach_habit_score(profile: UserProfile, db: Session) -> UserProfile:
-    """Attach habit score recalculated from behavioral data when available."""
+    """Attach habit score using the stored Day Streak + behavioral inputs."""
+    DayStreakService.read_stored_streak(profile, db=db, commit=True)
     score_data = calculate_habit_score_for_user(db, profile.user_id, profile)
     profile.habit_score = score_data["habit_score"]
     return profile
@@ -98,9 +101,9 @@ def update_profile(
     if "difficulty_preference" in update_data and update_data[
         "difficulty_preference"
     ] is not None:
-        ProfileService.sync_alarm_difficulties(
+        ProfileService.apply_user_difficulty_preference(
             db,
-            current_user.id,
+            profile,
             update_data["difficulty_preference"],
             commit=False,
         )

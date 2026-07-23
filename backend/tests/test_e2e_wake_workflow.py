@@ -162,12 +162,14 @@ class TestE2EWakeWorkflow:
                 )
                 # Seed just below adaptive threshold so one full wake raises difficulty.
                 profile.difficulty_preference = DifficultyPreference.MEDIUM
+                profile.adapted_difficulty = DifficultyPreference.MEDIUM
                 profile.consecutive_success_streak = threshold - 1
                 profile.consecutive_failure_streak = 0
                 db_session.commit()
                 db_session.refresh(profile)
                 return {
                     "difficulty": profile.difficulty_preference.value,
+                    "adapted": profile.adapted_difficulty.value,
                     "success_streak": profile.consecutive_success_streak,
                     "threshold": threshold,
                 }
@@ -375,18 +377,25 @@ class TestE2EWakeWorkflow:
                 )
                 assert api_profile.status_code == 200, api_profile.text
                 pref = api_profile.json()["difficulty_preference"]
+                adapted = api_profile.json()["adapted_difficulty"]
 
-                assert pref == DifficultyPreference.HARD.value, (
-                    f"Expected difficulty raise {before_difficulty}→hard, got {pref}"
+                assert pref == DifficultyPreference.MEDIUM.value, (
+                    f"Profile preference must stay medium, got {pref}"
                 )
-                assert profile.difficulty_preference == DifficultyPreference.HARD
-                # Streaks reset after persistence at threshold
-                assert profile.consecutive_success_streak == 0
+                assert adapted == DifficultyPreference.HARD.value, (
+                    f"Expected adapted raise {before_difficulty}→hard, got {adapted}"
+                )
+                assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+                assert profile.adapted_difficulty == DifficultyPreference.HARD
+                # Display streak survives adapt; watermark advances instead.
+                assert profile.consecutive_success_streak == threshold
                 assert profile.consecutive_failure_streak == 0
+                assert profile.last_adapted_success_streak == threshold
                 assert api_profile.json()["total_alarms_dismissed"] == before_dismissed + 1
                 return {
                     "before": before_difficulty,
-                    "after": pref,
+                    "after": adapted,
+                    "preference": pref,
                     "success_streak": profile.consecutive_success_streak,
                 }
 
@@ -433,7 +442,8 @@ class TestE2EWakeWorkflow:
 
                 profile = client.get("/api/v1/profiles/me", headers=headers)
                 assert profile.status_code == 200
-                assert profile.json()["difficulty_preference"] == "hard"
+                assert profile.json()["difficulty_preference"] == "medium"
+                assert profile.json()["adapted_difficulty"] == "hard"
                 assert profile.json()["total_alarms_dismissed"] == before_dismissed + 1
 
                 return {

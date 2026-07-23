@@ -34,6 +34,7 @@ try:
             sleep_duration_hours=8.0,
             timezone='Asia/Kolkata',
             difficulty_preference=DifficultyPreference.MEDIUM,
+            adapted_difficulty=DifficultyPreference.MEDIUM,
         )
         db.add(admin_profile)
         db.commit()

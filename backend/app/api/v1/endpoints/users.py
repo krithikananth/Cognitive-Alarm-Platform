@@ -18,6 +18,7 @@ from app.services.habit_score import (
     load_verified_wake_events,
     resolve_habit_score_inputs,
 )
+from app.services.day_streak import DayStreakService
 from app.services.profile_service import ProfileService
 from app.services.recommendation_cache import RecommendationCache
 
@@ -79,6 +80,19 @@ def _profile_bundle(user: User, profile: UserProfile) -> dict:
             "habit_preferences": habits,
             "streak_days": profile.streak_days,
             "best_streak": profile.best_streak,
+            "last_successful_wake_date": (
+                profile.last_successful_wake_date.isoformat()
+                if profile.last_successful_wake_date
+                else None
+            ),
+            "success_streak": int(profile.consecutive_success_streak or 0),
+            "failure_streak": int(profile.consecutive_failure_streak or 0),
+            "consecutive_success_streak": int(
+                profile.consecutive_success_streak or 0
+            ),
+            "consecutive_failure_streak": int(
+                profile.consecutive_failure_streak or 0
+            ),
         },
     }
 
@@ -125,6 +139,7 @@ def get_my_profile(
 ):
     """Get the current user's profile bundle."""
     profile = _get_or_create_profile(current_user.id, db)
+    DayStreakService.read_stored_streak(profile, db=db, commit=True)
     return _profile_bundle(current_user, profile)
 
 
@@ -165,16 +180,22 @@ def get_my_stats(
 ):
     """Dashboard stats for the current user."""
     profile = _get_or_create_profile(current_user.id, db)
+    # Canonical Day Streak: stored profile value after missed-day decay.
+    current_streak = DayStreakService.read_stored_streak(
+        profile, db=db, commit=True
+    )
+
     score = calculate_habit_score_for_user(db, current_user.id, profile)
     active_alarms = (
         db.query(Alarm)
         .filter(Alarm.user_id == current_user.id, Alarm.is_active == True)  # noqa: E712
         .count()
     )
-    # Derive dismiss/snooze totals from the same wake-event replay as habit score
-    # so success rate cannot drift from stale profile counters.
+    # Derive dismiss/snooze totals from wake-event replay for success rate.
+    # Day Streak intentionally comes from the stored profile counter above.
+    events = load_verified_wake_events(db, current_user.id)
     inputs = resolve_habit_score_inputs(
-        profile, load_verified_wake_events(db, current_user.id)
+        profile, events, timezone_name=profile.timezone or "UTC"
     )
     if isinstance(inputs, dict):
         dismissed = int(inputs.get("total_alarms_dismissed", 0) or 0)
@@ -182,6 +203,7 @@ def get_my_stats(
     else:
         dismissed = int(getattr(inputs, "total_alarms_dismissed", 0) or 0)
         snoozes = int(getattr(inputs, "total_snoozes", 0) or 0)
+
     total_events = dismissed + snoozes
     if total_events > 0:
         success_rate = (dismissed / total_events) * 100
@@ -194,12 +216,20 @@ def get_my_stats(
     return {
         "active_alarms": active_alarms,
         "current_habit_score": score["habit_score"],
-        "current_streak": profile.streak_days,
+        "current_streak": current_streak,
+        "success_streak": int(profile.consecutive_success_streak or 0),
+        "failure_streak": int(profile.consecutive_failure_streak or 0),
         "wakeup_success_rate": round(success_rate, 2),
         "preferred_wakeup_time": wake.strftime("%H:%M:%S") if wake else None,
         "weekly_on_time": weekly_on_time,
         "weekly_total": 7,
         "weekly_tracker": tracker,
+        "last_successful_wake_date": (
+            profile.last_successful_wake_date.isoformat()
+            if profile.last_successful_wake_date
+            else None
+        ),
+        "best_streak": profile.best_streak,
     }
 
 
@@ -289,7 +319,7 @@ def update_my_preferences(
     profile.habit_preferences = habits
     if data.difficulty_preference:
         try:
-            profile.difficulty_preference = DifficultyPreference(
+            preference = DifficultyPreference(
                 data.difficulty_preference.lower()
             )
         except ValueError:
@@ -297,12 +327,9 @@ def update_my_preferences(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid difficulty: {data.difficulty_preference}",
             )
-        # Keep existing alarms aligned so future challenges use the preference
-        ProfileService.sync_alarm_difficulties(
-            db,
-            current_user.id,
-            profile.difficulty_preference,
-            commit=False,
+        # User-controlled preference; reset adapted level to match.
+        ProfileService.apply_user_difficulty_preference(
+            db, profile, preference, commit=False
         )
     if data.productivity_goals is not None:
         goals = data.productivity_goals

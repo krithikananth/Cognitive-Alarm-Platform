@@ -80,13 +80,23 @@ def _difficulty_index(level: str) -> int:
 
 
 def _preference_value(profile: Any) -> Optional[str]:
-    """Extract a difficulty preference string from a profile-like object."""
+    """Extract the user-controlled difficulty preference from a profile."""
     if profile is None:
         return None
     pref = getattr(profile, "difficulty_preference", None)
     if pref is None:
         return None
     return pref.value if hasattr(pref, "value") else str(pref)
+
+
+def _adapted_value(profile: Any) -> Optional[str]:
+    """Extract the adaptive working difficulty from a profile."""
+    if profile is None:
+        return None
+    adapted = getattr(profile, "adapted_difficulty", None)
+    if adapted is None:
+        return None
+    return adapted.value if hasattr(adapted, "value") else str(adapted)
 
 
 def _option_key(text: str) -> str:
@@ -407,11 +417,14 @@ class ChallengeService:
         """
         Resolve the initial difficulty used by the challenge engine.
 
-        Profile ``difficulty_preference`` is the primary baseline so adaptive
-        difficulty can adjust around the user's preferred level. Falls back to
-        the alarm's stored ``challenge_difficulty``, then ``medium``, so
-        existing alarms and users without a profile keep working.
+        Profile ``adapted_difficulty`` is the adaptive working baseline (shifted
+        ±1 by the engine). Falls back to user ``difficulty_preference``, then
+        the alarm's stored ``challenge_difficulty``, then ``medium``. Preference
+        is never overwritten by adaptation — only adapted level moves.
         """
+        adapted = _adapted_value(profile)
+        if adapted:
+            return _clamp_difficulty(adapted)
         preferred = _preference_value(profile)
         if preferred:
             return _clamp_difficulty(preferred)
@@ -449,20 +462,29 @@ class ChallengeService:
         success_streak: Optional[int] = None,
         failure_streak: Optional[int] = None,
         streak_threshold: Optional[int] = None,
+        last_adapted_success_streak: int = 0,
+        last_adapted_failure_streak: int = 0,
     ) -> Dict[str, Any]:
         """
         Adjust difficulty from strict consecutive success/failure streaks.
 
-        Difficulty rises only after ``N`` consecutive successes and falls only
-        after ``N`` consecutive failures (``ADAPTIVE_STREAK_THRESHOLD`` by
+        Difficulty rises only after ``N`` *new* consecutive successes since the
+        last raise watermark, and falls only after ``N`` *new* consecutive
+        failures since the last drop (``ADAPTIVE_STREAK_THRESHOLD`` by
         default). Centers on the caller's baseline and shifts at most ±1.
+
+        Display streaks (``success_streak`` / ``failure_streak``) keep climbing
+        across adapts; watermarks prevent re-firing until another full N
+        accumulate. Opposite outcomes still zero the other direction via the
+        profile counter updater.
 
         When ``success_streak`` / ``failure_streak`` are provided they are used
         directly (stored profile counters). Otherwise streaks are derived from
         trailing ``recent_logs`` (newest-first).
 
         Returns dict with keys: difficulty, adjustment (-1/0/+1), reason,
-        success_streak, failure_streak, streak_threshold.
+        success_streak, failure_streak, effective_success_streak,
+        effective_failure_streak, streak_threshold.
         """
         base = _clamp_difficulty(base_difficulty)
         threshold = int(
@@ -491,6 +513,12 @@ class ChallengeService:
             succ = derived["success_streak"]
             fail = derived["failure_streak"]
 
+        last_succ = max(0, int(last_adapted_success_streak or 0))
+        last_fail = max(0, int(last_adapted_failure_streak or 0))
+        # Effective progress toward the next ±1 since the last adapt.
+        effective_succ = max(0, succ - last_succ)
+        effective_fail = max(0, fail - last_fail)
+
         idx = _difficulty_index(base)
         adjustment = 0
         reason = (
@@ -499,13 +527,13 @@ class ChallengeService:
             f"(success={succ}, failure={fail})."
         )
 
-        if succ >= threshold:
+        if effective_succ >= threshold:
             adjustment = 1
             reason = (
                 f"{succ} consecutive wake completions "
                 f"(threshold {threshold}) — raising difficulty."
             )
-        elif fail >= threshold:
+        elif effective_fail >= threshold:
             adjustment = -1
             reason = (
                 f"{fail} consecutive failures "
@@ -519,6 +547,8 @@ class ChallengeService:
             "reason": reason,
             "success_streak": succ,
             "failure_streak": fail,
+            "effective_success_streak": effective_succ,
+            "effective_failure_streak": effective_fail,
             "streak_threshold": threshold,
             "sample_size": succ + fail,
         }
@@ -534,6 +564,8 @@ class ChallengeService:
         exclude_prompts: Optional[list] = None,
         success_streak: Optional[int] = None,
         failure_streak: Optional[int] = None,
+        last_adapted_success_streak: int = 0,
+        last_adapted_failure_streak: int = 0,
     ) -> Dict[str, Any]:
         """
         Generate a cognitive puzzle personalized by preferences, performance,
@@ -553,6 +585,8 @@ class ChallengeService:
             exclude_prompts: Extra prompts to avoid (e.g. active session).
             success_streak: Stored consecutive success counter (preferred).
             failure_streak: Stored consecutive failure counter (preferred).
+            last_adapted_success_streak: Watermark for the last success adapt.
+            last_adapted_failure_streak: Watermark for the last failure adapt.
 
         Returns:
             A dictionary with the challenge prompt, type, correct answer,
@@ -567,6 +601,8 @@ class ChallengeService:
                 recent_logs,
                 success_streak=success_streak,
                 failure_streak=failure_streak,
+                last_adapted_success_streak=last_adapted_success_streak,
+                last_adapted_failure_streak=last_adapted_failure_streak,
             )
             working_difficulty = adaptation["difficulty"]
 

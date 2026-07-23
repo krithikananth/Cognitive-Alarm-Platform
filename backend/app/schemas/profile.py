@@ -5,7 +5,7 @@ Supports partial updates for sleep schedule, goals, and habit preferences
 independently.
 """
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -143,13 +143,17 @@ class ProfileResponse(BaseModel):
         sleep_duration_hours: Current sleep target.
         timezone: IANA timezone.
         productivity_goals: List of goals.
-        difficulty_preference: Current difficulty.
+        difficulty_preference: User-controlled cognitive-challenge difficulty.
+        adapted_difficulty: Adaptive working difficulty (±1 from preference).
         habit_preferences: Current habit settings.
         wake_up_consistency_score: Consistency metric (0-100).
         total_alarms_dismissed: Lifetime dismissal count.
         total_snoozes: Lifetime snooze count.
-        streak_days: Current streak.
-        best_streak: All-time best streak.
+        streak_days: Current consecutive calendar-day wake streak.
+        best_streak: All-time best Day Streak.
+        last_successful_wake_date: Local date of the last verified success.
+        consecutive_success_streak: Success Streak (consecutive wake completions).
+        consecutive_failure_streak: Consecutive failed wake completions.
         habit_score: Computed overall habit score (0-100).
         created_at: Profile creation timestamp.
         updated_at: Profile last-updated timestamp.
@@ -162,12 +166,16 @@ class ProfileResponse(BaseModel):
     timezone: str
     productivity_goals: Optional[List[str]] = None
     difficulty_preference: DifficultyPreference
+    adapted_difficulty: DifficultyPreference = DifficultyPreference.MEDIUM
     habit_preferences: Optional[Dict[str, Any]] = None
     wake_up_consistency_score: float
     total_alarms_dismissed: int
     total_snoozes: int
     streak_days: int
     best_streak: int
+    last_successful_wake_date: Optional[date] = None
+    consecutive_success_streak: int = 0
+    consecutive_failure_streak: int = 0
     habit_score: float = Field(
         default=0.0, description="Computed overall habit score"
     )

@@ -2,7 +2,7 @@
 Tests for the sleep / wake / productivity Recommendation Engine.
 """
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from app.models.alarm import Alarm, AlarmType, ChallengeType, AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
@@ -129,13 +129,16 @@ class TestRecommendationServiceUnit:
         db_session.refresh(alarm)
 
         now = datetime.now(timezone.utc)
+        # Place successes several days ago so missed-day decay leaves streak at 0
+        # while still providing snooze-heavy wake history for coaching signals.
+        old = now - timedelta(days=5)
         for i in range(4):
             db_session.add(
                 AlarmWakeEvent(
                     user_id=test_user.id,
                     alarm_id=alarm.id,
-                    triggered_at=now,
-                    dismissed_at=now,
+                    triggered_at=old,
+                    dismissed_at=old,
                     dismiss_method="snooze_exhausted" if i < 3 else "challenge",
                     snooze_count_at_dismiss=3 if i < 3 else 0,
                     time_to_dismiss_seconds=240,

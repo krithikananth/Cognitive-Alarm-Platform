@@ -28,6 +28,7 @@ from app.schemas.recommendation import (
     RecommendationSummary,
 )
 from app.services.challenge_service import ChallengeService
+from app.services.day_streak import DayStreakService
 from app.services.profile_service import ProfileService
 from app.services.recommendation_cache import RecommendationCache
 
@@ -213,7 +214,9 @@ class RecommendationService:
             RecommendationService._productivity_recommendations(signals)
         )
         items.extend(
-            RecommendationService._challenge_recommendations(challenge_logs)
+            RecommendationService._challenge_recommendations(
+                challenge_logs, signals=signals
+            )
         )
 
         items = RecommendationService._dedupe_and_sort(items)
@@ -353,6 +356,7 @@ class RecommendationService:
                 sleep_duration_hours=8.0,
                 timezone="UTC",
                 difficulty_preference=DifficultyPreference.MEDIUM,
+                adapted_difficulty=DifficultyPreference.MEDIUM,
             )
             db.add(profile)
             db.commit()
@@ -395,6 +399,17 @@ class RecommendationService:
         )
 
         verified = [e for e in wake_events if e.verified]
+        # Canonical Day Streak: stored profile value (written only on final
+        # wake outcome). Do not overwrite from event-derived counters.
+        streak_days = DayStreakService.read_stored_streak(
+            profile, db=db, commit=False
+        )
+        best_streak = int(profile.best_streak or 0)
+        from app.services.success_streak import SuccessStreakService
+
+        success_streak = SuccessStreakService.read_stored_streak(profile)
+        failure_streak = int(profile.consecutive_failure_streak or 0)
+
         snooze_events = [
             e
             for e in verified
@@ -451,8 +466,10 @@ class RecommendationService:
             "sleep_duration_hours": duration,
             "suggested_bedtime": bedtime,
             "timezone": profile.timezone or "UTC",
-            "streak_days": profile.streak_days or 0,
-            "best_streak": profile.best_streak or 0,
+            "streak_days": streak_days,
+            "best_streak": best_streak,
+            "success_streak": success_streak,
+            "failure_streak": failure_streak,
             "consistency": min(float(profile.wake_up_consistency_score or 0), 100.0),
             "total_dismissed": profile.total_alarms_dismissed or 0,
             "total_snoozes": profile.total_snoozes or 0,
@@ -1277,7 +1294,8 @@ class RecommendationService:
                 "No markdown, no greeting.\n"
                 f"Goals: {goals}\n"
                 f"Habit score: {signals['habit_score']}\n"
-                f"Streak: {signals['streak_days']}\n"
+                f"Day streak: {signals['streak_days']}\n"
+                f"Success streak: {signals.get('success_streak', 0)}\n"
                 f"Snooze rate: {signals['snooze_rate']}\n"
                 f"Preferred wake: {signals['preferred_wake_time']}\n"
             )
@@ -1302,6 +1320,7 @@ class RecommendationService:
     @staticmethod
     def _challenge_recommendations(
         logs: List[AlarmChallengeLog],
+        signals: Optional[Dict[str, Any]] = None,
     ) -> List[RecommendationItem]:
         analysis = ChallengeService.analyze_completion(logs)
         items: List[RecommendationItem] = []
@@ -1323,6 +1342,38 @@ class RecommendationService:
                     action_path="/analytics",
                     confidence=0.75,
                     metrics={"source_category": category_tag},
+                )
+            )
+
+        # Success Streak SSOT — same counter Analytics / Personalization use.
+        signals = signals or {}
+        success_streak = int(signals.get("success_streak", 0) or 0)
+        try:
+            from app.services.challenge_service import _adaptive_streak_threshold
+
+            threshold = _adaptive_streak_threshold()
+        except Exception:
+            threshold = 5
+        if success_streak > 0:
+            items.append(
+                RecommendationItem(
+                    id="challenge-success-streak",
+                    category=RecommendationCategory.CHALLENGE,
+                    priority=RecommendationPriority.LOW,
+                    title="Protect your Success Streak",
+                    detail=(
+                        f"Success Streak is {success_streak} consecutive wake "
+                        f"completion(s). Adaptive difficulty rises every "
+                        f"{threshold} successes and never resets this streak — "
+                        "only a failed wake does."
+                    ),
+                    action_hint="Complete tomorrow's wake without giving up",
+                    action_path="/analytics",
+                    confidence=0.8,
+                    metrics={
+                        "success_streak": success_streak,
+                        "streak_threshold": threshold,
+                    },
                 )
             )
         return items

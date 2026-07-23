@@ -135,7 +135,7 @@ Cognitive challenge generation and evaluation:
 - Multiple challenge types (math, logic, memory, pattern, word, riddle, quiz)
 - Per-alarm and profile difficulty preference (`beginner` → `expert`)
 - Attempt logging via `alarm_challenge_logs` (queryable + `/alarms/challenge/log-health` audit)
-- Rule-based adaptive difficulty: raise after N consecutive successes, lower after N consecutive failures (±1 around baseline)
+- Rule-based adaptive difficulty: raise after N consecutive successes, lower after N consecutive failures (±1 around adapted baseline; user preference is never overwritten)
 
 ### 3.6 Analytics, Habit Score & Recommendations *(Milestone 3 — Implemented)*
 

@@ -9,6 +9,17 @@ When verified wake events are available, input counters are derived by
 replaying the same dismiss-path rules used when updating ``UserProfile``.
 Otherwise stored profile counters are used (backward compatible).
 
+Day Streak (``streak_days``) counts consecutive local calendar days with at
+least one verified challenge completion. It increments at most once per day,
+survives mid-cycle snoozes, and resets to 0 after a missed day (next success
+starts at 1). ``last_successful_wake_date`` anchors continue / same-day /
+reset decisions.
+
+Success Streak (``consecutive_success_streak``) counts consecutive successful
+wake completions (alarm dismissals). It is exposed on the habit-score payload
+for Analytics / Personalization consistency but is not a formula weight —
+sleep adherence still uses Day Streak.
+
 Habit Score =
     Wake-Up Consistency        × 35%
   + Challenge Completion       × 25%
@@ -23,6 +34,7 @@ so historical rows and callers without log data keep working.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 from sqlalchemy.orm import Session
@@ -30,6 +42,11 @@ from sqlalchemy.orm import Session
 from app.models.alarm import AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
 from app.models.profile import UserProfile
+from app.services.day_streak import (
+    compute_day_streak_from_success_dates,
+    today_in_timezone,
+    unique_success_dates_from_events,
+)
 
 # Canonical weights — sum to 1.0
 WEIGHT_WAKE_UP_CONSISTENCY = 0.35
@@ -108,6 +125,19 @@ def calculate_habit_score(
     )
     habit_score = round(min(overall, 100.0), 2)
 
+    # Success Streak SSOT (consecutive wake completions) — displayed alongside
+    # Day Streak; not a formula input (adherence still uses streak_days).
+    success_streak = int(
+        _field(profile, "consecutive_success_streak", 0)
+        or _field(profile, "success_streak", 0)
+        or 0
+    )
+    failure_streak = int(
+        _field(profile, "consecutive_failure_streak", 0)
+        or _field(profile, "failure_streak", 0)
+        or 0
+    )
+
     return {
         "habit_score": habit_score,
         "breakdown": {
@@ -117,33 +147,41 @@ def calculate_habit_score(
             "sleep_adherence": round(adherence_score, 2),
         },
         "weights": dict(HABIT_SCORE_WEIGHTS),
+        "success_streak": max(0, success_streak),
+        "failure_streak": max(0, failure_streak),
+        "streak_days": streak_days,
     }
 
 
 def derive_habit_score_inputs_from_events(
     events: Sequence[Union[AlarmWakeEvent, Mapping[str, Any]]],
+    *,
+    timezone_name: Optional[str] = "UTC",
+    as_of: Optional[date] = None,
 ) -> Dict[str, Any]:
     """Rebuild habit-score input counters from verified wake events.
 
     Replays the dismiss-path rules from ``alarms.py``:
     - every verified wake increments ``total_alarms_dismissed``
     - ``snooze_count_at_dismiss`` is summed into ``total_snoozes``
-    - clean wake (0 snoozes): streak +1, consistency +5 (cap 100)
-    - mid-cycle snoozes (1..limit-1): streak reset, consistency −5 (floor 0)
-    - snooze-exhausted: streak reset, consistency −10 (floor 0)
+    - clean wake (0 snoozes): consistency +5 (cap 100)
+    - mid-cycle snoozes (1..limit-1): consistency −5 (floor 0)
+    - snooze-exhausted: consistency −10 (floor 0)
+    - Day Streak is consecutive local calendar days with ≥1 verified success
+      (at most +1 per day; gaps reset; snooze quality does not break streak)
 
     When wake events carry puzzle step snapshots (``challenges_completed`` /
     ``failed_attempts``), also derive ``total_puzzle_*`` so challenge
     completion can use puzzle progress without requiring challenge logs.
     """
     consistency = 0.0
-    streak_days = 0
     dismissed = 0
     total_snoozes = 0
     puzzle_correct = 0
     puzzle_attempts = 0
+    verified = list(_iter_verified_events(events))
 
-    for event in _iter_verified_events(events):
+    for event in verified:
         dismissed += 1
         snoozes = int(_event_field(event, "snooze_count_at_dismiss", 0) or 0)
         total_snoozes += snoozes
@@ -157,28 +195,44 @@ def derive_habit_score_inputs_from_events(
             puzzle_attempts += cycle_attempts
 
         if snoozes == 0:
-            streak_days += 1
             consistency = min(
                 100.0, consistency + _CONSISTENCY_CLEAN_WAKE_DELTA
             )
         elif dismiss_method == "snooze_exhausted":
-            streak_days = 0
             consistency = max(
                 0.0, consistency - _CONSISTENCY_SNOOZE_EXHAUSTED_DELTA
             )
         else:
-            # Mid-cycle snoozes: still count toward totals, break streak,
-            # and apply a milder consistency penalty than limit-exhaustion.
-            streak_days = 0
+            # Mid-cycle snoozes: still count toward totals and apply a milder
+            # consistency penalty than limit-exhaustion.
             consistency = max(
                 0.0, consistency - _CONSISTENCY_MID_CYCLE_SNOOZE_DELTA
             )
+
+    tz = timezone_name or "UTC"
+    today = as_of or today_in_timezone(tz)
+    success_dates = unique_success_dates_from_events(
+        verified, timezone_name=tz
+    )
+    # Events without dismissed_at (legacy unit fixtures) fall back to treating
+    # each verified wake as its own synthetic day so tests stay deterministic.
+    if verified and not success_dates:
+        from datetime import timedelta
+
+        base = today - timedelta(days=len(verified) - 1)
+        success_dates = [base + timedelta(days=i) for i in range(len(verified))]
+
+    streak_state = compute_day_streak_from_success_dates(
+        success_dates, today=today
+    )
 
     inputs: Dict[str, Any] = {
         "wake_up_consistency_score": consistency,
         "total_alarms_dismissed": dismissed,
         "total_snoozes": total_snoozes,
-        "streak_days": streak_days,
+        "streak_days": streak_state.streak_days,
+        "best_streak": streak_state.best_streak,
+        "last_successful_wake_date": streak_state.last_successful_wake_date,
     }
     if puzzle_attempts > 0:
         inputs["total_puzzle_correct"] = puzzle_correct
@@ -189,16 +243,51 @@ def derive_habit_score_inputs_from_events(
 def resolve_habit_score_inputs(
     profile: Optional[Union[UserProfile, Mapping[str, Any]]],
     events: Optional[Sequence[Union[AlarmWakeEvent, Mapping[str, Any]]]] = None,
+    *,
+    timezone_name: Optional[str] = None,
+    as_of: Optional[date] = None,
 ) -> Union[UserProfile, Mapping[str, Any]]:
     """Prefer behavioral event-derived inputs when verified wakes exist.
 
     Falls back to stored profile counters when there is no verified history
     so legacy rows and unit tests that seed counters remain valid.
+
+    Day Streak (``streak_days``) always comes from the stored profile when a
+    profile is provided — it is written only on final wake outcome and must
+    match Dashboard / Analytics / APIs. Event replay still drives consistency,
+    dismiss, and snooze counters.
     """
+    tz = timezone_name
+    if tz is None and profile is not None:
+        tz = _field(profile, "timezone", "UTC")
+    tz = tz or "UTC"
+
     if events is not None:
         verified = list(_iter_verified_events(events))
         if verified:
-            return derive_habit_score_inputs_from_events(verified)
+            derived = derive_habit_score_inputs_from_events(
+                verified, timezone_name=tz, as_of=as_of
+            )
+            if profile is not None:
+                derived = dict(derived)
+                derived["streak_days"] = int(
+                    _field(profile, "streak_days", 0) or 0
+                )
+                derived["best_streak"] = max(
+                    int(_field(profile, "best_streak", 0) or 0),
+                    int(derived.get("best_streak", 0) or 0),
+                )
+                last = _field(profile, "last_successful_wake_date", None)
+                if last is not None:
+                    derived["last_successful_wake_date"] = last
+                # Success Streak SSOT — never derive from wake events.
+                derived["consecutive_success_streak"] = int(
+                    _field(profile, "consecutive_success_streak", 0) or 0
+                )
+                derived["consecutive_failure_streak"] = int(
+                    _field(profile, "consecutive_failure_streak", 0) or 0
+                )
+            return derived
 
     if profile is not None:
         return profile
@@ -308,9 +397,18 @@ def calculate_habit_score_for_user(
 
     Response shape matches ``calculate_habit_score`` / habit-score API.
     Challenge completion uses challenge-log accuracy when logs exist.
+    Sleep-adherence uses the stored Day Streak so it matches Dashboard/APIs.
     """
+    if isinstance(profile, UserProfile):
+        from app.services.day_streak import DayStreakService
+
+        DayStreakService.ensure_current(profile, db=db, commit=False)
+
     events = load_verified_wake_events(db, user_id)
-    inputs = resolve_habit_score_inputs(profile, events)
+    tz = None
+    if profile is not None:
+        tz = _field(profile, "timezone", "UTC")
+    inputs = resolve_habit_score_inputs(profile, events, timezone_name=tz)
     puzzle_stats = load_puzzle_attempt_stats(db, user_id)
     inputs = merge_puzzle_stats(inputs, puzzle_stats)
     return calculate_habit_score(inputs)

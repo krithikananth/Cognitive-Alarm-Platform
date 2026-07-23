@@ -65,6 +65,11 @@ class BehavioralAnalyticsService:
             .filter(UserProfile.user_id == user_id)
             .first()
         )
+        if profile is not None:
+            from app.services.day_streak import DayStreakService
+
+            DayStreakService.read_stored_streak(profile, db=db, commit=True)
+
         snooze_df = cls._load_snooze_df(db, user_id, window_start)
         wake_df = cls._load_wake_df(db, user_id, window_start)
         challenge_df = cls._load_challenge_df(db, user_id, window_start)
@@ -308,6 +313,10 @@ class BehavioralAnalyticsService:
             getattr(profile, "sleep_duration_hours", 8.0) or 8.0
         ) if profile is not None else 8.0
         streak = int(getattr(profile, "streak_days", 0) or 0) if profile else 0
+        if profile is not None:
+            from app.services.day_streak import DayStreakService
+
+            streak = DayStreakService.read_stored_streak(profile)
 
         habit = calculate_habit_score(
             profile

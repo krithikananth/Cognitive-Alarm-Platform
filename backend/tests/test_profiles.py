@@ -52,6 +52,7 @@ class TestUpdateProfile:
         assert data["timezone"] == "America/New_York"
         assert data["sleep_duration_hours"] == 7.5
         assert data["difficulty_preference"] == "hard"
+        assert data["adapted_difficulty"] == "hard"
 
     def test_difficulty_preference_syncs_existing_alarms(
         self, client, test_user, auth_headers
@@ -102,12 +103,12 @@ class TestUpdateProfile:
 
 
 class TestAdaptiveDifficultyPersistence:
-    """Tests for persisting adaptive difficulty onto the profile preference."""
+    """Tests for persisting adaptive difficulty onto adapted_difficulty only."""
 
-    def test_persist_raises_preference_on_consecutive_success(
+    def test_persist_raises_adapted_on_consecutive_success(
         self, db_session, test_user
     ):
-        """N consecutive successes should write the raised level to the profile."""
+        """N consecutive successes raise adapted level; preference stays put."""
         from app.models.profile import UserProfile, DifficultyPreference
         from app.services.challenge_service import _adaptive_streak_threshold
         from app.services.profile_service import ProfileService
@@ -117,6 +118,7 @@ class TestAdaptiveDifficultyPersistence:
             sleep_duration_hours=8.0,
             timezone="UTC",
             difficulty_preference=DifficultyPreference.MEDIUM,
+            adapted_difficulty=DifficultyPreference.MEDIUM,
             consecutive_success_streak=_adaptive_streak_threshold(),
             consecutive_failure_streak=0,
         )
@@ -129,14 +131,18 @@ class TestAdaptiveDifficultyPersistence:
         )
         assert updated is True
         db_session.refresh(profile)
-        assert profile.difficulty_preference == DifficultyPreference.HARD
-        assert profile.consecutive_success_streak == 0
+        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.adapted_difficulty == DifficultyPreference.HARD
+        assert profile.consecutive_success_streak == _adaptive_streak_threshold()
         assert profile.consecutive_failure_streak == 0
+        assert (
+            profile.last_adapted_success_streak == _adaptive_streak_threshold()
+        )
 
-    def test_persist_lowers_preference_on_consecutive_failure(
+    def test_persist_lowers_adapted_on_consecutive_failure(
         self, db_session, test_user
     ):
-        """N consecutive failures should write the lowered level to the profile."""
+        """N consecutive failures lower adapted level; preference stays put."""
         from app.models.profile import UserProfile, DifficultyPreference
         from app.services.challenge_service import _adaptive_streak_threshold
         from app.services.profile_service import ProfileService
@@ -146,6 +152,7 @@ class TestAdaptiveDifficultyPersistence:
             sleep_duration_hours=8.0,
             timezone="UTC",
             difficulty_preference=DifficultyPreference.HARD,
+            adapted_difficulty=DifficultyPreference.HARD,
             consecutive_success_streak=0,
             consecutive_failure_streak=_adaptive_streak_threshold(),
         )
@@ -158,12 +165,16 @@ class TestAdaptiveDifficultyPersistence:
         )
         assert updated is True
         db_session.refresh(profile)
-        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.difficulty_preference == DifficultyPreference.HARD
+        assert profile.adapted_difficulty == DifficultyPreference.MEDIUM
         assert profile.consecutive_success_streak == 0
-        assert profile.consecutive_failure_streak == 0
+        assert profile.consecutive_failure_streak == _adaptive_streak_threshold()
+        assert (
+            profile.last_adapted_failure_streak == _adaptive_streak_threshold()
+        )
 
     def test_persist_noop_below_streak_threshold(self, db_session, test_user):
-        """Streaks below N must not change the saved preference."""
+        """Streaks below N must not change preference or adapted level."""
         from app.models.profile import UserProfile, DifficultyPreference
         from app.services.challenge_service import _adaptive_streak_threshold
         from app.services.profile_service import ProfileService
@@ -174,6 +185,7 @@ class TestAdaptiveDifficultyPersistence:
             sleep_duration_hours=8.0,
             timezone="UTC",
             difficulty_preference=DifficultyPreference.MEDIUM,
+            adapted_difficulty=DifficultyPreference.MEDIUM,
             consecutive_success_streak=below,
             consecutive_failure_streak=0,
         )
@@ -187,6 +199,7 @@ class TestAdaptiveDifficultyPersistence:
         assert updated is False
         db_session.refresh(profile)
         assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.adapted_difficulty == DifficultyPreference.MEDIUM
         assert profile.consecutive_success_streak == below
 
     def test_persist_noop_when_profile_missing(self, db_session):

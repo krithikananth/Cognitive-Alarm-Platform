@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -46,17 +47,28 @@ class UserProfile(Base):
         sleep_duration_hours: Target sleep duration in hours.
         timezone: IANA timezone string (e.g. ``America/New_York``).
         productivity_goals: JSON list of the user's productivity goals.
-        difficulty_preference: Preferred cognitive challenge difficulty.
+        difficulty_preference: User-controlled cognitive challenge preference
+            (never modified by the adaptive engine).
+        adapted_difficulty: Working difficulty used by the adaptive engine
+            (±1 around this baseline). Reset to preference on manual change.
         habit_preferences: JSON dict of habit-related preferences.
         wake_up_consistency_score: Rolling consistency metric (0–100).
         total_alarms_dismissed: Lifetime count of dismissed alarms.
         total_snoozes: Lifetime count of snooze events.
-        streak_days: Current consecutive-day wake-up streak.
-        best_streak: Highest streak ever achieved.
-        consecutive_success_streak: Consecutive full wake dismissals used by
-            strict adaptive difficulty (resets on failure / adapt).
-        consecutive_failure_streak: Consecutive wrong/timeout verifies used
-            by strict adaptive difficulty (resets on full wake / adapt).
+        streak_days: Current consecutive calendar-day wake-up streak.
+        best_streak: Highest Day Streak ever achieved.
+        last_successful_wake_date: Local calendar date of the last verified
+            successful wake (used to continue / reset the Day Streak).
+        consecutive_success_streak: Success Streak — consecutive successful
+            wake completions. +1 on verified dismiss only; resets on final
+            wake failure only; never touched by ring/snooze/mid-wrong or by
+            the adaptive engine (survives threshold adapts).
+        consecutive_failure_streak: Consecutive failed wake completions used
+            by adaptive difficulty (resets on successful wake; survives adapt).
+        last_adapted_success_streak: Success-streak watermark consumed by the
+            last difficulty raise (prevents re-firing until +N more successes).
+        last_adapted_failure_streak: Failure-streak watermark consumed by the
+            last difficulty drop.
         created_at: Timestamp of record creation (UTC).
         updated_at: Timestamp of last update (UTC).
         user: Back-reference to the parent ``User`` model.
@@ -77,14 +89,22 @@ class UserProfile(Base):
         default=DifficultyPreference.MEDIUM,
         nullable=False,
     )
+    adapted_difficulty = Column(
+        Enum(DifficultyPreference),
+        default=DifficultyPreference.MEDIUM,
+        nullable=False,
+    )
     habit_preferences = Column(JSON, nullable=True)
     wake_up_consistency_score = Column(Float, default=0.0, nullable=False)
     total_alarms_dismissed = Column(Integer, default=0, nullable=False)
     total_snoozes = Column(Integer, default=0, nullable=False)
     streak_days = Column(Integer, default=0, nullable=False)
     best_streak = Column(Integer, default=0, nullable=False)
+    last_successful_wake_date = Column(Date, nullable=True)
     consecutive_success_streak = Column(Integer, default=0, nullable=False)
     consecutive_failure_streak = Column(Integer, default=0, nullable=False)
+    last_adapted_success_streak = Column(Integer, default=0, nullable=False)
+    last_adapted_failure_streak = Column(Integer, default=0, nullable=False)
     created_at = Column(
         DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )

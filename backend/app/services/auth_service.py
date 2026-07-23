@@ -89,6 +89,7 @@ class AuthService:
             sleep_duration_hours=8.0,
             timezone=tz,
             difficulty_preference=DifficultyPreference.MEDIUM,
+            adapted_difficulty=DifficultyPreference.MEDIUM,
         )
         db.add(default_profile)
         db.commit()
@@ -371,6 +372,7 @@ class AuthService:
                         sleep_duration_hours=8.0,
                         timezone="UTC",
                         difficulty_preference=DifficultyPreference.MEDIUM,
+                        adapted_difficulty=DifficultyPreference.MEDIUM,
                     )
                 )
 

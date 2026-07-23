@@ -220,15 +220,17 @@ def test_derive_inputs_replays_clean_wakes():
         },
     ]
     inputs = derive_habit_score_inputs_from_events(events)
-    assert inputs == {
-        "wake_up_consistency_score": 15.0,
-        "total_alarms_dismissed": 3,
-        "total_snoozes": 0,
-        "streak_days": 3,
-    }
+    assert inputs["wake_up_consistency_score"] == 15.0
+    assert inputs["total_alarms_dismissed"] == 3
+    assert inputs["total_snoozes"] == 0
+    # Undated fixtures map each verified wake to a synthetic consecutive day.
+    assert inputs["streak_days"] == 3
+    assert inputs["best_streak"] == 3
+    assert inputs["last_successful_wake_date"] is not None
 
 
-def test_derive_inputs_snooze_exhausted_resets_streak():
+def test_derive_inputs_snooze_exhausted_keeps_calendar_streak():
+    """Snooze quality affects consistency, not Day Streak (verified success)."""
     events = [
         {
             "verified": True,
@@ -256,12 +258,12 @@ def test_derive_inputs_snooze_exhausted_resets_streak():
     assert inputs["total_snoozes"] == 3
     # +5 +5 −10 +5 = 5
     assert inputs["wake_up_consistency_score"] == 5.0
-    # streak reset then one clean wake
-    assert inputs["streak_days"] == 1
+    # Four verified successes on synthetic consecutive days → streak 4
+    assert inputs["streak_days"] == 4
 
 
-def test_derive_inputs_mid_cycle_snooze_breaks_streak():
-    """BUG-005: mid-cycle snoozes reset streak and apply a mild penalty."""
+def test_derive_inputs_mid_cycle_snooze_keeps_calendar_streak():
+    """Mid-cycle snoozes penalize consistency but still count as a success day."""
     events = [
         {
             "verified": True,
@@ -279,7 +281,77 @@ def test_derive_inputs_mid_cycle_snooze_breaks_streak():
     assert inputs["total_snoozes"] == 2
     # +5 then −5 mid-cycle penalty
     assert inputs["wake_up_consistency_score"] == 0.0
-    assert inputs["streak_days"] == 0
+    assert inputs["streak_days"] == 2
+
+
+def test_derive_same_calendar_day_counts_once():
+    """Multiple verified wakes on the same local day increment streak only once."""
+    from datetime import datetime, timezone
+
+    day = datetime(2026, 7, 20, 7, 0, tzinfo=timezone.utc)
+    same_day_later = datetime(2026, 7, 20, 8, 30, tzinfo=timezone.utc)
+    next_day = datetime(2026, 7, 21, 7, 0, tzinfo=timezone.utc)
+    events = [
+        {
+            "verified": True,
+            "snooze_count_at_dismiss": 0,
+            "dismiss_method": "challenge",
+            "dismissed_at": day,
+        },
+        {
+            "verified": True,
+            "snooze_count_at_dismiss": 1,
+            "dismiss_method": "challenge",
+            "dismissed_at": same_day_later,
+        },
+        {
+            "verified": True,
+            "snooze_count_at_dismiss": 0,
+            "dismiss_method": "challenge",
+            "dismissed_at": next_day,
+        },
+    ]
+    inputs = derive_habit_score_inputs_from_events(
+        events, timezone_name="UTC", as_of=next_day.date()
+    )
+    assert inputs["total_alarms_dismissed"] == 3
+    assert inputs["streak_days"] == 2
+    assert inputs["last_successful_wake_date"] == next_day.date()
+
+
+def test_derive_missed_day_resets_streak():
+    """A gap between success dates resets Day Streak; next success starts at 1."""
+    from datetime import datetime, timezone
+
+    events = [
+        {
+            "verified": True,
+            "snooze_count_at_dismiss": 0,
+            "dismiss_method": "challenge",
+            "dismissed_at": datetime(2026, 7, 18, 7, 0, tzinfo=timezone.utc),
+        },
+        {
+            "verified": True,
+            "snooze_count_at_dismiss": 0,
+            "dismiss_method": "challenge",
+            "dismissed_at": datetime(2026, 7, 19, 7, 0, tzinfo=timezone.utc),
+        },
+        # gap on 2026-07-20
+        {
+            "verified": True,
+            "snooze_count_at_dismiss": 0,
+            "dismiss_method": "challenge",
+            "dismissed_at": datetime(2026, 7, 21, 7, 0, tzinfo=timezone.utc),
+        },
+    ]
+    inputs = derive_habit_score_inputs_from_events(
+        events,
+        timezone_name="UTC",
+        as_of=datetime(2026, 7, 21).date(),
+    )
+    assert inputs["streak_days"] == 1
+    assert inputs["best_streak"] == 2
+    assert inputs["last_successful_wake_date"] == datetime(2026, 7, 21).date()
 
 
 def test_derive_ignores_unverified_events():
@@ -298,7 +370,6 @@ def test_derive_ignores_unverified_events():
     inputs = derive_habit_score_inputs_from_events(events)
     assert inputs["total_alarms_dismissed"] == 1
     assert inputs["streak_days"] == 1
-
 
 def test_derive_inputs_includes_puzzle_stats_from_wake_snapshots():
     """Wake-event challenge snapshots feed puzzle completion when present."""
@@ -411,7 +482,7 @@ def _seed_alarm(db_session, user_id: int) -> Alarm:
 def test_for_user_prefers_events_over_stale_profile_counters(
     db_session, test_user
 ):
-    """Displayed score must follow wake events even if counters drift."""
+    """Event counters refresh consistency/dismiss/snooze; Day Streak stays stored."""
     profile = UserProfile(
         user_id=test_user.id,
         wake_up_consistency_score=99.0,
@@ -439,18 +510,25 @@ def test_for_user_prefers_events_over_stale_profile_counters(
 
     stale = calculate_habit_score(profile)
     live = calculate_habit_score_for_user(db_session, test_user.id, profile)
-    # 4 clean wakes → consistency 20, dismissed 4, snoozes 0, streak 4
+    # Events refresh consistency/dismiss/snooze; stored Day Streak (30) is SSOT.
     expected = calculate_habit_score(
         {
             "wake_up_consistency_score": 20.0,
             "total_alarms_dismissed": 4,
             "total_snoozes": 0,
-            "streak_days": 4,
+            "streak_days": 30,
         }
     )
     assert live == expected
     assert live["habit_score"] != stale["habit_score"]
-    assert set(live.keys()) == {"habit_score", "breakdown", "weights"}
+    assert set(live.keys()) == {
+        "habit_score",
+        "breakdown",
+        "weights",
+        "success_streak",
+        "failure_streak",
+        "streak_days",
+    }
     assert set(live["breakdown"].keys()) == {
         "wake_up_consistency",
         "challenge_completion",
@@ -625,7 +703,14 @@ def test_for_user_uses_challenge_log_accuracy(db_session, test_user):
     )
     assert live == expected
     assert live["breakdown"]["challenge_completion"] == 60.0
-    assert set(live.keys()) == {"habit_score", "breakdown", "weights"}
+    assert set(live.keys()) == {
+        "habit_score",
+        "breakdown",
+        "weights",
+        "success_streak",
+        "failure_streak",
+        "streak_days",
+    }
 
 
 def test_challenge_logs_override_wake_event_puzzle_snapshots(

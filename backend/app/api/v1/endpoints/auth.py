@@ -89,6 +89,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
         sleep_duration_hours=8.0,
         timezone=tz,
         difficulty_preference=DifficultyPreference.MEDIUM,
+        adapted_difficulty=DifficultyPreference.MEDIUM,
     )
     db.add(default_profile)
     db.commit()

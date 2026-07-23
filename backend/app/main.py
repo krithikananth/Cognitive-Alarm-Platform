@@ -44,6 +44,10 @@ def _ensure_sqlite_columns() -> None:
         "INTEGER DEFAULT 0",
         "ALTER TABLE user_profiles ADD COLUMN consecutive_failure_streak "
         "INTEGER DEFAULT 0",
+        "ALTER TABLE user_profiles ADD COLUMN last_adapted_success_streak "
+        "INTEGER DEFAULT 0",
+        "ALTER TABLE user_profiles ADD COLUMN last_adapted_failure_streak "
+        "INTEGER DEFAULT 0",
         # Query indexes for adaptive difficulty / history / stats
         "CREATE INDEX IF NOT EXISTS ix_alarm_challenge_logs_user_id "
         "ON alarm_challenge_logs (user_id)",
@@ -76,6 +80,32 @@ def _ensure_sqlite_columns() -> None:
             except Exception:
                 # Column already exists / statement not applicable
                 pass
+        # adapted_difficulty must use enum NAMES (MEDIUM) to match
+        # difficulty_preference / SQLAlchemy Enum(DifficultyPreference).
+        try:
+            conn.exec_driver_sql(
+                "ALTER TABLE user_profiles ADD COLUMN adapted_difficulty "
+                "VARCHAR(50) DEFAULT 'MEDIUM'"
+            )
+            conn.exec_driver_sql(
+                "UPDATE user_profiles "
+                "SET adapted_difficulty = difficulty_preference"
+            )
+        except Exception:
+            pass
+        # Repair rows seeded with lowercase .value ('medium') instead of name.
+        # Exact lowercase only — do not touch valid names like MEDIUM/HARD.
+        try:
+            conn.exec_driver_sql(
+                "UPDATE user_profiles "
+                "SET adapted_difficulty = difficulty_preference "
+                "WHERE adapted_difficulty IS NULL "
+                "OR TRIM(adapted_difficulty) = '' "
+                "OR adapted_difficulty IN "
+                "('beginner','easy','medium','hard','expert')"
+            )
+        except Exception:
+            pass
 
 
 def _repair_attempt_logs_on_startup() -> None:
@@ -156,6 +186,7 @@ def create_app() -> FastAPI:
                     sleep_duration_hours=8.0,
                     timezone="Asia/Kolkata",
                     difficulty_preference=DifficultyPreference.MEDIUM,
+                    adapted_difficulty=DifficultyPreference.MEDIUM,
                 )
                 db.add(admin_profile)
                 db.commit()

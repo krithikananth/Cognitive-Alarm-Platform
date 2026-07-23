@@ -40,12 +40,14 @@ erDiagram
         string timezone
         json productivity_goals
         string difficulty_preference
+        string adapted_difficulty
         json habit_preferences
         float wake_up_consistency_score
         int total_alarms_dismissed
         int total_snoozes
         int streak_days
         int best_streak
+        date last_successful_wake_date
         int consecutive_success_streak
         int consecutive_failure_streak
     }
@@ -137,15 +139,17 @@ erDiagram
 | `sleep_duration_hours`        | `FLOAT`       | default `8.0`            | Target sleep duration                            |
 | `timezone`                    | `VARCHAR(50)` | default `UTC`            | IANA timezone                                    |
 | `productivity_goals`          | `JSON`        | nullable                 | Goal list                                        |
-| `difficulty_preference`       | `ENUM`        | default `medium`         | `beginner`…`expert`                              |
+| `difficulty_preference`       | `ENUM`        | default `medium`         | User-controlled preference (`beginner`…`expert`); never auto-modified |
+| `adapted_difficulty`          | `ENUM`        | default `medium`         | Adaptive working level (±1); reset to preference on manual change    |
 | `habit_preferences`           | `JSON`        | nullable                 | Habit-related prefs                              |
 | `wake_up_consistency_score`   | `FLOAT`       | default `0`              | Rolling consistency (0–100)                      |
 | `total_alarms_dismissed`      | `INTEGER`     | default `0`              | Lifetime verified dismissals                     |
 | `total_snoozes`               | `INTEGER`     | default `0`              | Lifetime snooze count                            |
-| `streak_days`                 | `INTEGER`     | default `0`              | Current clean-wake streak                        |
-| `best_streak`                 | `INTEGER`     | default `0`              | Best streak ever                                 |
-| `consecutive_success_streak`  | `INTEGER`     | default `0`              | Adaptive difficulty success streak               |
-| `consecutive_failure_streak`  | `INTEGER`     | default `0`              | Adaptive difficulty failure streak               |
+| `streak_days`                 | `INTEGER`     | default `0`              | Current consecutive calendar-day wake streak     |
+| `best_streak`                 | `INTEGER`     | default `0`              | Best Day Streak ever                             |
+| `last_successful_wake_date`   | `DATE`        | nullable                 | Local date of last verified successful wake      |
+| `consecutive_success_streak`  | `INTEGER`     | default `0`              | Success Streak: consecutive successful wake completions (+1 on verified dismiss only; reset on final wake failure only; never reset by adaptive threshold) |
+| `consecutive_failure_streak`  | `INTEGER`     | default `0`              | Consecutive failed wake completions (adaptive lowering) |
 
 ### 2.3 `alarms` — Alarm Definitions *(Milestone 2)*
 

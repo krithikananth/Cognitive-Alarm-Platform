@@ -36,9 +36,14 @@ export default function Dashboard() {
   const [digest, setDigest] = useState(null);
 
   useEffect(() => {
+    const loadStats = () => {
+      userAPI.getStats().then(res => setStats(res.data)).catch(() => {});
+    };
     fetchAlarms();
     fetchUpcoming();
-    userAPI.getStats().then(res => setStats(res.data)).catch(() => {});
+    loadStats();
+    window.addEventListener('icap:wake-completed', loadStats);
+    window.addEventListener('focus', loadStats);
 
     // Load daily coaching; if goals exist but productivity cards are missing,
     // merge at least one personalized productivity recommendation for Today's Coaching.
@@ -72,7 +77,12 @@ export default function Dashboard() {
         /* coaching is optional */
       }
     })();
-  }, []);
+
+    return () => {
+      window.removeEventListener('icap:wake-completed', loadStats);
+      window.removeEventListener('focus', loadStats);
+    };
+  }, [fetchAlarms, fetchUpcoming]);
 
   const greeting = () => {
     const hour = new Date().getHours();
@@ -129,6 +139,7 @@ export default function Dashboard() {
           label="Day Streak"
           value={stats?.current_streak != null ? stats.current_streak : '—'}
           color="from-orange-500 to-red-600"
+          hint="Consecutive successful wake-up days"
         />
         <StatCard
           icon={HiOutlineChartBar}
@@ -365,14 +376,15 @@ export default function Dashboard() {
 
 // ─── Sub-components ───
 
-function StatCard({ icon: Icon, label, value, color }) {
+function StatCard({ icon: Icon, label, value, color, hint }) {
   return (
-    <div className="stat-card">
+    <div className="stat-card" title={hint || undefined}>
       <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${color} flex items-center justify-center mb-2`}>
         <Icon className="w-5 h-5 text-white" />
       </div>
       <p className="stat-value">{value}</p>
       <p className="text-sm text-slate-400">{label}</p>
+      {hint ? <p className="text-xs text-slate-500 mt-1">{hint}</p> : null}
     </div>
   );
 }

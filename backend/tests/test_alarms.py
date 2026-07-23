@@ -123,10 +123,10 @@ class TestCreateAlarm:
             "beginner", "easy", "medium", "hard", "expert"
         }
 
-    def test_adaptive_difficulty_persists_to_profile(
+    def test_adaptive_difficulty_persists_to_adapted_level(
         self, client, test_user, auth_headers, db_session
     ):
-        """Adaptive ±1 is saved to difficulty_preference for the next session."""
+        """Adaptive ±1 is saved to adapted_difficulty; preference stays user-set."""
         from app.models.profile import DifficultyPreference, UserProfile
         from app.services.challenge_service import _adaptive_streak_threshold
 
@@ -166,19 +166,32 @@ class TestCreateAlarm:
         assert ch.json()["adaptive_difficulty"]["difficulty"] == "hard"
 
         db_session.refresh(profile)
-        assert profile.difficulty_preference == DifficultyPreference.HARD
-        assert profile.consecutive_success_streak == 0
+        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.adapted_difficulty == DifficultyPreference.HARD
+        assert profile.consecutive_success_streak == _adaptive_streak_threshold()
         assert profile.consecutive_failure_streak == 0
 
-        # Preference API also reflects the persisted adaptive value
+        # Preference API still reflects the user-controlled value
         again = client.get("/api/v1/profiles/me", headers=auth_headers)
         assert again.status_code == 200
-        assert again.json()["difficulty_preference"] == "hard"
+        assert again.json()["difficulty_preference"] == "medium"
+        assert again.json()["adapted_difficulty"] == "hard"
 
-        # Alarm baseline stays aligned for future sessions
+        # Alarm baseline stays aligned with adapted level for future sessions
         alarm = client.get(f"/api/v1/alarms/{alarm_id}", headers=auth_headers)
         assert alarm.status_code == 200
         assert alarm.json()["challenge_difficulty"] == "hard"
+
+        # Display streak survives adapt; next challenge must not re-raise.
+        ch2 = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        )
+        assert ch2.status_code == 200
+        assert ch2.json()["adaptive_difficulty"]["adjustment"] == 0
+        assert ch2.json()["adaptive_difficulty"]["success_streak"] == (
+            _adaptive_streak_threshold()
+        )
+        assert ch2.json()["adaptive_difficulty"]["difficulty"] == "hard"
 
     def test_create_alarm_minimal(self, client, test_user, auth_headers):
         """Creating an alarm with only the required fields uses sensible defaults."""

@@ -19,6 +19,7 @@ import {
   HiOutlineSun,
   HiOutlineBolt,
   HiOutlineBellAlert,
+  HiOutlineFire,
 } from 'react-icons/hi2';
 import {
   BarChart,
@@ -227,7 +228,7 @@ export default function Analytics() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-5">
           <MiniStat
             icon={HiOutlineBellAlert}
             label="Snoozes"
@@ -257,6 +258,15 @@ export default function Analytics() {
             value={
               habits?.current_habit_score != null
                 ? Math.round(habits.current_habit_score)
+                : '—'
+            }
+          />
+          <MiniStat
+            icon={HiOutlineFire}
+            label="Day Streak"
+            value={
+              sleep?.profile_streak_days != null
+                ? sleep.profile_streak_days
                 : '—'
             }
           />
@@ -303,6 +313,7 @@ export default function Analytics() {
                   : '—',
               ],
               ['Adherent days', `${sleep?.adherent_days ?? 0}/${sleep?.observed_days ?? 0}`],
+              ['Day Streak', sleep?.profile_streak_days ?? '—'],
               ['Avg deviation', sleep?.avg_deviation_minutes != null ? `${sleep.avg_deviation_minutes}m` : '—'],
             ]}
           />
@@ -699,6 +710,18 @@ export default function Analytics() {
               {analysis?.personalization?.adaptive_difficulty?.reason ||
                 'Adaptive difficulty shifts after 5 consecutive wake completions or failures.'}
             </p>
+            <div className="flex items-center justify-between text-sm mb-4">
+              <span className="text-slate-400">Success streak</span>
+              <span className="text-white font-medium">
+                {analysis?.personalization?.adaptive_difficulty?.success_streak ?? 0}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-sm mb-4">
+              <span className="text-slate-400">Failure streak</span>
+              <span className="text-white font-medium">
+                {analysis?.personalization?.adaptive_difficulty?.failure_streak ?? 0}
+              </span>
+            </div>
             <div className="flex items-center justify-between text-sm mb-4">
               <span className="text-slate-400">Profile preference</span>
               <span className="text-white capitalize">
