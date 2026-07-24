@@ -17,7 +17,6 @@ from app.services.challenge_service import (
     _adaptive_streak_threshold,
     DIFFICULTY_LEVELS,
 )
-from app.services.profile_service import ProfileService
 from app.models.alarm import ChallengeType, AlarmChallengeLog
 
 
@@ -939,10 +938,20 @@ class TestVerifyChallengeEndpoint:
         assert profile.consecutive_success_streak == 4
         assert profile.consecutive_failure_streak == 0
 
-        # Explicit final wake failure resets Success Streak.
-        ProfileService.update_adaptive_streaks(
-            db_session, profile, is_correct=False, commit=True
+        # Explicit final wake failure resets Success Streak via fail-wake.
+        # Prior verify dismissed the cycle, so open a new active session first.
+        client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
         )
+        fail = client.post(
+            f"/api/v1/alarms/{alarm_id}/fail-wake",
+            headers=auth_headers,
+        )
+        assert fail.status_code == 200
+        fail_body = fail.json()
+        assert fail_body["status"] == "failed"
+        assert fail_body["success_streak"] == 0
+        assert fail_body["failure_streak"] == 1
         db_session.refresh(profile)
         assert profile.consecutive_success_streak == 0
         assert profile.consecutive_failure_streak == 1
@@ -1529,3 +1538,194 @@ class TestSnoozeInfoEndpoint:
     def test_snooze_info_not_found(self, client, test_user, auth_headers):
         res = client.get("/api/v1/alarms/99999/snooze-info", headers=auth_headers)
         assert res.status_code == 404
+
+
+class TestFailWakeEndpoint:
+    """Tests for POST /api/v1/alarms/{alarm_id}/fail-wake."""
+
+    def _create_alarm(self, client, auth_headers, **overrides):
+        data = {
+            "title": "Fail Wake Test",
+            "alarm_time": "07:00",
+            "challenge_type": "math",
+            "challenge_count": 1,
+            **overrides,
+        }
+        res = client.post("/api/v1/alarms/", json=data, headers=auth_headers)
+        assert res.status_code == 201
+        return res.json()["id"]
+
+    def test_fail_wake_requires_active_session(
+        self, client, test_user, auth_headers
+    ):
+        """Without an open challenge session, fail-wake is rejected."""
+        alarm_id = self._create_alarm(client, auth_headers)
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/fail-wake", headers=auth_headers
+        )
+        assert res.status_code == 400
+
+    def test_fail_wake_increments_failure_streak(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Abandoning an active cycle +1 failure streak and clears success."""
+        from app.models.profile import UserProfile
+        from app.models.alarm_wake_event import AlarmWakeEvent
+
+        alarm_id = self._create_alarm(client, auth_headers)
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        profile.consecutive_success_streak = 3
+        profile.consecutive_failure_streak = 0
+        db_session.commit()
+
+        client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        )
+        res = client.post(
+            f"/api/v1/alarms/{alarm_id}/fail-wake", headers=auth_headers
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["status"] == "failed"
+        assert body["success_streak"] == 0
+        assert body["failure_streak"] == 1
+        assert body["dismiss_method"] == "abandoned"
+
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 0
+        assert profile.consecutive_failure_streak == 1
+
+        event = (
+            db_session.query(AlarmWakeEvent)
+            .filter(
+                AlarmWakeEvent.user_id == test_user.id,
+                AlarmWakeEvent.alarm_id == alarm_id,
+            )
+            .order_by(AlarmWakeEvent.id.desc())
+            .first()
+        )
+        assert event is not None
+        assert event.verified is False
+        assert event.dismiss_method == "abandoned"
+
+        # Second call without a new session must not double-count.
+        again = client.post(
+            f"/api/v1/alarms/{alarm_id}/fail-wake", headers=auth_headers
+        )
+        assert again.status_code == 400
+        db_session.refresh(profile)
+        assert profile.consecutive_failure_streak == 1
+
+    def test_wrong_answer_does_not_increment_failure_streak(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Mid-cycle wrong answers must not touch Failure Streak."""
+        from app.models.profile import UserProfile
+
+        alarm_id = self._create_alarm(client, auth_headers)
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        profile.consecutive_success_streak = 2
+        profile.consecutive_failure_streak = 0
+        db_session.commit()
+
+        ch = client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        ).json()
+        bad = client.post(
+            f"/api/v1/alarms/{alarm_id}/verify",
+            json={
+                "user_answer": "definitely_wrong_answer_xyz",
+                "time_taken_seconds": 5,
+                "challenge_prompt": ch["prompt"],
+                "challenge_difficulty": ch["difficulty"],
+            },
+            headers=auth_headers,
+        )
+        assert bad.status_code == 400
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 2
+        assert profile.consecutive_failure_streak == 0
+
+    def test_snooze_does_not_increment_failure_streak(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """Snooze continues the cycle and must not count as final failure."""
+        from app.models.profile import UserProfile
+
+        alarm_id = self._create_alarm(client, auth_headers, snooze_limit=3)
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        profile.consecutive_success_streak = 1
+        profile.consecutive_failure_streak = 0
+        db_session.commit()
+
+        client.get(
+            f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+        )
+        snooze = client.post(
+            f"/api/v1/alarms/{alarm_id}/snooze", headers=auth_headers
+        )
+        assert snooze.status_code == 200
+        db_session.refresh(profile)
+        assert profile.consecutive_success_streak == 1
+        assert profile.consecutive_failure_streak == 0
+
+    def test_fail_wake_lowers_difficulty_at_threshold(
+        self, client, test_user, auth_headers, db_session
+    ):
+        """N consecutive final failures should lower adapted difficulty."""
+        from app.models.profile import UserProfile, DifficultyPreference
+
+        alarm_id = self._create_alarm(client, auth_headers)
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        profile.difficulty_preference = DifficultyPreference.MEDIUM
+        profile.adapted_difficulty = DifficultyPreference.MEDIUM
+        profile.consecutive_success_streak = 0
+        profile.consecutive_failure_streak = 0
+        profile.last_adapted_failure_streak = 0
+        db_session.commit()
+
+        threshold = _adaptive_streak_threshold()
+        for n in range(1, threshold + 1):
+            client.get(
+                f"/api/v1/alarms/{alarm_id}/challenge", headers=auth_headers
+            )
+            res = client.post(
+                f"/api/v1/alarms/{alarm_id}/fail-wake", headers=auth_headers
+            )
+            assert res.status_code == 200
+            assert res.json()["failure_streak"] == n
+            db_session.refresh(profile)
+            assert profile.consecutive_failure_streak == n
+
+        assert profile.adapted_difficulty == DifficultyPreference.EASY
+        assert profile.difficulty_preference == DifficultyPreference.MEDIUM
+        assert profile.last_adapted_failure_streak == threshold
+
+        # Personalization analysis surfaces the updated Failure Streak.
+        analysis = client.get(
+            "/api/v1/alarms/challenge/analysis", headers=auth_headers
+        )
+        assert analysis.status_code == 200
+        adaptive = analysis.json()["personalization"]["adaptive_difficulty"]
+        assert adaptive["failure_streak"] == threshold
+        assert adaptive["success_streak"] == 0

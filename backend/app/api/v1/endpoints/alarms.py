@@ -836,7 +836,7 @@ def verify_alarm_challenge(
     # ── Timeout / wrong answer → reset in-session consecutive challenge ──
     # Success Streak and Day Streak are NOT updated here: mid-cycle
     # wrong/timeout is not a final wake outcome. Streaks wait for verified
-    # dismiss (or an explicit final failure).
+    # dismiss (or ``POST /fail-wake`` for an explicit final failure).
     if timed_out or not is_correct:
         progress = ChallengeService.record_failed_attempt(
             current_user.id, alarm_id, db, reset_streak=True
@@ -1030,6 +1030,190 @@ def dismiss_alarm(
         dismiss_method=dismiss_method,
         verification=session,
     )
+
+
+@router.post(
+    "/{alarm_id}/fail-wake",
+    summary="Record a final failed wake (abandon active cycle)",
+)
+def fail_wake(
+    alarm_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """End an active wake cycle as a final failure.
+
+    This is the only production path that increments Failure Streak.
+    Mid-cycle wrong answers, timeouts, ringing, and snoozes must never
+    call this — those are not final wake outcomes.
+
+    Requires an active challenge session that has not already been
+    wake-confirmed. Applies:
+
+    - Failure Streak +1, Success Streak → 0
+    - Day Streak failure (no-op if already succeeded today)
+    - Adaptive difficulty persist when the failure threshold is met
+    - Unverified ``AlarmWakeEvent`` with ``dismiss_method="abandoned"``
+    """
+    alarm = (
+        db.query(Alarm)
+        .filter(Alarm.id == alarm_id, Alarm.user_id == current_user.id)
+        .first()
+    )
+    if not alarm:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Alarm not found",
+        )
+
+    session = ChallengeService.get_challenge_session(
+        current_user.id, alarm_id, db
+    )
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "No active wake cycle to fail. Open the challenge first, "
+                "or the cycle was already closed."
+            ),
+        )
+    if session.get("wake_confirmed"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Wake already verified for this cycle. Use dismiss instead "
+                "of fail-wake."
+            ),
+        )
+
+    return _fail_wake_internal(alarm, current_user, db, session=session)
+
+
+def _fail_wake_internal(
+    alarm: Alarm,
+    current_user: User,
+    db: Session,
+    *,
+    session: dict,
+):
+    """Shared final-failure logic for an active (unverified) wake cycle."""
+    now = datetime.now(timezone.utc)
+    user_tz = _user_timezone(db, current_user.id)
+    profile = ProfileService.get_or_create_profile(db, current_user.id)
+
+    consecutive = int(session.get("consecutive_correct") or 0)
+    required = int(
+        session.get("required_correct") or alarm.challenge_count or 1
+    )
+    failed = int(session.get("total_failed_attempts") or 0)
+    started = session.get("session_started_at")
+    time_to_fail = None
+    if started is not None:
+        if getattr(started, "tzinfo", None) is None:
+            started = started.replace(tzinfo=timezone.utc)
+        time_to_fail = max(0, int((now - started).total_seconds()))
+
+    # Schedule the next ring the same way a completed cycle would.
+    if alarm.alarm_type == AlarmType.ONE_TIME:
+        alarm.is_active = False
+        alarm.next_trigger_at = None
+    else:
+        alarm.next_trigger_at = _calculate_next_trigger(
+            alarm, user_tz=user_tz, db=db, user_id=current_user.id
+        )
+    alarm.last_triggered_at = now
+
+    wake_event = AlarmWakeEvent(
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        triggered_at=started or now,
+        dismissed_at=now,
+        dismiss_method="abandoned",
+        challenges_required=required,
+        challenges_completed=consecutive,
+        consecutive_correct=consecutive,
+        failed_attempts=failed,
+        snooze_count_at_dismiss=alarm.total_snoozes,
+        time_to_dismiss_seconds=time_to_fail,
+        wakefulness_score=None,
+        wakefulness_level=None,
+        verified=False,
+    )
+    db.add(wake_event)
+    db.flush()
+
+    AnalyticsIngestionService.emit_alarm_abandoned(
+        db,
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        wake_event_id=wake_event.id,
+        dismiss_method="abandoned",
+        snooze_count=alarm.total_snoozes,
+        consecutive_correct=consecutive,
+        challenges_required=required,
+        failed_attempts=failed,
+        time_to_fail_seconds=time_to_fail,
+        commit=False,
+    )
+
+    # Final wake outcome — Failure Streak +1, Success Streak → 0.
+    # Mid-cycle wrong/timeout / snooze / ring must never reach here.
+    ProfileService.update_adaptive_streaks(
+        db,
+        profile,
+        is_correct=False,
+        commit=False,
+    )
+    DayStreakService.record_wake_outcome(
+        profile,
+        outcome="failure",
+        at=now,
+        timezone_name=user_tz,
+    )
+
+    # Mild consistency penalty for abandoning an active cycle.
+    profile.wake_up_consistency_score = max(
+        0.0, float(profile.wake_up_consistency_score or 0.0) - 5.0
+    )
+    profile.total_snoozes += alarm.total_snoozes
+
+    # Persist adaptive ±1 when failure threshold is newly met.
+    ProfileService.persist_adaptive_difficulty_if_needed(
+        db,
+        profile,
+        alarm_difficulty=getattr(alarm, "challenge_difficulty", None),
+        commit=False,
+    )
+
+    alarm.total_snoozes = 0
+    ChallengeService.clear_challenge_session(current_user.id, alarm.id, db)
+
+    db.commit()
+    db.refresh(alarm)
+    db.refresh(profile)
+    RecommendationCache.invalidate_user(current_user.id)
+
+    failure_streak = int(profile.consecutive_failure_streak or 0)
+    success_streak = int(profile.consecutive_success_streak or 0)
+    adapted = (
+        profile.adapted_difficulty.value
+        if getattr(profile, "adapted_difficulty", None)
+        else None
+    )
+    return {
+        "status": "failed",
+        "message": (
+            f"Wake cycle abandoned. Failure streak is now {failure_streak}."
+        ),
+        "wake_confirmed": False,
+        "is_dismissed": False,
+        "dismiss_method": "abandoned",
+        "success_streak": success_streak,
+        "failure_streak": failure_streak,
+        "adapted_difficulty": adapted,
+        "day_streak": int(profile.streak_days or 0),
+        "alarm": AlarmResponse.model_validate(alarm).model_dump(mode="json"),
+    }
 
 
 def _dismiss_alarm_internal(

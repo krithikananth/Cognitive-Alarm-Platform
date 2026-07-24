@@ -64,7 +64,9 @@ class UserProfile(Base):
             wake failure only; never touched by ring/snooze/mid-wrong or by
             the adaptive engine (survives threshold adapts).
         consecutive_failure_streak: Consecutive failed wake completions used
-            by adaptive difficulty (resets on successful wake; survives adapt).
+            by adaptive difficulty. +1 only via ``POST /alarms/{id}/fail-wake``
+            (final abandoned cycle); resets on verified dismiss; never touched
+            by ring/snooze/mid-wrong. Survives adapt watermarks.
         last_adapted_success_streak: Success-streak watermark consumed by the
             last difficulty raise (prevents re-firing until +N more successes).
         last_adapted_failure_streak: Failure-streak watermark consumed by the
