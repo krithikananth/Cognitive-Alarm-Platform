@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Cognitive Challenge</title>
+
+    <style>
+        body {
+            font-family: Arial;
+            background: #f4f4f4;
+            text-align: center;
+            margin-top: 50px;
+        }
+
+        .card {
+            width: 500px;
+            margin: auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px gray;
+        }
+
+        input {
+            width: 80%;
+            padding: 10px;
+            margin: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #007BFF;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        .message {
+            margin-top: 15px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="card">
+
+        <h2>Cognitive Challenge</h2>
+
+        <h3>{{ question.question_type }}</h3>
+
+        <p>{{ question.question }}</p>
+
+        <form method="POST">
+            {% csrf_token %}
+            <input type="text" name="answer" placeholder="Enter your answer">
+            <br><br>
+            <button type="submit">Submit Answer</button>
+        </form>
+
+        <p class="message">{{ message }}</p>
+
+        <br>
+
+        <a href="?index={{ next_index }}">
+            <button>Next Question</button>
+        </a>
+
+    </div>
+
+</body>
+
+</html>
