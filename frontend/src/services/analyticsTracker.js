@@ -11,6 +11,7 @@ export const AnalyticsEventType = {
   ALARM_SNOOZED: 'alarm.snoozed',
   ALARM_DISMISSED: 'alarm.dismissed',
   ALARM_MISSED: 'alarm.missed',
+  ALARM_ABANDONED: 'alarm.abandoned',
   CHALLENGE_COMPLETED: 'challenge.completed',
   CHALLENGE_FAILED: 'challenge.failed',
   WAKE_VERIFIED: 'wake.verified',
@@ -182,5 +183,17 @@ export function trackAlarmMissed(alarmId, eventData = {}, dedupeKey) {
     eventData,
     dedupeKey:
       dedupeKey ?? `${alarmId}:missed:${eventData.next_trigger_at ?? eventData.trigger_at ?? 'n'}`,
+  });
+}
+
+export function trackAlarmAbandoned(alarmId, eventData = {}, dedupeKey) {
+  trackAnalyticsEventFireAndForget({
+    eventType: AnalyticsEventType.ALARM_ABANDONED,
+    entityType: 'alarm',
+    entityId: alarmId,
+    eventData: { ...eventData, verified: false },
+    dedupeKey:
+      dedupeKey ??
+      `${alarmId}:abandoned:${eventData.failure_streak ?? 'n'}:${eventData.attempt_nonce ?? Date.now()}`,
   });
 }

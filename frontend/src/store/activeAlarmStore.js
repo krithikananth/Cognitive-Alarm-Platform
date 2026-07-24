@@ -7,6 +7,7 @@ import { alarmAPI } from '../services/api';
 import {
   trackAlarmDismissed,
   trackAlarmSnoozed,
+  trackAlarmAbandoned,
   trackChallengeCompleted,
   trackChallengeFailed,
   trackWakeVerified,
@@ -373,6 +374,70 @@ const useActiveAlarmStore = create((set, get) => ({
       } catch (e) { /* ignore fetch error */ }
 
       return { success: false, error: msg, streakReset, wakefulness: payload.wakefulness };
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────
+  // FAIL WAKE — final abandoned cycle (not mid-cycle wrong)
+  // ─────────────────────────────────────────────────────────
+  failWake: async () => {
+    const alarmId = get().ringingAlarmId;
+    if (!alarmId) return { success: false };
+
+    set({ isLoading: true, error: null });
+    try {
+      const res = await alarmAPI.failWake(alarmId);
+      const data = res.data || {};
+      get()._stopTimer();
+
+      const attemptNonce = `${Date.now()}:abandon`;
+      trackAlarmAbandoned(
+        alarmId,
+        {
+          dismiss_method: 'abandoned',
+          failure_streak: data.failure_streak ?? null,
+          success_streak: data.success_streak ?? null,
+          consecutive_correct: get().consecutiveCorrect,
+          attempt_nonce: attemptNonce,
+        },
+        `${alarmId}:abandoned:${attemptNonce}`
+      );
+
+      set({
+        ringingAlarmId: null,
+        isRinging: false,
+        challenge: null,
+        isLoading: false,
+        currentStep: 1,
+        consecutiveCorrect: 0,
+        failedAttempts: 0,
+        lastWakefulness: null,
+      });
+
+      try {
+        await useAlarmStore.getState().fetchAlarms();
+      } catch (e) { /* ignore refresh errors */ }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('icap:wake-completed'));
+      }
+
+      return {
+        success: true,
+        abandoned: true,
+        message: data.message,
+        success_streak: data.success_streak,
+        failure_streak: data.failure_streak,
+        adapted_difficulty: data.adapted_difficulty,
+        day_streak: data.day_streak,
+      };
+    } catch (err) {
+      const payload = err.response?.data || {};
+      const msg =
+        (typeof payload.detail === 'string' ? payload.detail : null) ||
+        'Could not abandon wake cycle.';
+      set({ error: msg, isLoading: false });
+      return { success: false, error: msg };
     }
   },
 }));

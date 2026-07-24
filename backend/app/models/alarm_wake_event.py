@@ -11,7 +11,13 @@ from app.db.base import Base
 
 
 class AlarmWakeEvent(Base):
-    """Records one wake-up cycle from trigger through verified dismissal."""
+    """Records one wake-up cycle from trigger through final outcome.
+
+    Successful cycles set ``verified=True``. Final failed wakes
+    (abandoned cycles) set ``verified=False`` with
+    ``dismiss_method="abandoned"``. Mid-cycle wrong answers and snoozes
+    do not create wake events.
+    """
 
     __tablename__ = "alarm_wake_events"
 
@@ -26,6 +32,7 @@ class AlarmWakeEvent(Base):
 
     # challenge = solved without exhausting snooze limit
     # snooze_exhausted = dismissed only after max snoozes were used
+    # abandoned = final failed wake (user gave up / cycle ended in failure)
     # unverified_blocked = dismiss rejected (no verification)
     dismiss_method = Column(String(50), nullable=True)
     challenges_required = Column(Integer, nullable=False, default=1)

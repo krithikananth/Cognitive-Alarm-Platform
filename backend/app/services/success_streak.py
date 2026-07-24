@@ -1,23 +1,26 @@
 """
-Success Streak — consecutive successful wake completions.
+Success / Failure Streak — consecutive final wake outcomes.
 
 Success Streak is the number of alarms dismissed in a row after the user
-solved the required challenge(s). It is the single source of truth for:
+solved the required challenge(s). Failure Streak is the number of final
+failed wake completions in a row (e.g. abandoned cycles). Both are the
+single source of truth for:
 
 - Adaptive difficulty threshold checks (read-only for the engine)
-- Analytics → Personalization "Success streak"
-- Profile / habit-score / recommendation surfaces that expose the counter
+- Analytics → Personalization "Success streak" / "Failure streak"
+- Profile / habit-score / recommendation surfaces that expose the counters
 
 Rules (final-outcome only):
-- Increment by exactly 1 after a successful wake completion (verified dismiss).
-- Reset to 0 after a failed wake completion (final failure only).
+- Success: +1 success and clear failure after a verified dismiss.
+- Failure: +1 failure and clear success after a final failed wake only
+  (``POST /alarms/{id}/fail-wake``). Never on mid-cycle wrong/timeout.
 - Do not update while the alarm is ringing or while the user is snoozing.
 - Do not update on mid-cycle wrong answers or timeouts (those only reset
   the in-session consecutive-challenge progress).
 - Update at most once per alarm cycle after the final outcome is known.
 - Never reset after reaching the adaptive difficulty threshold (e.g. 5);
-  the streak keeps climbing until a failure. Watermarks on the profile
-  prevent re-firing adapts without mutating this counter.
+  the streak keeps climbing until the opposite final outcome. Watermarks
+  on the profile prevent re-firing adapts without mutating these counters.
 """
 
 from __future__ import annotations

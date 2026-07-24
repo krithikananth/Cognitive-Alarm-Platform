@@ -149,7 +149,7 @@ erDiagram
 | `best_streak`                 | `INTEGER`     | default `0`              | Best Day Streak ever                             |
 | `last_successful_wake_date`   | `DATE`        | nullable                 | Local date of last verified successful wake      |
 | `consecutive_success_streak`  | `INTEGER`     | default `0`              | Success Streak: consecutive successful wake completions (+1 on verified dismiss only; reset on final wake failure only; never reset by adaptive threshold) |
-| `consecutive_failure_streak`  | `INTEGER`     | default `0`              | Consecutive failed wake completions (adaptive lowering) |
+| `consecutive_failure_streak`  | `INTEGER`     | default `0`              | Failure Streak: consecutive final failed wake completions (+1 on `POST /alarms/{id}/fail-wake` only; reset on verified dismiss; never mid-cycle wrong/snooze) |
 
 ### 2.3 `alarms` — Alarm Definitions *(Milestone 2)*
 

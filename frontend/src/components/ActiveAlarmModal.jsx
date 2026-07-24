@@ -24,7 +24,7 @@ const MEMORY_DISPLAY_MS = {
 export default function ActiveAlarmModal() {
   const {
     isRinging, challenge, isLoading, error,
-    verifyAndDismiss, snoozeAlarm,
+    verifyAndDismiss, snoozeAlarm, failWake,
     currentStep, totalSteps,
     canSnooze, snoozeCount, snoozeLimit, snoozeIntervalMinutes,
     escalationLevel,
@@ -168,6 +168,21 @@ export default function ActiveAlarmModal() {
       const mins = res.intervalMinutes || snoozeIntervalMinutes || 5;
       toast.success(
         `Snoozed ${mins} min — next challenge will be harder (escalation ${res.escalationLevel}).`
+      );
+    }
+  };
+
+  const handleGiveUp = async () => {
+    if (isLoading) return;
+    const confirmed = window.confirm(
+      'Give up on this wake cycle? This counts as a failed wake and increases your Failure streak.'
+    );
+    if (!confirmed) return;
+    const res = await failWake();
+    if (res?.success) {
+      const streak = res.failure_streak ?? 0;
+      toast.error(
+        res.message || `Wake abandoned. Failure streak: ${streak}.`
       );
     }
   };
@@ -411,6 +426,16 @@ export default function ActiveAlarmModal() {
                     {snoozeBlockedMessage}
                   </p>
                 )}
+
+                {/* Final failed wake — not a mid-cycle wrong answer */}
+                <button
+                  type="button"
+                  onClick={handleGiveUp}
+                  disabled={isLoading}
+                  className="mt-4 text-red-400/70 hover:text-red-300 text-xs font-medium underline decoration-red-500/30 hover:decoration-red-400 underline-offset-4 transition"
+                >
+                  Give up this wake
+                </button>
               </div>
             )}
           </div>

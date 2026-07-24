@@ -33,6 +33,7 @@ class AnalyticsEventType:
     ALARM_SNOOZED = "alarm.snoozed"
     ALARM_SNOOZE_BLOCKED = "alarm.snooze_blocked"
     ALARM_DISMISSED = "alarm.dismissed"
+    ALARM_ABANDONED = "alarm.abandoned"
     CHALLENGE_ISSUED = "challenge.issued"
     CHALLENGE_ATTEMPTED = "challenge.attempted"
     WAKE_VERIFIED = "wake.verified"
@@ -337,6 +338,42 @@ class AnalyticsIngestionService:
                 "wakefulness_score": wakefulness_score,
                 "wakefulness_level": wakefulness_level,
                 "time_to_dismiss_seconds": time_to_dismiss_seconds,
+            },
+            source="server",
+            commit=commit,
+        )
+
+    @staticmethod
+    def emit_alarm_abandoned(
+        db: Session,
+        *,
+        user_id: int,
+        alarm_id: int,
+        wake_event_id: Optional[int],
+        dismiss_method: str,
+        snooze_count: int,
+        consecutive_correct: int,
+        challenges_required: int,
+        failed_attempts: int,
+        time_to_fail_seconds: Optional[int],
+        commit: bool = False,
+    ) -> Optional[AnalyticsEvent]:
+        """Emit a final failed-wake analytics event (not mid-cycle wrong)."""
+        return AnalyticsIngestionService.emit_safe(
+            db,
+            user_id=user_id,
+            event_type=AnalyticsEventType.ALARM_ABANDONED,
+            entity_type="alarm",
+            entity_id=alarm_id,
+            event_data={
+                "wake_event_id": wake_event_id,
+                "dismiss_method": dismiss_method,
+                "snooze_count": snooze_count,
+                "consecutive_correct": consecutive_correct,
+                "challenges_required": challenges_required,
+                "failed_attempts": failed_attempts,
+                "time_to_fail_seconds": time_to_fail_seconds,
+                "verified": False,
             },
             source="server",
             commit=commit,

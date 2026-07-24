@@ -108,6 +108,7 @@ export const alarmAPI = {
   upcoming: (hours = 24) => api.get('/alarms/upcoming', { params: { hours_ahead: hours } }),
   snooze: (id) => api.post(`/alarms/${id}/snooze`),
   dismiss: (id, data = {}) => api.post(`/alarms/${id}/dismiss`, data),
+  failWake: (id) => api.post(`/alarms/${id}/fail-wake`),
   getSnoozeInfo: (id) => api.get(`/alarms/${id}/snooze-info`),
   getChallenge: (id) => api.get(`/alarms/${id}/challenge`),
   verifyChallenge: (id, data) => api.post(`/alarms/${id}/verify`, data),
