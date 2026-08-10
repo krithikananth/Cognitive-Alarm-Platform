@@ -15,7 +15,7 @@ import {
   HiOutlineMoon,
 } from 'react-icons/hi2';
 import toast from 'react-hot-toast';
-import { reportsAPI } from '../services/api';
+import { reportsAPI, readErrorDetail } from '../services/api';
 import { formatHabitScore } from '../utils/habitScore';
 
 const fadeUp = {
@@ -119,8 +119,7 @@ export default function Reports() {
       const { data } = await reportsAPI.get(selectedType, dateParams);
       setReport(data);
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Failed to load report');
+      toast.error(await readErrorDetail(err, 'Failed to load report'));
       setReport(null);
     } finally {
       setLoading(false);
@@ -137,6 +136,10 @@ export default function Reports() {
 
   const handleExport = async (format) => {
     if (!selectedType) return;
+    if (useCustomRange && (!startDate || !endDate)) {
+      toast.error('Select both start and end dates');
+      return;
+    }
     setExporting(format);
     try {
       const res = await reportsAPI.export(selectedType, format, dateParams);
@@ -156,8 +159,7 @@ export default function Reports() {
       window.URL.revokeObjectURL(url);
       toast.success(`${format.toUpperCase()} downloaded`);
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Export failed');
+      toast.error(await readErrorDetail(err, 'Export failed'));
     } finally {
       setExporting(null);
     }

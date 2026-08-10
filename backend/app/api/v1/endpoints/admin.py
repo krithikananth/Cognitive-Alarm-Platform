@@ -30,7 +30,7 @@ from typing import Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
-from sqlalchemy import and_, case, func
+from sqlalchemy import and_, case, extract, func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin
@@ -85,9 +85,12 @@ def _safe_division(numerator: float, denominator: float, decimals: int = 1) -> f
 
 
 def _lookback_start(days: int) -> datetime:
-    """Return the UTC datetime marking the start of the lookback window."""
+    """Return the UTC datetime marking the start of the lookback window.
+
+    ``days=N`` covers N calendar days ending today (inclusive).
+    """
     return (
-        datetime.now(timezone.utc) - timedelta(days=days)
+        datetime.now(timezone.utc) - timedelta(days=max(1, days) - 1)
     ).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -153,6 +156,18 @@ def _daily_trend(
             for i in range(days)
         )
     ]
+
+
+def _hour_weekday_exprs(db: Session, column):
+    """Dialect-aware SQL extraction of hour-of-day and weekday from ``column``.
+
+    Both dialects number the weekday from Sunday=0, so callers translate it to
+    the Monday-first index the API returns. Datetimes are stored naive UTC, so
+    these extract exactly what ``datetime.hour`` / ``.weekday()`` used to.
+    """
+    if db.get_bind().dialect.name == "postgresql":
+        return extract("hour", column), extract("dow", column)
+    return func.strftime("%H", column), func.strftime("%w", column)
 
 
 # ── 1. GET /admin/dashboard — Enhanced Dashboard Summary ────────────────
@@ -740,116 +755,39 @@ def admin_statistics(
         db, User.created_at, window_start, days, "registrations"
     )
 
-    # ── Activity distribution by hour / weekday (wake events in period) ──
-    # Only ``dismissed_at`` is fetched: the hour and weekday histograms are the
-    # only parts that need per-row data. Everything else about wake events is
-    # aggregated in SQL below. Hydrating full ORM entities here dominated this
-    # endpoint's response time.
-    dismissed_timestamps = (
-        db.query(AlarmWakeEvent.dismissed_at)
-        .filter(_in_window(AlarmWakeEvent.dismissed_at, window_start, window_end))
-        .all()
-    )
+    # ── Wake events: activity histograms + outcome breakdown (in period) ──
+    # One grouped pass serves both. Extracting the hour and weekday in SQL is
+    # what keeps a 365-day window off the row-streaming path: this previously
+    # pulled every matching ``dismissed_at`` into Python just to bucket it.
+    hour_expr, weekday_expr = _hour_weekday_exprs(db, AlarmWakeEvent.dismissed_at)
+
     by_hour: dict = {}
     by_weekday: dict = {}
-    for (dismissed_at,) in dismissed_timestamps:
-        if not dismissed_at:
-            continue
-        dt = dismissed_at
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        by_hour[dt.hour] = by_hour.get(dt.hour, 0) + 1
-        wd = dt.weekday()
-        by_weekday[wd] = by_weekday.get(wd, 0) + 1
-
-    activity_by_hour = [
-        {"hour": h, "count": by_hour.get(h, 0)} for h in range(24)
-    ]
-    weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    activity_by_weekday = [
-        {"weekday": weekday_names[wd], "weekday_index": wd, "count": by_weekday.get(wd, 0)}
-        for wd in range(7)
-    ]
-
-    # ── Challenge breakdown (in period) ──
-    # Grouped in SQL rather than by scanning every log row into Python.
-    challenge_window = _in_window(
-        AlarmChallengeLog.created_at, window_start, window_end
-    )
-    correct_sum = func.sum(
-        case((AlarmChallengeLog.is_correct.is_(True), 1), else_=0)
-    )
-
-    challenge_by_type: dict = {}
-    for ct, total, correct, points in (
-        db.query(
-            AlarmChallengeLog.challenge_type,
-            func.count(AlarmChallengeLog.id),
-            correct_sum,
-            func.coalesce(func.sum(AlarmChallengeLog.points_earned), 0),
-        )
-        .filter(challenge_window)
-        .group_by(AlarmChallengeLog.challenge_type)
-        .all()
-    ):
-        bucket = challenge_by_type.setdefault(
-            ct or "unknown", {"total": 0, "correct": 0, "points": 0}
-        )
-        bucket["total"] += int(total or 0)
-        bucket["correct"] += int(correct or 0)
-        bucket["points"] += int(points or 0)
-
-    for ct_data in challenge_by_type.values():
-        ct_data["accuracy_pct"] = _safe_division(
-            ct_data["correct"], ct_data["total"], 1
-        ) * 100
-
-    # ── Challenge difficulty breakdown ──
-    challenge_by_difficulty: dict = {}
-    for diff, total, correct in (
-        db.query(
-            AlarmChallengeLog.difficulty,
-            func.count(AlarmChallengeLog.id),
-            correct_sum,
-        )
-        .filter(challenge_window)
-        .group_by(AlarmChallengeLog.difficulty)
-        .all()
-    ):
-        bucket = challenge_by_difficulty.setdefault(
-            diff or "unknown", {"total": 0, "correct": 0}
-        )
-        bucket["total"] += int(total or 0)
-        bucket["correct"] += int(correct or 0)
-
-    for diff_data in challenge_by_difficulty.values():
-        diff_data["accuracy_pct"] = _safe_division(
-            diff_data["correct"], diff_data["total"], 1
-        ) * 100
-
-    total_challenge_attempts = sum(
-        d["total"] for d in challenge_by_type.values()
-    )
-    total_challenge_correct = sum(
-        d["correct"] for d in challenge_by_type.values()
-    )
-
-    # ── Wake outcome breakdown (dismiss method, verification, dismiss time) ──
     total_wakes = 0
     verified_wake_count = 0
     dismiss_methods: dict = {}
     dismiss_time_sum = 0
     dismiss_time_count = 0
-    for method, verified, count, time_sum, time_count in (
+
+    for hour, weekday, method, verified, count, time_sum, time_count in (
         db.query(
+            hour_expr,
+            weekday_expr,
             AlarmWakeEvent.dismiss_method,
             AlarmWakeEvent.verified,
-            func.count(AlarmWakeEvent.id),
+            # count(*) rather than count(id): the id column is not part of the
+            # covering index, and referencing it would forfeit the index-only scan.
+            func.count(),
             func.coalesce(func.sum(AlarmWakeEvent.time_to_dismiss_seconds), 0),
             func.count(AlarmWakeEvent.time_to_dismiss_seconds),
         )
         .filter(_in_window(AlarmWakeEvent.dismissed_at, window_start, window_end))
-        .group_by(AlarmWakeEvent.dismiss_method, AlarmWakeEvent.verified)
+        .group_by(
+            hour_expr,
+            weekday_expr,
+            AlarmWakeEvent.dismiss_method,
+            AlarmWakeEvent.verified,
+        )
         .all()
     ):
         count = int(count or 0)
@@ -861,10 +799,85 @@ def admin_statistics(
             dismiss_time_sum += int(time_sum or 0)
             dismiss_time_count += int(time_count or 0)
 
+        h = int(hour)
+        by_hour[h] = by_hour.get(h, 0) + count
+        # Sunday-first in SQL, Monday-first in the response.
+        wd = (int(weekday) + 6) % 7
+        by_weekday[wd] = by_weekday.get(wd, 0) + count
+
+    activity_by_hour = [
+        {"hour": h, "count": by_hour.get(h, 0)} for h in range(24)
+    ]
+    weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    activity_by_weekday = [
+        {"weekday": weekday_names[wd], "weekday_index": wd, "count": by_weekday.get(wd, 0)}
+        for wd in range(7)
+    ]
+
     avg_dismiss = (
         round(dismiss_time_sum / dismiss_time_count, 1)
         if dismiss_time_count
         else None
+    )
+
+    # ── Challenge breakdown (in period) ──
+    # Grouped in SQL rather than by scanning every log row into Python.
+    challenge_window = _in_window(
+        AlarmChallengeLog.created_at, window_start, window_end
+    )
+    correct_sum = func.sum(
+        case((AlarmChallengeLog.is_correct.is_(True), 1), else_=0)
+    )
+
+    # Grouping by type *and* difficulty in one pass feeds both breakdowns from
+    # a single scan; they used to be two full scans of the same window.
+    challenge_by_type: dict = {}
+    challenge_by_difficulty: dict = {}
+    for ct, diff, total, correct, points in (
+        db.query(
+            AlarmChallengeLog.challenge_type,
+            AlarmChallengeLog.difficulty,
+            func.count(),
+            correct_sum,
+            func.coalesce(func.sum(AlarmChallengeLog.points_earned), 0),
+        )
+        .filter(challenge_window)
+        .group_by(
+            AlarmChallengeLog.challenge_type, AlarmChallengeLog.difficulty
+        )
+        .all()
+    ):
+        total = int(total or 0)
+        correct = int(correct or 0)
+
+        bucket = challenge_by_type.setdefault(
+            ct or "unknown", {"total": 0, "correct": 0, "points": 0}
+        )
+        bucket["total"] += total
+        bucket["correct"] += correct
+        bucket["points"] += int(points or 0)
+
+        diff_bucket = challenge_by_difficulty.setdefault(
+            diff or "unknown", {"total": 0, "correct": 0}
+        )
+        diff_bucket["total"] += total
+        diff_bucket["correct"] += correct
+
+    for ct_data in challenge_by_type.values():
+        ct_data["accuracy_pct"] = _safe_division(
+            ct_data["correct"], ct_data["total"], 1
+        ) * 100
+
+    for diff_data in challenge_by_difficulty.values():
+        diff_data["accuracy_pct"] = _safe_division(
+            diff_data["correct"], diff_data["total"], 1
+        ) * 100
+
+    total_challenge_attempts = sum(
+        d["total"] for d in challenge_by_type.values()
+    )
+    total_challenge_correct = sum(
+        d["correct"] for d in challenge_by_type.values()
     )
 
     return {

@@ -256,6 +256,27 @@ class TestReportExport:
         assert "Summary" in wb.sheetnames
         assert "Challenge Types" in wb.sheetnames
 
+    def test_pdf_export_survives_typographic_punctuation(self, db_session, test_user):
+        """Insight copy contains em dashes; the core PDF fonts are latin-1 only.
+
+        ``BehavioralAnalyticsService`` emits lines such as "trending down — keep
+        reinforcing...", which used to abort the whole export with
+        ``FPDFUnicodeEncodingException``.
+        """
+        _ensure_profile(db_session, test_user.id)
+        report = ReportService.build_report(
+            db_session, test_user.id, ReportType.HABIT, days=30
+        )
+        report["insights"] = [
+            "Snooze volume is trending down \u2014 keep reinforcing dismissals.",
+            "Wake time \u2192 07:00 \u00b1 15 min, consistency \u2248 82%.",
+        ]
+
+        pdf_bytes = render_pdf(report)
+
+        assert pdf_bytes[:4] == b"%PDF"
+        assert len(pdf_bytes) > 200
+
 
 class TestReportsAPI:
     def test_list_report_types(self, client, auth_headers):

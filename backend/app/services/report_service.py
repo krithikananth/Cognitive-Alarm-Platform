@@ -89,9 +89,16 @@ def resolve_date_window(
 ) -> Tuple[datetime, datetime, int]:
     """Resolve a UTC date window from lookback days or explicit dates.
 
+    ``days=N`` covers N calendar days ending today (inclusive), matching the
+    inclusive semantics of an explicit ``start_date``/``end_date`` range.
+
     Returns ``(window_start, window_end, days)``.
     """
     if start_date is not None or end_date is not None:
+        if days is not None:
+            raise ValueError(
+                "Use either days or start_date/end_date, not both."
+            )
         if start_date is None or end_date is None:
             raise ValueError("Both start_date and end_date are required when filtering by date.")
         if end_date < start_date:
@@ -108,7 +115,7 @@ def resolve_date_window(
 
     lookback = max(1, min(int(days or 30), 365))
     window_end = datetime.now(timezone.utc)
-    window_start = (window_end - timedelta(days=lookback)).replace(
+    window_start = (window_end - timedelta(days=lookback - 1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     return window_start, window_end, lookback

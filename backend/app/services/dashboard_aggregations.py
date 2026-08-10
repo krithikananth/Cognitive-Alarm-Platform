@@ -28,9 +28,12 @@ def utc_isoformat(dt: Optional[datetime]) -> Optional[str]:
 
 
 def lookback_start(days: int) -> datetime:
-    """Return the UTC datetime marking the start of the lookback window."""
+    """Return the UTC datetime marking the start of the lookback window.
+
+    ``days=N`` covers N calendar days ending today (inclusive).
+    """
     return (
-        datetime.now(timezone.utc) - timedelta(days=days)
+        datetime.now(timezone.utc) - timedelta(days=max(1, days) - 1)
     ).replace(hour=0, minute=0, second=0, microsecond=0)
 
 

@@ -166,6 +166,16 @@ class AlarmChallengeLog(Base):
     __table_args__ = (
         Index("ix_alarm_challenge_logs_user_created", "user_id", "created_at"),
         Index("ix_alarm_challenge_logs_alarm_created", "alarm_id", "created_at"),
+        # Covers the admin statistics challenge breakdown end to end, so a
+        # year-wide window is an index-only scan instead of 330k row lookups
+        Index(
+            "ix_alarm_challenge_logs_created_breakdown",
+            "created_at",
+            "challenge_type",
+            "difficulty",
+            "is_correct",
+            "points_earned",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)

@@ -266,6 +266,71 @@ def test_admin_statistics_sql_aggregates_match_seeded_activity(
     assert sum(w["count"] for w in body["activity_by_weekday"]) == 120
 
 
+def test_admin_statistics_activity_histograms_use_stored_utc_slots(
+    client, admin_headers, db_session, test_user
+):
+    """SQL-side extraction must land in the same slot the stored timestamp implies.
+
+    The histograms used to be bucketed in Python with ``.hour`` / ``.weekday()``.
+    They are now extracted in SQL, where both dialects number the weekday from
+    Sunday, so an off-by-one translation here would silently rotate the chart.
+    """
+    alarm = Alarm(
+        user_id=test_user.id,
+        title="Histogram alarm",
+        alarm_time=datetime.now(timezone.utc).time(),
+        is_active=True,
+    )
+    db_session.add(alarm)
+    db_session.commit()
+    db_session.refresh(alarm)
+
+    moment = (datetime.now(timezone.utc) - timedelta(days=2)).replace(
+        hour=3, minute=17, second=0, microsecond=0, tzinfo=None
+    )
+    db_session.add_all(
+        [
+            AlarmWakeEvent(
+                user_id=test_user.id,
+                alarm_id=alarm.id,
+                triggered_at=moment,
+                dismissed_at=moment,
+                dismiss_method="challenge",
+                verified=True,
+                time_to_dismiss_seconds=42,
+            )
+            for _ in range(3)
+        ]
+    )
+    db_session.commit()
+
+    response = client.get(
+        "/api/v1/admin/statistics", params={"days": 7}, headers=admin_headers
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert next(h for h in body["activity_by_hour"] if h["hour"] == 3)["count"] == 3
+    assert sum(h["count"] for h in body["activity_by_hour"]) == 3
+
+    expected_index = moment.weekday()
+    bucket = next(
+        w
+        for w in body["activity_by_weekday"]
+        if w["weekday_index"] == expected_index
+    )
+    assert bucket["count"] == 3
+    assert bucket["weekday"] == [
+        "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"
+    ][expected_index]
+    assert sum(w["count"] for w in body["activity_by_weekday"]) == 3
+
+    assert body["wake_events"]["total"] == 3
+    assert body["wake_events"]["verified"] == 3
+    assert body["wake_events"]["avg_dismiss_seconds"] == 42.0
+
+
 @pytest.mark.parametrize(
     "model,index_name,columns",
     [
@@ -285,6 +350,16 @@ def test_admin_statistics_sql_aggregates_match_seeded_activity(
             AlarmWakeEvent,
             "ix_alarm_wake_events_dismissed",
             ("dismissed_at",),
+        ),
+        (
+            AlarmWakeEvent,
+            "ix_alarm_wake_events_dismissed_outcome",
+            ("dismissed_at", "verified", "dismiss_method", "time_to_dismiss_seconds"),
+        ),
+        (
+            AlarmChallengeLog,
+            "ix_alarm_challenge_logs_created_breakdown",
+            ("created_at", "challenge_type", "difficulty", "is_correct", "points_earned"),
         ),
         (User, "ix_users_created_at", ("created_at",)),
     ],

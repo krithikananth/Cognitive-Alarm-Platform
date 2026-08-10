@@ -5,7 +5,8 @@ PDF and Excel exporters for user lifestyle reports.
 from __future__ import annotations
 
 import io
-from typing import Any, Dict, List, Optional, Tuple
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from fpdf import FPDF
 from openpyxl import Workbook
@@ -14,6 +15,13 @@ from openpyxl.utils import get_column_letter
 
 from app.services.habit_score import format_habit_score
 
+# Excel number formats that keep cells numeric while preserving the canonical
+# display used elsewhere in the app.
+_XL_HABIT_SCORE_FORMAT = '0"/100"'
+_XL_WEIGHT_FORMAT = "0%"
+_XL_DECIMAL_FORMAT = "0.0"
+_XL_INTEGER_FORMAT = "0"
+
 
 def _is_habit_score_key(key: str) -> bool:
     return key == "habit_score" or key == "current_habit_score" or key.endswith(
@@ -21,15 +29,33 @@ def _is_habit_score_key(key: str) -> bool:
     )
 
 
+def _round_half_up(value: float, digits: int) -> float:
+    """Round using decimal half-up so 0.35 -> 0.4 and 92.85 -> 92.9."""
+    try:
+        quantum = Decimal(1).scaleb(-digits)
+        return float(Decimal(str(value)).quantize(quantum, rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError):
+        return round(value, digits)
+
+
+def _fmt_weight(value: Any) -> str:
+    """Habit-score weights are fractions of 1.0 — render them as percentages."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{_round_half_up(float(value) * 100, 0):.0f}%"
+    return _fmt(value)
+
+
 def _fmt(value: Any, *, key: Optional[str] = None) -> str:
     if key and _is_habit_score_key(key):
         return format_habit_score(value, empty="-")
     if value is None:
         return "-"
-    if isinstance(value, float):
-        return f"{value:.1f}" if abs(value) >= 0.1 or value == 0 else f"{value:.2f}"
     if isinstance(value, bool):
         return "Yes" if value else "No"
+    if isinstance(value, float):
+        if abs(value) >= 0.1 or value == 0:
+            return f"{_round_half_up(value, 1):.1f}"
+        return f"{_round_half_up(value, 2):.2f}"
     if isinstance(value, dict):
         return ", ".join(f"{k}: {_fmt(v, key=k)}" for k, v in value.items())
     if isinstance(value, list):
@@ -41,19 +67,100 @@ def _fmt(value: Any, *, key: Optional[str] = None) -> str:
     return str(value)
 
 
-def _flatten_summary(summary: Dict[str, Any]) -> List[Tuple[str, str]]:
-    rows: List[Tuple[str, str]] = []
+class SummaryRow(NamedTuple):
+    """A summary metric with a text form (PDF) and a numeric form (Excel)."""
+
+    label: str
+    text: str
+    number: Optional[float]
+    number_format: Optional[str]
+
+
+def _numeric_cell(value: Any, key: Optional[str]) -> Tuple[Optional[float], Optional[str]]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, None
+    if key and _is_habit_score_key(key):
+        return float(value), _XL_HABIT_SCORE_FORMAT
+    if isinstance(value, int):
+        return value, _XL_INTEGER_FORMAT
+    return _round_half_up(float(value), 2), _XL_DECIMAL_FORMAT
+
+
+def _summary_rows(summary: Dict[str, Any]) -> List[SummaryRow]:
+    rows: List[SummaryRow] = []
     for key, value in summary.items():
         label = key.replace("_", " ").title()
         if isinstance(value, dict) and key in ("breakdown", "weights", "trend"):
-            for sk, sv in value.items():
-                rows.append((f"{label} / {sk.replace('_', ' ').title()}", _fmt(sv, key=sk)))
+            for sub_key, sub_value in value.items():
+                sub_label = f"{label} / {sub_key.replace('_', ' ').title()}"
+                if key == "weights":
+                    number = (
+                        float(sub_value)
+                        if isinstance(sub_value, (int, float))
+                        and not isinstance(sub_value, bool)
+                        else None
+                    )
+                    rows.append(
+                        SummaryRow(
+                            sub_label,
+                            _fmt_weight(sub_value),
+                            number,
+                            _XL_WEIGHT_FORMAT if number is not None else None,
+                        )
+                    )
+                else:
+                    number, fmt = _numeric_cell(sub_value, sub_key)
+                    rows.append(
+                        SummaryRow(sub_label, _fmt(sub_value, key=sub_key), number, fmt)
+                    )
         else:
-            rows.append((label, _fmt(value, key=key)))
+            number, fmt = _numeric_cell(value, key)
+            rows.append(SummaryRow(label, _fmt(value, key=key), number, fmt))
     return rows
 
 
+def _flatten_summary(summary: Dict[str, Any]) -> List[Tuple[str, str]]:
+    return [(row.label, row.text) for row in _summary_rows(summary)]
+
+
+# fpdf's built-in fonts are latin-1 only, but insight and recommendation copy
+# is written with typographic punctuation. Transliterate the characters the
+# services actually emit so the text stays readable.
+_PDF_TRANSLITERATIONS = {
+    "\u2014": "-",    # em dash
+    "\u2013": "-",    # en dash
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2026": "...",
+    "\u2192": "->",
+    "\u2190": "<-",
+    "\u2264": "<=",
+    "\u2265": ">=",
+    "\u2248": "~",
+    "\u2022": "-",
+    "\u00a0": " ",
+}
+
+
+def _core_font_safe(text: str) -> str:
+    """Make ``text`` renderable by the latin-1 core fonts.
+
+    Without this an em dash anywhere in the payload aborts the whole export
+    with ``FPDFUnicodeEncodingException``; anything unmapped degrades to "?"
+    rather than failing the download.
+    """
+    for source, target in _PDF_TRANSLITERATIONS.items():
+        text = text.replace(source, target)
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
 class ReportPDF(FPDF):
+    def normalize_text(self, txt):
+        # Single choke point: every cell/multi_cell/write goes through here.
+        return super().normalize_text(_core_font_safe(str(txt)))
+
     def header(self):
         self.set_font("Helvetica", "B", 10)
         self.set_text_color(80, 80, 80)
@@ -289,9 +396,14 @@ def render_excel(report: Dict[str, Any]) -> bytes:
 
     sections = report.get("sections") or {}
     summary = sections.get("summary") or {}
-    for label, value in _flatten_summary(summary):
-        ws.cell(row=row, column=1, value=label)
-        ws.cell(row=row, column=2, value=value)
+    for item in _summary_rows(summary):
+        ws.cell(row=row, column=1, value=item.label)
+        cell = ws.cell(row=row, column=2)
+        if item.number is None:
+            cell.value = item.text
+        else:
+            cell.value = item.number
+            cell.number_format = item.number_format or _XL_DECIMAL_FORMAT
         row += 1
 
     # Insights sheet

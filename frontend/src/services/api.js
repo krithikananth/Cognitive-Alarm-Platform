@@ -353,6 +353,33 @@ export const reportsAPI = {
     }),
 };
 
+/**
+ * Extract the server error message from a failed request.
+ * Blob responses (file downloads) carry the JSON error body as a Blob, so it
+ * must be read back before `detail` is reachable.
+ */
+export async function readErrorDetail(err, fallback = 'Request failed') {
+  const data = err?.response?.data;
+  if (typeof data?.detail === 'string') return data.detail;
+
+  if (data instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await data.text());
+      if (typeof parsed?.detail === 'string') return parsed.detail;
+      if (Array.isArray(parsed?.detail) && parsed.detail[0]?.msg) {
+        return parsed.detail[0].msg;
+      }
+    } catch {
+      // Not a JSON error body — fall through to the generic message.
+    }
+  }
+
+  if (Array.isArray(data?.detail) && data.detail[0]?.msg) {
+    return data.detail[0].msg;
+  }
+  return fallback;
+}
+
 // ─── Notification API ───
 export const notificationAPI = {
   /** Register/update an FCM device token */

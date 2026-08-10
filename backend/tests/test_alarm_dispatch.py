@@ -205,6 +205,51 @@ class TestAlarmDispatch:
         assert AlarmDispatchService.run_once(db_session)["dispatched"] == 1
         assert len(_rings(db_session, alarm["id"])) == 2
 
+    def test_more_due_alarms_than_the_sweep_cap_all_ring(
+        self, client, db_session, test_user, auth_headers, user_profile
+    ):
+        """A popular wake time can exceed the per-sweep cap; none may be lost.
+
+        Each sweep is capped, so draining takes several passes — but every
+        alarm due at the same instant must still get exactly one ring.
+        """
+        from app.services.alarm_dispatch_service import _MAX_PER_SWEEP
+
+        total = _MAX_PER_SWEEP + 25
+        trigger = _naive_utc_now() - timedelta(seconds=30)
+        db_session.bulk_save_objects(
+            [
+                Alarm(
+                    user_id=test_user.id,
+                    title=f"Bulk alarm {i}",
+                    alarm_time=time(7, 0),
+                    alarm_type=AlarmType.DAILY,
+                    is_active=True,
+                    next_trigger_at=trigger,
+                )
+                for i in range(total)
+            ]
+        )
+        db_session.commit()
+
+        dispatched = 0
+        for _ in range(10):
+            result = AlarmDispatchService.run_once(db_session)
+            dispatched += result["dispatched"]
+            if result["dispatched"] == 0:
+                break
+
+        assert dispatched == total
+
+        queued = (
+            db_session.query(Notification)
+            .filter(
+                Notification.notification_type == NotificationType.ALARM_TRIGGER
+            )
+            .count()
+        )
+        assert queued == total
+
 
 # ── Delivery ─────────────────────────────────────────────────────
 

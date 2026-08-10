@@ -19,7 +19,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts';
 import toast from 'react-hot-toast';
-import { adminAPI } from '../services/api';
+import { adminAPI, readErrorDetail } from '../services/api';
 import { formatHabitScore } from '../utils/habitScore';
 import AdminUserManagement from '../components/AdminUserManagement';
 
@@ -610,8 +610,7 @@ export default function AdminDashboard() {
       const { data } = await adminAPI.getSystemReport(systemReportType, dateParams);
       setSystemReport(data);
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Failed to load system report');
+      toast.error(await readErrorDetail(err, 'Failed to load system report'));
       setSystemReport(null);
     } finally {
       setSystemReportLoading(false);
@@ -647,8 +646,7 @@ export default function AdminDashboard() {
       window.URL.revokeObjectURL(url);
       toast.success(`${format.toUpperCase()} downloaded`);
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Export failed');
+      toast.error(await readErrorDetail(err, 'Export failed'));
     } finally {
       setExporting(null);
     }

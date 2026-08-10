@@ -34,6 +34,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -102,6 +103,13 @@ class AlarmDispatchService:
                 Alarm.next_trigger_at.isnot(None),
                 Alarm.next_trigger_at <= now,
                 Alarm.next_trigger_at >= earliest,
+                # Already-notified alarms are excluded here, not just skipped
+                # below: they would otherwise fill the capped window every
+                # sweep and starve alarms past the cap at a popular wake time.
+                or_(
+                    Alarm.last_notified_trigger_at.is_(None),
+                    Alarm.last_notified_trigger_at != Alarm.next_trigger_at,
+                ),
             )
             .order_by(Alarm.next_trigger_at)
             .limit(_MAX_PER_SWEEP)

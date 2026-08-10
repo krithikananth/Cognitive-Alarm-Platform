@@ -43,6 +43,15 @@ class AlarmWakeEvent(Base):
         ),
         # Platform-wide admin windows, which have no user_id predicate
         Index("ix_alarm_wake_events_dismissed", "dismissed_at"),
+        # Covers the admin statistics outcome/activity aggregate end to end, so
+        # a year-wide window is an index-only scan instead of 160k row lookups
+        Index(
+            "ix_alarm_wake_events_dismissed_outcome",
+            "dismissed_at",
+            "verified",
+            "dismiss_method",
+            "time_to_dismiss_seconds",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)

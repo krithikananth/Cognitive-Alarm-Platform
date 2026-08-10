@@ -49,6 +49,9 @@ coverage.xml
 .tox/
 .nox/
 
+# Generated test run reports
+backend/tests/reports/
+
 # ----- IDE / Editors -----
 .cursor/
 .idea/
