@@ -1,0 +1,3 @@
+# Generated benchmark artifacts — never commit datasets or result dumps.
+.perfdata/
+results/

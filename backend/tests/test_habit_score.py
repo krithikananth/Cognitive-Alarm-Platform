@@ -12,11 +12,21 @@ from app.services.habit_score import (
     calculate_habit_score_for_user,
     calculate_habit_score_with_events,
     derive_habit_score_inputs_from_events,
+    format_habit_score,
     load_puzzle_attempt_stats,
     merge_puzzle_stats,
     resolve_habit_score_inputs,
 )
 from app.services.profile_service import ProfileService
+
+
+def test_format_habit_score_is_out_of_100_not_percent():
+    assert format_habit_score(74.2) == "74/100"
+    assert format_habit_score(0) == "0/100"
+    assert format_habit_score(100) == "100/100"
+    assert format_habit_score(None) == "—"
+    assert format_habit_score(None, empty="-") == "-"
+    assert "%" not in format_habit_score(47.42)
 
 
 def test_weights_match_specification():

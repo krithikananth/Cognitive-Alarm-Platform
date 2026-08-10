@@ -1,0 +1,35 @@
+# Compose override for performance testing only.
+#
+# The base compose file keeps PostgreSQL on an `internal: true` network, which
+# is correct for deployment but also means Docker will not publish a host port
+# for it. This override attaches the database and backend to an extra bridge
+# network so the benchmark harness and load tests can reach them from the host.
+# It is not for deployment.
+#
+# Always run it under a separate project name so it never touches the volumes
+# or containers of the real stack:
+#
+#   docker compose -p icap-perf `
+#     -f docker-compose.yml -f backend/perf/docker-compose.perf.yml `
+#     --env-file backend/perf/.perfdata/perf.env `
+#     up -d postgres redis backend
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${PERF_POSTGRES_PORT:-55432}:5432"
+    networks:
+      - data
+      - perf_access
+
+  backend:
+    ports:
+      - "127.0.0.1:${PERF_BACKEND_PORT:-58000}:8000"
+    networks:
+      - application
+      - data
+      - perf_access
+
+networks:
+  perf_access:
+    driver: bridge

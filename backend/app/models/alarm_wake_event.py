@@ -4,7 +4,16 @@ Wake-up confirmation events — audit trail for each alarm ring cycle.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+)
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -20,6 +29,21 @@ class AlarmWakeEvent(Base):
     """
 
     __tablename__ = "alarm_wake_events"
+    __table_args__ = (
+        # Per-user dashboard windows: user_id = ? AND dismissed_at >= ?
+        Index(
+            "ix_alarm_wake_events_user_dismissed", "user_id", "dismissed_at"
+        ),
+        # Habit-score replay: lifetime verified history for one user, in order
+        Index(
+            "ix_alarm_wake_events_user_verified_dismissed",
+            "user_id",
+            "verified",
+            "dismissed_at",
+        ),
+        # Platform-wide admin windows, which have no user_id predicate
+        Index("ix_alarm_wake_events_dismissed", "dismissed_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)

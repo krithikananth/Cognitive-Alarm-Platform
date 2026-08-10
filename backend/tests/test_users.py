@@ -105,6 +105,45 @@ class TestUpdateUser:
 
         assert response.status_code == 403
 
+    def test_update_self_deactivate_forbidden(
+        self, client, admin_user, admin_headers
+    ):
+        """An admin cannot deactivate themselves through the update endpoint."""
+        response = client.put(
+            f"/api/v1/users/{admin_user.id}",
+            json={"is_active": False},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 400
+        assert "own account" in response.json()["detail"]
+
+    def test_update_self_role_change_forbidden(
+        self, client, admin_user, admin_headers
+    ):
+        """An admin cannot demote their own role and lock themselves out."""
+        response = client.put(
+            f"/api/v1/users/{admin_user.id}",
+            json={"role": "user"},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 400
+        assert "own admin role" in response.json()["detail"]
+
+    def test_update_self_other_fields_allowed(
+        self, client, admin_user, admin_headers
+    ):
+        """Self-edits that do not affect access are still permitted."""
+        response = client.put(
+            f"/api/v1/users/{admin_user.id}",
+            json={"full_name": "Renamed Admin", "role": "admin"},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["full_name"] == "Renamed Admin"
+
 
 class TestDeleteUser:
     """Tests for DELETE /api/v1/users/{user_id}."""
@@ -131,6 +170,54 @@ class TestDeleteUser:
         response = client.delete("/api/v1/users/999999", headers=admin_headers)
 
         assert response.status_code == 404
+
+    def test_delete_self_forbidden(self, client, admin_user, admin_headers):
+        """An admin cannot delete their own account."""
+        response = client.delete(
+            f"/api/v1/users/{admin_user.id}", headers=admin_headers
+        )
+
+        assert response.status_code == 400
+        assert "own account" in response.json()["detail"]
+
+    def test_delete_user_removes_dependent_rows(
+        self, client, admin_user, test_user, admin_headers, db_session
+    ):
+        """Deleting a user leaves no orphaned rows behind."""
+        from datetime import time
+
+        from app.models.alarm import Alarm
+        from app.models.alarm_wake_event import AlarmWakeEvent
+        from app.models.analytics_event import AnalyticsEvent
+        from app.models.notification import Notification, NotificationType
+
+        user_id = test_user.id
+        alarm = Alarm(user_id=user_id, title="Morning", alarm_time=time(7, 0))
+        db_session.add(alarm)
+        db_session.flush()
+
+        db_session.add_all([
+            AlarmWakeEvent(user_id=user_id, alarm_id=alarm.id, verified=True),
+            AnalyticsEvent(user_id=user_id, event_type="alarm.dismissed"),
+            Notification(
+                user_id=user_id,
+                notification_type=NotificationType.ANNOUNCEMENT,
+                title="Hello",
+                body="Welcome",
+            ),
+        ])
+        db_session.commit()
+
+        response = client.delete(
+            f"/api/v1/users/{user_id}", headers=admin_headers
+        )
+        assert response.status_code == 204
+
+        for model in (Alarm, AlarmWakeEvent, AnalyticsEvent, Notification):
+            remaining = (
+                db_session.query(model).filter(model.user_id == user_id).count()
+            )
+            assert remaining == 0, f"{model.__name__} rows survived user delete"
 
 
 class TestActivateDeactivate:

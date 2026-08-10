@@ -64,11 +64,179 @@ class TestRecommendationServiceUnit:
 
         assert result.summary.goals_count == 0
         assert result.summary.suggested_bedtime is None
-        ids = {r.id for r in result.recommendations}
+        ids = [r.id for r in result.recommendations]
+        assert len(ids) == len(set(ids)), "recommendations must be unique by id"
         assert "sleep-set-wake-goal" in ids
-        assert "productivity-set-goals" in ids
-        assert "wake-getting-started" in ids
+        # Later onboarding tips stay hidden until they are the next action.
+        assert "productivity-set-goals" not in ids
+        assert "wake-getting-started" not in ids
+        assert "wake-arm-alarm" not in ids
+        assert "sleep-create-matching-alarm" not in ids
+        # Next onboarding action leads the feed.
+        assert result.recommendations[0].id == "sleep-set-wake-goal"
+        assert result.summary.top_focus == "sleep"
         assert result.daily_plan.morning_focus
+        # Advanced coaching stays locked until foundation is complete.
+        assert "habit-foundation" not in ids
+        assert "productivity-morning-block" not in ids
+        assert not any(i.startswith("productivity-goal-") for i in ids)
+
+    def test_no_duplicate_alarm_setup_actions(self, db_session, test_user):
+        """Create / arm / first-wake must not appear together as the same action."""
+        _ensure_profile(
+            db_session,
+            test_user,
+            preferred_wake_time=time(7, 0),
+            sleep_duration_hours=8.0,
+        )
+        result = RecommendationService.generate_recommendations(test_user, db_session)
+        ids = {r.id for r in result.recommendations}
+
+        alarm_setup = {
+            "sleep-create-matching-alarm",
+            "wake-arm-alarm",
+        }
+        present_setup = ids & alarm_setup
+        assert len(present_setup) <= 1, (
+            f"duplicate alarm-setup actions: {present_setup}"
+        )
+        # First wake is not actionable without an alarm — do not pair it with setup.
+        assert "wake-getting-started" not in ids
+        assert present_setup, "expected one alarm-setup tip when wake goal exists"
+
+    def test_no_duplicate_recommendation_ids(self, db_session, test_user):
+        _ensure_profile(
+            db_session,
+            test_user,
+            preferred_wake_time=time(7, 0),
+            sleep_duration_hours=8.0,
+            productivity_goals=["Exercise"],
+            wake_up_consistency_score=30.0,
+            streak_days=0,
+            best_streak=5,
+        )
+        alarm = Alarm(
+            user_id=test_user.id,
+            title="Main",
+            alarm_time=time(7, 0),
+            alarm_type=AlarmType.DAILY,
+            is_active=True,
+            challenge_type=ChallengeType.MATH,
+        )
+        db_session.add(alarm)
+        db_session.commit()
+        db_session.refresh(alarm)
+        now = datetime.now(timezone.utc)
+        for i in range(3):
+            db_session.add(
+                AlarmWakeEvent(
+                    user_id=test_user.id,
+                    alarm_id=alarm.id,
+                    triggered_at=now - timedelta(days=i),
+                    dismissed_at=now - timedelta(days=i),
+                    dismiss_method="snooze_exhausted",
+                    snooze_count_at_dismiss=2,
+                    time_to_dismiss_seconds=200,
+                    wakefulness_score=40.0,
+                    wakefulness_level="groggy",
+                    verified=True,
+                )
+            )
+        db_session.commit()
+
+        result = RecommendationService.generate_recommendations(test_user, db_session)
+        ids = [r.id for r in result.recommendations]
+        assert len(ids) == len(set(ids))
+        # Arm-alarm topic is not duplicated across sleep + wake categories.
+        assert not (
+            "sleep-create-matching-alarm" in ids and "wake-arm-alarm" in ids
+        )
+
+    def test_hides_completed_onboarding_and_unlocks_advanced(
+        self, db_session, test_user
+    ):
+        """Completed milestones disappear; verified wakes unlock advanced tips."""
+        _ensure_profile(db_session, test_user)
+        empty = RecommendationService.generate_recommendations(test_user, db_session)
+        empty_ids = {r.id for r in empty.recommendations}
+        assert "sleep-set-wake-goal" in empty_ids
+        assert "wake-arm-alarm" not in empty_ids
+        assert "wake-getting-started" not in empty_ids
+
+        _ensure_profile(
+            db_session,
+            test_user,
+            preferred_wake_time=time(7, 0),
+            sleep_duration_hours=8.0,
+            productivity_goals=["Study math"],
+        )
+        after_profile = RecommendationService.generate_recommendations(
+            test_user, db_session
+        )
+        after_profile_ids = {r.id for r in after_profile.recommendations}
+        assert "sleep-set-wake-goal" not in after_profile_ids
+        assert "productivity-set-goals" not in after_profile_ids
+        assert "sleep-bedtime-anchor" in after_profile_ids
+        # Still onboarding — advanced goal templates stay locked.
+        assert not any(
+            i.startswith("productivity-goal-") for i in after_profile_ids
+        )
+        # Single alarm-setup action (not create + arm + first wake together).
+        assert after_profile.recommendations[0].id in {
+            "sleep-create-matching-alarm",
+            "wake-arm-alarm",
+        }
+        assert "wake-getting-started" not in after_profile_ids
+        assert not (
+            "sleep-create-matching-alarm" in after_profile_ids
+            and "wake-arm-alarm" in after_profile_ids
+        )
+
+        alarm = Alarm(
+            user_id=test_user.id,
+            title="Main",
+            alarm_time=time(7, 0),
+            alarm_type=AlarmType.DAILY,
+            is_active=True,
+            challenge_type=ChallengeType.MATH,
+        )
+        db_session.add(alarm)
+        db_session.commit()
+        db_session.refresh(alarm)
+
+        after_alarm = RecommendationService.generate_recommendations(
+            test_user, db_session
+        )
+        after_alarm_ids = {r.id for r in after_alarm.recommendations}
+        assert "wake-arm-alarm" not in after_alarm_ids
+        assert "sleep-create-matching-alarm" not in after_alarm_ids
+        assert "wake-getting-started" in after_alarm_ids
+        assert after_alarm.recommendations[0].id == "wake-getting-started"
+
+        now = datetime.now(timezone.utc)
+        db_session.add(
+            AlarmWakeEvent(
+                user_id=test_user.id,
+                alarm_id=alarm.id,
+                triggered_at=now,
+                dismissed_at=now,
+                dismiss_method="challenge",
+                snooze_count_at_dismiss=0,
+                time_to_dismiss_seconds=40,
+                wakefulness_score=72.0,
+                wakefulness_level="awake",
+                verified=True,
+            )
+        )
+        db_session.commit()
+
+        after_wake = RecommendationService.generate_recommendations(
+            test_user, db_session
+        )
+        after_wake_ids = {r.id for r in after_wake.recommendations}
+        assert "wake-getting-started" not in after_wake_ids
+        assert "productivity-goal-study" in after_wake_ids
+        assert "productivity-set-goals" not in after_wake_ids
 
     def test_sleep_and_productivity_personalization(self, db_session, test_user):
         _ensure_profile(
@@ -93,6 +261,25 @@ class TestRecommendationServiceUnit:
         )
         db_session.add(alarm)
         db_session.commit()
+        db_session.refresh(alarm)
+
+        # Verified wake unlocks advanced productivity coaching.
+        now = datetime.now(timezone.utc)
+        db_session.add(
+            AlarmWakeEvent(
+                user_id=test_user.id,
+                alarm_id=alarm.id,
+                triggered_at=now,
+                dismissed_at=now,
+                dismiss_method="challenge",
+                snooze_count_at_dismiss=0,
+                time_to_dismiss_seconds=45,
+                wakefulness_score=70.0,
+                wakefulness_level="awake",
+                verified=True,
+            )
+        )
+        db_session.commit()
 
         result = RecommendationService.generate_recommendations(test_user, db_session)
         ids = {r.id for r in result.recommendations}
@@ -103,6 +290,8 @@ class TestRecommendationServiceUnit:
         assert result.summary.goals_count == 2
         assert "sleep-extend-duration" in ids
         assert "sleep-align-alarm" in ids
+        assert "sleep-set-wake-goal" not in ids  # completed
+        assert "productivity-set-goals" not in ids  # completed
         assert "productivity-goal-study" in ids or "productivity-goal-exercise" in ids
         assert any(r.category == RecommendationCategory.PRODUCTIVITY for r in result.recommendations)
 
@@ -300,6 +489,34 @@ class TestRecommendationAPI:
             sleep_duration_hours=8.0,
             productivity_goals=["Exercise", "Study Algorithms"],
         )
+        alarm = Alarm(
+            user_id=test_user.id,
+            title="Morning",
+            alarm_time=time(7, 0),
+            alarm_type=AlarmType.DAILY,
+            is_active=True,
+            challenge_type=ChallengeType.MATH,
+        )
+        db_session.add(alarm)
+        db_session.commit()
+        db_session.refresh(alarm)
+        now = datetime.now(timezone.utc)
+        db_session.add(
+            AlarmWakeEvent(
+                user_id=test_user.id,
+                alarm_id=alarm.id,
+                triggered_at=now,
+                dismissed_at=now,
+                dismiss_method="challenge",
+                snooze_count_at_dismiss=0,
+                time_to_dismiss_seconds=50,
+                wakefulness_score=68.0,
+                wakefulness_level="awake",
+                verified=True,
+            )
+        )
+        db_session.commit()
+
         response = client.get("/api/v1/recommendations/daily", headers=auth_headers)
         assert response.status_code == 200
         data = response.json()

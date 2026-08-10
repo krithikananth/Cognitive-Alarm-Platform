@@ -1,5 +1,5 @@
 E2E Wake Workflow — Pass/Fail Report
-Generated (UTC): 2026-07-23T16:16:29.946347+00:00
+Generated (UTC): 2026-08-09T17:10:50.524033+00:00
 ============================================================
 01. [PASS] User login
      login ok
@@ -10,7 +10,7 @@ Generated (UTC): 2026-07-23T16:16:29.946347+00:00
 04. [PASS] Capture pre-wake baselines
      {'habit_score': 22.5, 'dismissed': 0, 'analytics': {}}
 05. [PASS] Alarm triggers / challenge starts
-     {'type': 'MATH', 'difficulty': 'medium', 'prompt': 'Solve: 25 - 5 + 3 = ?'}
+     {'type': 'MATH', 'difficulty': 'medium', 'prompt': 'Solve: 17 - 5 + 10 = ?'}
 06. [PASS] Challenge solved → alarm dismissed
      {'status': 'dismissed', 'wakefulness': 'sharp'}
 07. [PASS] Analytics updated
@@ -20,7 +20,7 @@ Generated (UTC): 2026-07-23T16:16:29.946347+00:00
 09. [PASS] Adaptive difficulty updated
      {'before': 'medium', 'after': 'hard', 'preference': 'medium', 'success_streak': 5}
 10. [PASS] Recommendations updated
-     {'summary_habit_score': 47.42, 'recommendation_count': 10}
+     {'summary_habit_score': 47.42, 'recommendation_count': 2}
 11. [PASS] Dashboard reflects latest values
      {'current_habit_score': 47.42, 'current_streak': 1, 'wakeup_success_rate': 100.0}
 ============================================================

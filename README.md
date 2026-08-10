@@ -193,17 +193,17 @@ The web app will be available at `http://localhost:3000`.
 ### Running with Docker (Recommended)
 
 ```bash
-# Start all services (db + redis + backend)
-docker-compose up -d
+# Configure required secrets and optional integrations
+cp .env.example .env
 
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
+# Build and start PostgreSQL, Redis, backend, frontend, and Nginx
+docker compose up --build -d
 ```
 
-> Docker Compose runs the database, Redis, and backend. Start the React frontend separately with `npm start` in `frontend/`.
+Open `http://localhost` (or the `PUBLIC_URL` configured in `.env`). Only Nginx
+is published to the host; PostgreSQL, Redis, the API, and the frontend origin
+remain on isolated Docker networks. Backend migrations run automatically before
+the API starts.
 
 ---
 
@@ -330,8 +330,12 @@ intelligent-cognitive-alarm-platform/
 
 | Variable                         | Description                         | Default                     | Required |
 | -------------------------------- | ----------------------------------- | --------------------------- | -------- |
-| `DATABASE_URL`                   | PostgreSQL connection string        | `sqlite:///./icap.db`       | Yes      |
-| `SECRET_KEY`                     | JWT signing secret                  | —                           | Yes      |
+| `PUBLIC_URL`                     | Public origin used by browser links | `http://localhost`          | Docker   |
+| `HTTP_PORT`                      | Nginx host port                     | `80`                        | No       |
+| `SECRET_KEY`                     | JWT signing secret                  | —                           | Docker   |
+| `POSTGRES_PASSWORD`              | PostgreSQL password (URL-safe)      | —                           | Docker   |
+| `REDIS_PASSWORD`                 | Redis password (URL-safe)           | —                           | Docker   |
+| `DATABASE_URL`                   | Backend database connection string  | `sqlite:///./icap.db`       | Local    |
 | `ALGORITHM`                      | JWT algorithm                       | `HS256`                     | No       |
 | `ACCESS_TOKEN_EXPIRE_MINUTES`    | Access token lifetime (mins)        | `30`                        | No       |
 | `REFRESH_TOKEN_EXPIRE_DAYS`      | Refresh token lifetime (days)       | `7`                         | No       |
@@ -340,50 +344,43 @@ intelligent-cognitive-alarm-platform/
 | `RECOMMENDATION_CACHE_TTL_SECONDS` | Recommendation cache TTL          | `300`                       | No       |
 | `CORS_ORIGINS`                   | Allowed CORS origins                | `["http://localhost:3000"]` | No       |
 | `FRONTEND_URL`                   | SPA base URL (auth redirects)       | `http://localhost:3000`     | No       |
-| `DEBUG`                          | Enable debug mode                   | `False`                     | No       |
-| `LOG_LEVEL`                      | Logging level                       | `INFO`                      | No       |
 | `POSTGRES_DB`                    | PostgreSQL database name            | `icap_db`                   | Docker   |
 | `POSTGRES_USER`                  | PostgreSQL user                     | `icap_user`                 | Docker   |
-| `POSTGRES_PASSWORD`              | PostgreSQL password                 | —                           | Docker   |
+| `INITIAL_ADMIN_EMAIL`            | Optional first-run admin email      | —                           | No       |
+| `INITIAL_ADMIN_PASSWORD`         | Optional first-run admin password   | —                           | No       |
+
+The complete template, including SMTP, Google OAuth, Gemini, Firebase, and
+notification scheduler settings, is in `.env.example`. Browser Firebase values
+are build arguments and are public identifiers. Use base64 for
+`FIREBASE_CREDENTIALS_JSON`; it is a private server credential.
 
 ---
 
 ## 🐳 Docker
 
-### Development
+### Production stack
 
 ```bash
-# Build and start all services
-docker-compose up --build -d
+# One-command build and startup
+docker compose up --build -d
 
-# View real-time logs
-docker-compose logs -f backend
+# Verify health and view logs
+docker compose ps
+docker compose logs -f nginx backend
 
 # Access the database
-docker-compose exec db psql -U icap_user -d icap_db
-
-# Run migrations inside container
-docker-compose exec backend alembic upgrade head
+docker compose exec postgres psql -U icap_user -d icap_db
 
 # Shut everything down
-docker-compose down
+docker compose down
 
-# Shut down and remove volumes (clean slate)
-docker-compose down -v
+# Also delete PostgreSQL and Redis data
+docker compose down -v
 ```
 
-### Production
-
-```bash
-# Build production image
-docker build -t icap-backend:latest ./backend
-
-# Run with production settings
-docker run -p 8000:8000 \
-  -e DATABASE_URL=postgresql://user:pass@host:5432/icap_db \
-  -e SECRET_KEY=your-production-secret \
-  icap-backend:latest
-```
+The edge container currently terminates HTTP. In an internet-facing deployment,
+terminate TLS at the load balancer or ingress in front of port 8080, and set
+`PUBLIC_URL` plus `OAUTH2_GOOGLE_REDIRECT_URI` to the resulting HTTPS URLs.
 
 ---
 

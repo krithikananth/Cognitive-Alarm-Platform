@@ -9,11 +9,11 @@ import { authAPI, userAPI } from '../services/api';
 // (older sign-ups, OAuth sign-ups, or a stale/incorrect stored value) get
 // self-corrected — otherwise alarm scheduling silently falls back to UTC
 // and rings hours late/early relative to the user's local wall-clock time.
-const syncBrowserTimezone = () => {
+const syncBrowserTimezone = async () => {
   try {
     const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (detected) {
-      userAPI.updateUser({ timezone: detected }).catch(() => {});
+      await userAPI.updateUser({ timezone: detected });
     }
   } catch (e) {
     // Intl unsupported or blocked — nothing we can do, keep existing value.
@@ -67,8 +67,19 @@ const useAuthStore = create((set, get) => ({
       localStorage.setItem('refresh_token', refresh_token);
       localStorage.setItem('user', JSON.stringify(user));
       set({ user, isAuthenticated: true, isLoading: false });
-      syncBrowserTimezone();
-      return { success: true, user };
+      // Sync IANA timezone to profile, then refresh auth user so Profile/UI
+      // see timezone immediately (login payload does not include it).
+      try {
+        await syncBrowserTimezone();
+      } catch (e) {
+        // Soft-fail — login already succeeded.
+      }
+      try {
+        await get().fetchProfile();
+      } catch (e) {
+        // Soft-fail — user can still use the app.
+      }
+      return { success: true, user: get().user || user };
     } catch (err) {
       let message = 'Login failed';
       const detail = err.response?.data?.detail;
@@ -93,8 +104,17 @@ const useAuthStore = create((set, get) => ({
       const user = res.data;
       localStorage.setItem('user', JSON.stringify(user));
       set({ user, isAuthenticated: true, isLoading: false });
-      syncBrowserTimezone();
-      return { success: true, user };
+      try {
+        await syncBrowserTimezone();
+      } catch (e) {
+        // Soft-fail
+      }
+      try {
+        await get().fetchProfile();
+      } catch (e) {
+        // Soft-fail
+      }
+      return { success: true, user: get().user || user };
     } catch (err) {
       localStorage.removeItem('access_token');
       localStorage.removeItem('refresh_token');
@@ -109,6 +129,12 @@ const useAuthStore = create((set, get) => ({
 
   // ─── Logout ───
   logout: async () => {
+    try {
+      const { unregisterNotifications } = await import('../services/notificationService');
+      await unregisterNotifications();
+    } catch (e) {
+      // Ignore notification cleanup errors
+    }
     try {
       await authAPI.logout();
     } catch (e) {

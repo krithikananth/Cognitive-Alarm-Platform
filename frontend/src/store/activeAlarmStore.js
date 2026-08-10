@@ -184,6 +184,10 @@ const useActiveAlarmStore = create((set, get) => ({
       try {
         await useAlarmStore.getState().fetchAlarms();
       } catch (e) { /* ignore */ }
+      // Notify listeners (e.g. Dashboard) to refresh stats/insights after a snooze.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('icap:wake-completed'));
+      }
       return {
         success: true,
         snoozeCount: newSnoozeCount,

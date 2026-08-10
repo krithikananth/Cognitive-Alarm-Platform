@@ -9,7 +9,7 @@ models (profile, alarms).
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Enum, Index, Integer, String
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -45,6 +45,10 @@ class User(Base):
     """
 
     __tablename__ = "users"
+    __table_args__ = (
+        # Admin growth/registration-trend windows filter and bucket on this
+        Index("ix_users_created_at", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)

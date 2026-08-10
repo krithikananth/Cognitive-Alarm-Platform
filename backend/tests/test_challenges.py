@@ -254,6 +254,7 @@ class TestChallengeGeneration:
         assert adapted["adjustment"] == 1
         assert adapted["success_streak"] == n
         assert adapted["failure_streak"] == 0
+        assert adapted["started"] is True
 
     def test_adapt_difficulty_centers_on_preferred_level(self):
         """Adaptive ±1 should move around the user's preferred baseline."""
@@ -303,6 +304,17 @@ class TestChallengeGeneration:
         )
         assert adapted["adjustment"] == 0
         assert adapted["difficulty"] == "medium"
+        assert adapted["started"] is False
+
+        # Prior adapt watermark means learning has already begun.
+        after_adapt = ChallengeService.adapt_difficulty(
+            "hard",
+            success_streak=0,
+            failure_streak=1,
+            last_adapted_success_streak=n,
+        )
+        assert after_adapt["adjustment"] == 0
+        assert after_adapt["started"] is True
 
     def test_adapt_difficulty_watermark_blocks_refire(self):
         """Already-consumed streak windows must not raise difficulty again."""
@@ -1729,3 +1741,93 @@ class TestFailWakeEndpoint:
         adaptive = analysis.json()["personalization"]["adaptive_difficulty"]
         assert adaptive["failure_streak"] == threshold
         assert adaptive["success_streak"] == 0
+
+# ---------------------------------------------------------------
+# Practice mode API
+# ---------------------------------------------------------------
+
+
+class TestPracticeChallengeAPI:
+    """Practice challenges use the real engine without wake/log side effects."""
+
+    def test_start_practice_hides_answer(self, client, auth_headers):
+        res = client.post(
+            "/api/v1/alarms/challenge/practice",
+            json={"challenge_type": "math", "difficulty": "easy"},
+            headers=auth_headers,
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["mode"] == "practice"
+        assert "prompt" in data
+        assert "answer" not in data
+        assert data.get("time_limit_seconds", 0) > 0
+
+    def test_verify_correct_and_wrong_without_logging(
+        self, client, test_user, auth_headers, db_session
+    ):
+        from app.services.challenge_service import PRACTICE_ALARM_ID
+        from app.models.profile import UserProfile
+
+        client.get("/api/v1/profiles/me", headers=auth_headers)
+        profile = (
+            db_session.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .one()
+        )
+        before_success = int(profile.consecutive_success_streak or 0)
+        before_logs = (
+            db_session.query(AlarmChallengeLog)
+            .filter(AlarmChallengeLog.user_id == test_user.id)
+            .count()
+        )
+
+        start = client.post(
+            "/api/v1/alarms/challenge/practice",
+            json={"challenge_type": "math", "difficulty": "medium"},
+            headers=auth_headers,
+        )
+        assert start.status_code == 200
+        answer = _session_answer(db_session, test_user.id, PRACTICE_ALARM_ID)
+
+        ok = client.post(
+            "/api/v1/alarms/challenge/practice/verify",
+            json={"user_answer": answer, "time_taken_seconds": 3},
+            headers=auth_headers,
+        )
+        assert ok.status_code == 200
+        assert ok.json()["correct"] is True
+        assert ok.json()["mode"] == "practice"
+
+        # Wrong attempt after a fresh start
+        start2 = client.post(
+            "/api/v1/alarms/challenge/practice",
+            json={"challenge_type": "math", "difficulty": "medium"},
+            headers=auth_headers,
+        )
+        assert start2.status_code == 200
+        wrong = client.post(
+            "/api/v1/alarms/challenge/practice/verify",
+            json={"user_answer": "__not_the_answer__", "time_taken_seconds": 2},
+            headers=auth_headers,
+        )
+        assert wrong.status_code == 200
+        assert wrong.json()["correct"] is False
+
+        after_logs = (
+            db_session.query(AlarmChallengeLog)
+            .filter(AlarmChallengeLog.user_id == test_user.id)
+            .count()
+        )
+        assert after_logs == before_logs
+
+        db_session.refresh(profile)
+        assert int(profile.consecutive_success_streak or 0) == before_success
+
+    def test_verify_without_session_fails(self, client, auth_headers):
+        res = client.post(
+            "/api/v1/alarms/challenge/practice/verify",
+            json={"user_answer": "4", "time_taken_seconds": 1},
+            headers=auth_headers,
+        )
+        assert res.status_code == 400

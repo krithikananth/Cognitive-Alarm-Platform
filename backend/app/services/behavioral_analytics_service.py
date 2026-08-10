@@ -31,6 +31,7 @@ from app.models.profile import UserProfile
 from app.services.habit_score import (
     calculate_habit_score,
     calculate_habit_score_for_user,
+    format_habit_score,
 )
 
 # Default lookback windows
@@ -54,11 +55,27 @@ class BehavioralAnalyticsService:
         db: Session,
         user_id: int,
         days: int = DEFAULT_DAYS,
+        window_start: Optional[datetime] = None,
+        window_end: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Full behavioral analytics bundle for the authenticated user."""
-        days = max(1, min(int(days or DEFAULT_DAYS), 365))
-        now = datetime.now(timezone.utc)
-        window_start = now - timedelta(days=days)
+        """Full behavioral analytics bundle for the authenticated user.
+
+        Prefer ``window_start`` / ``window_end`` when both are provided;
+        otherwise use a lookback of ``days`` ending at ``window_end`` (or now).
+        """
+        now = window_end or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        if window_start is not None:
+            start = window_start
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            days = max(1, (now.date() - start.date()).days + 1)
+            days = min(days, 365)
+        else:
+            days = max(1, min(int(days or DEFAULT_DAYS), 365))
+            start = now - timedelta(days=days)
 
         profile = (
             db.query(UserProfile)
@@ -70,9 +87,9 @@ class BehavioralAnalyticsService:
 
             DayStreakService.read_stored_streak(profile, db=db, commit=True)
 
-        snooze_df = cls._load_snooze_df(db, user_id, window_start)
-        wake_df = cls._load_wake_df(db, user_id, window_start)
-        challenge_df = cls._load_challenge_df(db, user_id, window_start)
+        snooze_df = cls._load_snooze_df(db, user_id, start, window_end=now)
+        wake_df = cls._load_wake_df(db, user_id, start, window_end=now)
+        challenge_df = cls._load_challenge_df(db, user_id, start, window_end=now)
 
         preferred = cls._preferred_wake_minutes(profile)
 
@@ -89,18 +106,36 @@ class BehavioralAnalyticsService:
             profile,
             db=db,
             user_id=user_id,
+            days=days,
         )
+
+        # Series spanning exactly the requested window, so a 7/30/90 selector
+        # charts the period the caller asked for (weekly/monthly stay fixed).
+        if days == WEEKLY_DAYS:
+            window = weekly
+        elif days == MONTHLY_DAYS:
+            window = monthly
+        else:
+            window = cls._period_trends(
+                snooze_df,
+                wake_df,
+                challenge_df,
+                preferred,
+                days=days,
+                period_label="window",
+            )
 
         return {
             "generated_at": now.isoformat(),
             "window_days": days,
-            "window_start": window_start.isoformat(),
+            "window_start": start.isoformat(),
             "window_end": now.isoformat(),
             "snooze_pattern": snooze,
             "wake_up_consistency": wake,
             "sleep_schedule_adherence": sleep,
             "weekly_trends": weekly,
             "monthly_trends": monthly,
+            "window_trends": window,
             "habit_trends": habit,
             "insights": cls._build_insights(snooze, wake, sleep, habit),
         }
@@ -452,12 +487,16 @@ class BehavioralAnalyticsService:
         profile: Optional[UserProfile],
         db: Optional[Session] = None,
         user_id: Optional[int] = None,
+        days: int = MONTHLY_DAYS,
     ) -> Dict[str, Any]:
         """Daily habit-score proxies + current SSOT habit score.
 
         ``current_habit_score`` is recalculated from lifetime verified wake
         events when ``db``/``user_id`` are provided; otherwise profile
         counters (or empty defaults) are used.
+
+        ``days`` sizes the daily proxy series so the caller's reporting window
+        (7 / 30 / 90) is the window that gets charted.
         """
         if db is not None and user_id is not None:
             current = calculate_habit_score_for_user(db, user_id, profile)
@@ -473,15 +512,16 @@ class BehavioralAnalyticsService:
                 }
             )
 
+        span = max(1, min(int(days or MONTHLY_DAYS), 365))
         end = pd.Timestamp.now(tz="UTC").normalize()
-        start = end - pd.Timedelta(days=MONTHLY_DAYS - 1)
-        days = pd.date_range(start, end, freq="D", tz="UTC")
+        start = end - pd.Timedelta(days=span - 1)
+        index = pd.date_range(start, end, freq="D", tz="UTC")
 
         verified = cls._verified_wakes(wake_df)
         series: List[Dict[str, Any]] = []
         scores: List[float] = []
 
-        for day in days:
+        for day in index:
             day_end = day + pd.Timedelta(days=1)
             day_wakes = (
                 verified[
@@ -522,15 +562,20 @@ class BehavioralAnalyticsService:
             )
 
         active_scores = [s["habit_score"] for s in series if s["has_activity"]]
+        recent_avg = 0.0
+        previous_avg = 0.0
         if len(active_scores) >= 2:
             mid = len(active_scores) // 2
             first_avg = float(np.mean(active_scores[:mid])) if mid else 0.0
             second_avg = float(np.mean(active_scores[mid:]))
             trend = cls._compare_trend(second_avg, first_avg, lower_is_better=False)
             avg_score = float(np.round(float(np.mean(active_scores)), 2))
+            recent_avg = float(np.round(second_avg, 2))
+            previous_avg = float(np.round(first_avg, 2))
         elif len(active_scores) == 1:
             trend = "stable"
             avg_score = float(np.round(active_scores[0], 2))
+            recent_avg = avg_score
         else:
             trend = "insufficient_data"
             avg_score = 0.0
@@ -541,6 +586,14 @@ class BehavioralAnalyticsService:
             "weights": current["weights"],
             "avg_proxy_score": avg_score,
             "trend": trend,
+            "trend_detail": {
+                "direction": trend,
+                "recent_avg": recent_avg,
+                "previous_avg": previous_avg,
+                "change": float(np.round(recent_avg - previous_avg, 2)),
+                "active_days": len(active_scores),
+                "window_days": span,
+            },
             "series": series,
         }
 
@@ -548,16 +601,20 @@ class BehavioralAnalyticsService:
 
     @classmethod
     def _load_snooze_df(
-        cls, db: Session, user_id: int, window_start: datetime
+        cls,
+        db: Session,
+        user_id: int,
+        window_start: datetime,
+        window_end: Optional[datetime] = None,
     ) -> pd.DataFrame:
-        rows = (
-            db.query(AlarmSnoozeEvent)
-            .filter(
-                AlarmSnoozeEvent.user_id == user_id,
-                AlarmSnoozeEvent.created_at >= window_start,
-            )
-            .all()
-        )
+        filters = [
+            AlarmSnoozeEvent.user_id == user_id,
+            AlarmSnoozeEvent.created_at >= window_start,
+        ]
+        if window_end is not None:
+            end = window_end.replace(tzinfo=None) if window_end.tzinfo else window_end
+            filters.append(AlarmSnoozeEvent.created_at <= end)
+        rows = db.query(AlarmSnoozeEvent).filter(*filters).all()
         if not rows:
             return pd.DataFrame(
                 columns=[
@@ -584,16 +641,20 @@ class BehavioralAnalyticsService:
 
     @classmethod
     def _load_wake_df(
-        cls, db: Session, user_id: int, window_start: datetime
+        cls,
+        db: Session,
+        user_id: int,
+        window_start: datetime,
+        window_end: Optional[datetime] = None,
     ) -> pd.DataFrame:
-        rows = (
-            db.query(AlarmWakeEvent)
-            .filter(
-                AlarmWakeEvent.user_id == user_id,
-                AlarmWakeEvent.triggered_at >= window_start,
-            )
-            .all()
-        )
+        filters = [
+            AlarmWakeEvent.user_id == user_id,
+            AlarmWakeEvent.triggered_at >= window_start,
+        ]
+        if window_end is not None:
+            end = window_end.replace(tzinfo=None) if window_end.tzinfo else window_end
+            filters.append(AlarmWakeEvent.triggered_at <= end)
+        rows = db.query(AlarmWakeEvent).filter(*filters).all()
         if not rows:
             return pd.DataFrame(
                 columns=[
@@ -634,16 +695,20 @@ class BehavioralAnalyticsService:
 
     @classmethod
     def _load_challenge_df(
-        cls, db: Session, user_id: int, window_start: datetime
+        cls,
+        db: Session,
+        user_id: int,
+        window_start: datetime,
+        window_end: Optional[datetime] = None,
     ) -> pd.DataFrame:
-        rows = (
-            db.query(AlarmChallengeLog)
-            .filter(
-                AlarmChallengeLog.user_id == user_id,
-                AlarmChallengeLog.created_at >= window_start,
-            )
-            .all()
-        )
+        filters = [
+            AlarmChallengeLog.user_id == user_id,
+            AlarmChallengeLog.created_at >= window_start,
+        ]
+        if window_end is not None:
+            end = window_end.replace(tzinfo=None) if window_end.tzinfo else window_end
+            filters.append(AlarmChallengeLog.created_at <= end)
+        rows = db.query(AlarmChallengeLog).filter(*filters).all()
         if not rows:
             return pd.DataFrame(
                 columns=[
@@ -972,7 +1037,7 @@ class BehavioralAnalyticsService:
 
         if habit["current_habit_score"] is not None:
             insights.append(
-                f"Current habit score is {habit['current_habit_score']}; "
+                f"Current habit score is {format_habit_score(habit['current_habit_score'])}; "
                 f"30-day proxy trend is {habit['trend']}."
             )
         return insights

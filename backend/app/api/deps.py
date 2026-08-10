@@ -87,3 +87,27 @@ def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
             detail="Admin privileges required",
         )
     return current_user
+
+
+def get_current_coach(current_user: User = Depends(get_current_user)) -> User:
+    """Dependency to ensure the current user may use the coach APIs.
+
+    Admins are allowed through so platform operators can inspect the coaching
+    surface, but they are scoped by the same assignment rules as coaches —
+    seeing every user is the job of the ``/admin`` endpoints.
+
+    Args:
+        current_user: The authenticated user.
+
+    Returns:
+        User object if the role is wellness_coach or admin.
+
+    Raises:
+        HTTPException: If the user holds neither role.
+    """
+    if current_user.role not in (UserRole.WELLNESS_COACH, UserRole.ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Wellness coach privileges required",
+        )
+    return current_user

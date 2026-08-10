@@ -4,6 +4,12 @@ Personalized Recommendation Engine.
 Generates sleep-schedule advice, wake-habit coaching tips, and productivity
 suggestions from the user's profile, alarms, wake events, and challenge history.
 
+Recommendations are progress-gated: completed onboarding milestones are hidden,
+same-action / topic overlaps are removed (one tip per intent), and only the
+next onboarding action is shown at a time. Advanced coaching unlocks as the
+user completes wake goals, alarms, verified wakes, challenges, and
+productivity goals.
+
 Challenge-focused recommendations are folded in via ChallengeService so callers
 get one unified coaching feed.
 """
@@ -29,6 +35,7 @@ from app.schemas.recommendation import (
 )
 from app.services.challenge_service import ChallengeService
 from app.services.day_streak import DayStreakService
+from app.services.habit_score import format_habit_score
 from app.services.profile_service import ProfileService
 from app.services.recommendation_cache import RecommendationCache
 
@@ -40,6 +47,103 @@ PRIORITY_RANK = {
     RecommendationPriority.MEDIUM: 1,
     RecommendationPriority.LOW: 2,
 }
+
+# Milestone → recommendation IDs that are "done" once the milestone is complete.
+COMPLETED_MILESTONE_IDS: Dict[str, frozenset] = {
+    "wake_goal": frozenset({"sleep-set-wake-goal"}),
+    "active_alarm": frozenset(
+        {"sleep-create-matching-alarm", "wake-arm-alarm"}
+    ),
+    "verified_wake": frozenset({"wake-getting-started"}),
+    "productivity_goals": frozenset(
+        {"productivity-set-goals", "productivity-morning-block"}
+    ),
+    "challenges": frozenset(
+        {"challenge-getting_started", "challenge-getting_started-0"}
+    ),
+}
+
+# Ordered onboarding sequence (first incomplete = next action).
+# Each milestone maps to tip id(s) that represent that single next action.
+ONBOARDING_SEQUENCE: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("wake_goal", ("sleep-set-wake-goal",)),
+    # Prefer create-matching; wake-arm-alarm is a fallback alias for the same action.
+    ("active_alarm", ("sleep-create-matching-alarm", "wake-arm-alarm")),
+    ("verified_wake", ("wake-getting-started",)),
+    ("productivity_goals", ("productivity-set-goals",)),
+    ("challenges", ("challenge-getting_started", "challenge-getting_started-0")),
+)
+
+# Affirmation / status cards — hidden when actionable coaching exists.
+STATUS_AFFIRMATION_IDS = frozenset(
+    {
+        "sleep-duration-healthy",
+        "wake-snooze-excellent",
+        "wake-alertness-strong",
+        "habit-maintain",
+        "productivity-goals-active",
+        "challenge-maintain",
+    }
+)
+
+# Same-action / overlapping advice — keep the single best item per intent.
+# Never surface two tips that ask the user to do the same thing
+# (e.g. "Create an alarm" + "Arm an alarm" + "Add your first alarm").
+ACTION_INTENT_GROUPS: Tuple[frozenset, ...] = (
+    # Alarm setup — create / arm / enable are one action.
+    frozenset({"sleep-create-matching-alarm", "wake-arm-alarm"}),
+    frozenset(
+        {
+            "wake-reduce-snooze",
+            "wake-snooze-discipline",
+            "wake-anti-snooze-harder",
+            "wake-snooze-excellent",
+        }
+    ),
+    frozenset({"wake-build-consistency", "wake-consistency-improve"}),
+    frozenset(
+        {"wake-restart-streak", "wake-protect-streak", "wake-grow-streak"}
+    ),
+    frozenset({"wake-raise-alertness", "wake-alertness-strong"}),
+    frozenset({"habit-foundation", "habit-raise-score", "habit-maintain"}),
+    frozenset({"productivity-set-goals", "productivity-morning-block"}),
+    frozenset(
+        {"productivity-stabilize-first", "productivity-use-morning-window"}
+    ),
+    # Goal templates that share the same morning-work intent.
+    frozenset(
+        {
+            "productivity-goal-exercise",
+            "productivity-goal-workout",
+            "productivity-goal-fitness",
+        }
+    ),
+    frozenset(
+        {
+            "productivity-goal-study",
+            "productivity-goal-learn",
+            "productivity-goal-read",
+        }
+    ),
+    frozenset(
+        {"productivity-goal-meditat", "productivity-goal-mindful"}
+    ),
+    frozenset(
+        {
+            "productivity-goal-work",
+            "productivity-goal-productiv",
+            "productivity-goal-focus",
+        }
+    ),
+)
+
+# Backward-compatible alias used by older tests / imports.
+TOPIC_GROUPS = ACTION_INTENT_GROUPS
+
+# Onboarding checklist tip IDs (later milestones are suppressed until due).
+_ONBOARDING_TIP_IDS: frozenset = frozenset(
+    rid for _, ids in ONBOARDING_SEQUENCE for rid in ids
+)
 
 GOAL_COACHING: Dict[str, Dict[str, str]] = {
     "exercise": {
@@ -219,7 +323,9 @@ class RecommendationService:
             )
         )
 
-        items = RecommendationService._dedupe_and_sort(items)
+        progress = RecommendationService._detect_progress(signals)
+        signals["progress"] = progress
+        items = RecommendationService._finalize_recommendations(items, progress)
 
         allowed = set(categories) if categories else None
         if allowed is not None:
@@ -688,24 +794,31 @@ class RecommendationService:
         active = signals["active_alarms"]
 
         if not verified:
-            items.append(
-                RecommendationItem(
-                    id="wake-getting-started",
-                    category=RecommendationCategory.WAKE,
-                    priority=RecommendationPriority.HIGH,
-                    title="Complete your first verified wake-up",
-                    detail=(
-                        "Wake coaching unlocks after you dismiss an alarm by solving "
-                        "the cognitive challenge. That creates the signals we use for "
-                        "personalized habit tips."
-                    ),
-                    action_hint="Arm an alarm and solve the challenge",
-                    action_path="/alarms",
-                    confidence=0.95,
-                    metrics={"recent_wake_events": 0},
+            preferred: Optional[time] = signals["preferred_wake_time"]
+            if active:
+                # First verified wake is only actionable once an alarm exists.
+                items.append(
+                    RecommendationItem(
+                        id="wake-getting-started",
+                        category=RecommendationCategory.WAKE,
+                        priority=RecommendationPriority.HIGH,
+                        title="Complete your first verified wake-up",
+                        detail=(
+                            "Wake coaching unlocks after you dismiss an alarm by solving "
+                            "the cognitive challenge. That creates the signals we use for "
+                            "personalized habit tips."
+                        ),
+                        action_hint="Solve the challenge when your alarm rings",
+                        action_path="/alarms",
+                        confidence=0.95,
+                        metrics={"recent_wake_events": 0},
+                    )
                 )
-            )
-            if not active:
+            elif preferred is None:
+                # No wake goal yet — sleep owns "set wake goal". Emit a single
+                # alarm-setup tip only as a fallback (filtered until due).
+                # When a wake goal exists, sleep-create-matching-alarm covers
+                # the same "get an alarm armed" action — do not also emit arm.
                 items.append(
                     RecommendationItem(
                         id="wake-arm-alarm",
@@ -949,6 +1062,8 @@ class RecommendationService:
                 )
             )
 
+        # Re-arm only after the user already has wake history — otherwise the
+        # pre-verified branch (or sleep-create-matching-alarm) owns this action.
         if not active:
             items.append(
                 RecommendationItem(
@@ -985,7 +1100,7 @@ class RecommendationService:
                     priority=RecommendationPriority.HIGH,
                     title="Focus on habit fundamentals this week",
                     detail=(
-                        f"Habit score is {score:.0f}/100. Prioritize one fixed wake time, "
+                        f"Habit score is {format_habit_score(score)}. Prioritize one fixed wake time, "
                         "zero-snooze mornings, and a realistic sleep duration before "
                         "adding new productivity goals."
                     ),
@@ -1020,7 +1135,7 @@ class RecommendationService:
                     priority=RecommendationPriority.LOW,
                     title="Habit score is strong — maintain the system",
                     detail=(
-                        f"At {score:.0f}/100 you are in a healthy range. Keep the same "
+                        f"At {format_habit_score(score)} you are in a healthy range. Keep the same "
                         "wake time, continue verified dismissals, and channel surplus "
                         "energy into your productivity goals."
                     ),
@@ -1096,6 +1211,7 @@ class RecommendationService:
         streak = signals["streak_days"]
         avg_wake = signals["avg_wakefulness"]
         preferred: Optional[time] = signals["preferred_wake_time"]
+        has_verified = bool(signals["verified_events"])
 
         if not goals:
             items.append(
@@ -1115,42 +1231,49 @@ class RecommendationService:
                     metrics={"goals_count": 0},
                 )
             )
-            items.append(
-                RecommendationItem(
-                    id="productivity-morning-block",
-                    category=RecommendationCategory.PRODUCTIVITY,
-                    priority=RecommendationPriority.MEDIUM,
-                    title="Reserve a 25-minute morning focus block",
-                    detail=(
-                        "Even without named goals, a fixed post-alarm focus block "
-                        "turns wake success into output. Pick one recurring task."
-                    ),
-                    action_hint="Choose a recurring morning task",
-                    action_path="/profile",
-                    confidence=0.7,
-                    metrics={"habit_score": score},
+            # Generic morning-block only after the user has started waking —
+            # otherwise onboarding stays focused on set-goals.
+            if has_verified:
+                items.append(
+                    RecommendationItem(
+                        id="productivity-morning-block",
+                        category=RecommendationCategory.PRODUCTIVITY,
+                        priority=RecommendationPriority.MEDIUM,
+                        title="Reserve a 25-minute morning focus block",
+                        detail=(
+                            "Even without named goals, a fixed post-alarm focus block "
+                            "turns wake success into output. Pick one recurring task."
+                        ),
+                        action_hint="Choose a recurring morning task",
+                        action_path="/profile",
+                        confidence=0.7,
+                        metrics={"habit_score": score},
+                    )
                 )
-            )
             return items
 
         primary_goal = RecommendationService._format_goal_label(goals[0])
-        items.append(
-            RecommendationItem(
-                id="productivity-goals-active",
-                category=RecommendationCategory.PRODUCTIVITY,
-                priority=RecommendationPriority.LOW,
-                title=f"Working toward {len(goals)} goal(s)",
-                detail=(
-                    "Goals on file: "
-                    + RecommendationService._format_goals_list(goals)
-                    + ". Morning verified wakes are the best launch pad for these."
-                ),
-                action_hint="Review goals weekly",
-                action_path="/profile",
-                confidence=0.7,
-                metrics={"goals": goals[:5], "goals_count": len(goals)},
+
+        # Advanced goal coaching unlocks after at least one verified wake.
+        if not has_verified:
+            items.append(
+                RecommendationItem(
+                    id="productivity-goals-active",
+                    category=RecommendationCategory.PRODUCTIVITY,
+                    priority=RecommendationPriority.LOW,
+                    title=f"Working toward {len(goals)} goal(s)",
+                    detail=(
+                        "Goals on file: "
+                        + RecommendationService._format_goals_list(goals)
+                        + ". Complete a verified wake to unlock morning goal coaching."
+                    ),
+                    action_hint="Complete a verified wake tomorrow",
+                    action_path="/alarms",
+                    confidence=0.7,
+                    metrics={"goals": goals[:5], "goals_count": len(goals)},
+                )
             )
-        )
+            return items
 
         if score < 50:
             items.append(
@@ -1160,7 +1283,7 @@ class RecommendationService:
                     priority=RecommendationPriority.HIGH,
                     title="Stabilize wake habits before stacking goals",
                     detail=(
-                        f"Habit score is {score:.0f}/100. Ambition without a reliable "
+                        f"Habit score is {format_habit_score(score)}. Ambition without a reliable "
                         "wake time usually fails. Fix consistency first, then attack: "
                         f"{primary_goal}."
                     ),
@@ -1220,6 +1343,7 @@ class RecommendationService:
                 )
             )
 
+        # Streak leverage requires a real streak + solid habits.
         if streak >= 3 and score >= 60:
             items.append(
                 RecommendationItem(
@@ -1239,7 +1363,7 @@ class RecommendationService:
                 )
             )
 
-        if avg_wake is not None and avg_wake >= 70 and goals:
+        if avg_wake is not None and avg_wake >= 70:
             items.append(
                 RecommendationItem(
                     id="productivity-high-alertness",
@@ -1258,9 +1382,13 @@ class RecommendationService:
                 )
             )
 
-        ai_tip = RecommendationService._optional_ai_productivity_tip(goals, signals)
-        if ai_tip:
-            items.append(ai_tip)
+        # AI tip only once foundation + goals are in place.
+        if score >= 50:
+            ai_tip = RecommendationService._optional_ai_productivity_tip(
+                goals, signals
+            )
+            if ai_tip:
+                items.append(ai_tip)
 
         return items
 
@@ -1293,7 +1421,7 @@ class RecommendationService:
                 "(max 2 sentences) that is specific and actionable. "
                 "No markdown, no greeting.\n"
                 f"Goals: {goals}\n"
-                f"Habit score: {signals['habit_score']}\n"
+                f"Habit score: {format_habit_score(signals['habit_score'])}\n"
                 f"Day streak: {signals['streak_days']}\n"
                 f"Success streak: {signals.get('success_streak', 0)}\n"
                 f"Snooze rate: {signals['snooze_rate']}\n"
@@ -1324,16 +1452,26 @@ class RecommendationService:
     ) -> List[RecommendationItem]:
         analysis = ChallengeService.analyze_completion(logs)
         items: List[RecommendationItem] = []
-        for idx, rec in enumerate(analysis.get("recommendations") or []):
+        seen_ids: set = set()
+        for rec in analysis.get("recommendations") or []:
             priority_raw = (rec.get("priority") or "low").lower()
             try:
                 priority = RecommendationPriority(priority_raw)
             except ValueError:
                 priority = RecommendationPriority.LOW
             category_tag = rec.get("category") or "maintain"
+            # Stable IDs (no index suffix) so the same tip never duplicates.
+            challenge_type = (rec.get("challenge_type") or "").strip().lower()
+            if category_tag == "practice_focus" and challenge_type:
+                rec_id = f"challenge-{category_tag}-{challenge_type}"
+            else:
+                rec_id = f"challenge-{category_tag}"
+            if rec_id in seen_ids:
+                continue
+            seen_ids.add(rec_id)
             items.append(
                 RecommendationItem(
-                    id=f"challenge-{category_tag}-{idx}",
+                    id=rec_id,
                     category=RecommendationCategory.CHALLENGE,
                     priority=priority,
                     title=rec.get("title") or "Challenge tip",
@@ -1341,11 +1479,19 @@ class RecommendationService:
                     action_hint="Review challenge analytics",
                     action_path="/analytics",
                     confidence=0.75,
-                    metrics={"source_category": category_tag},
+                    metrics={
+                        "source_category": category_tag,
+                        **(
+                            {"challenge_type": challenge_type}
+                            if challenge_type
+                            else {}
+                        ),
+                    },
                 )
             )
 
         # Success Streak SSOT — same counter Analytics / Personalization use.
+        # Only surface after the user has challenge history (not onboarding).
         signals = signals or {}
         success_streak = int(signals.get("success_streak", 0) or 0)
         try:
@@ -1354,7 +1500,7 @@ class RecommendationService:
             threshold = _adaptive_streak_threshold()
         except Exception:
             threshold = 5
-        if success_streak > 0:
+        if success_streak > 0 and logs:
             items.append(
                 RecommendationItem(
                     id="challenge-success-streak",
@@ -1413,6 +1559,18 @@ class RecommendationService:
     def _determine_top_focus(
         signals: Dict[str, Any], items: List[RecommendationItem]
     ) -> Tuple[str, str]:
+        progress = signals.get("progress") or {}
+        next_milestone = progress.get("next_milestone")
+        milestone_labels = {
+            "wake_goal": ("sleep", "Set sleep schedule"),
+            "active_alarm": ("wake", "Arm an alarm"),
+            "verified_wake": ("wake", "Complete first verified wake"),
+            "productivity_goals": ("productivity", "Define productivity goals"),
+            "challenges": ("challenge", "Start morning challenges"),
+        }
+        if next_milestone and next_milestone in milestone_labels:
+            return milestone_labels[next_milestone]
+
         if not signals["verified_events"] and not signals["active_alarms"]:
             return "getting_started", "Getting started"
         if signals["preferred_wake_time"] is None:
@@ -1448,7 +1606,7 @@ class RecommendationService:
         preferred = signals["preferred_wake_time"]
         bedtime = signals["suggested_bedtime"]
         insights.append(
-            f"Habit score {signals['habit_score']:.0f}/100 · "
+            f"Habit score {format_habit_score(signals['habit_score'])} · "
             f"consistency {signals['consistency']:.0f} · "
             f"streak {signals['streak_days']} day(s)."
         )
@@ -1610,6 +1768,238 @@ class RecommendationService:
             counts.keys(),
             key=lambda k: (counts[k], -order.index(k) if k in order else -99),
         )
+
+    @staticmethod
+    def _detect_progress(signals: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive completed milestones and the next onboarding action from live state."""
+        has_wake_goal = signals["preferred_wake_time"] is not None
+        has_alarm = len(signals["active_alarms"]) > 0
+        has_verified = len(signals["verified_events"]) > 0
+        has_goals = len(signals["goals"]) > 0
+        has_challenges = len(signals.get("challenge_logs") or []) > 0
+
+        flags = {
+            "wake_goal": has_wake_goal,
+            "active_alarm": has_alarm,
+            "verified_wake": has_verified,
+            "productivity_goals": has_goals,
+            "challenges": has_challenges,
+        }
+        completed = [name for name, done in flags.items() if done]
+
+        next_milestone: Optional[str] = None
+        next_rec_ids: Tuple[str, ...] = ()
+        for milestone, rec_ids in ONBOARDING_SEQUENCE:
+            if not flags[milestone]:
+                next_milestone = milestone
+                next_rec_ids = rec_ids
+                break
+
+        # Core onboarding = wake goal + alarm + first verified wake.
+        onboarding_complete = has_wake_goal and has_alarm and has_verified
+        habit_score = float(signals.get("habit_score") or 0)
+        if not onboarding_complete:
+            stage = "onboarding"
+        elif habit_score >= 70 and has_goals:
+            stage = "advanced"
+        elif has_goals and habit_score >= 50:
+            stage = "optimizing"
+        else:
+            stage = "building"
+
+        return {
+            "completed": completed,
+            "flags": flags,
+            "next_milestone": next_milestone,
+            "next_rec_ids": next_rec_ids,
+            "onboarding_complete": onboarding_complete,
+            "stage": stage,
+        }
+
+    @staticmethod
+    def _finalize_recommendations(
+        items: List[RecommendationItem],
+        progress: Dict[str, Any],
+    ) -> List[RecommendationItem]:
+        """Hide completed items, drop duplicates, and prioritize the next action."""
+        items = RecommendationService._hide_completed(items, progress)
+        items = RecommendationService._filter_by_progress_stage(items, progress)
+        items = RecommendationService._dedupe_and_sort(items)
+        items = RecommendationService._dedupe_topics(items)
+        items = RecommendationService._suppress_status_affirmations(items)
+        items = RecommendationService._prioritize_next_action(items, progress)
+        return items
+
+    @staticmethod
+    def _hide_completed(
+        items: List[RecommendationItem],
+        progress: Dict[str, Any],
+    ) -> List[RecommendationItem]:
+        """Remove recommendations whose milestones the user has already finished."""
+        hide: set = set()
+        completed = set(progress.get("completed") or [])
+        for milestone, ids in COMPLETED_MILESTONE_IDS.items():
+            if milestone in completed:
+                hide |= set(ids)
+
+        result: List[RecommendationItem] = []
+        for item in items:
+            if item.id in hide:
+                continue
+            # Prefix match for challenge getting_started variants.
+            if "challenges" in completed and item.id.startswith(
+                "challenge-getting_started"
+            ):
+                continue
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _filter_by_progress_stage(
+        items: List[RecommendationItem],
+        progress: Dict[str, Any],
+    ) -> List[RecommendationItem]:
+        """During onboarding, keep only the next action + sleep schedule helpers.
+
+        Later checklist tips (arm alarm, first wake, set goals, …) stay hidden
+        until they become the current milestone — avoids repetitive same-intent
+        cards like Create / Arm / Complete first wake all at once.
+        """
+        if progress.get("onboarding_complete"):
+            return items
+
+        flags = progress.get("flags") or {}
+        next_ids = set(progress.get("next_rec_ids") or ())
+
+        result: List[RecommendationItem] = []
+        for item in items:
+            # Soft status when goals were set early — nudges the next wake.
+            if (
+                item.id == "productivity-goals-active"
+                and flags.get("productivity_goals")
+                and not flags.get("verified_wake")
+            ):
+                result.append(item)
+                continue
+
+            # Onboarding checklist: only the current next milestone tip(s).
+            is_onboarding_tip = (
+                item.id in _ONBOARDING_TIP_IDS
+                or item.id.startswith("challenge-getting_started")
+            )
+            if is_onboarding_tip:
+                if item.id in next_ids:
+                    result.append(item)
+                    continue
+                if item.id.startswith("challenge-getting_started") and any(
+                    n.startswith("challenge-getting_started") for n in next_ids
+                ):
+                    result.append(item)
+                continue
+
+            # Sleep schedule helpers (except status affirmation) stay useful
+            # once a wake goal exists — not the same action as alarm setup.
+            if item.id.startswith("sleep-") and item.id != "sleep-duration-healthy":
+                result.append(item)
+                continue
+            # Challenge history unlocks challenge coaching even mid-onboarding.
+            if flags.get("challenges") and item.category == (
+                RecommendationCategory.CHALLENGE
+            ):
+                result.append(item)
+                continue
+            # Drop advanced wake/habit/productivity coaching until the user
+            # finishes core onboarding (wake goal + alarm + verified wake).
+        return result
+
+    @staticmethod
+    def _dedupe_topics(
+        items: List[RecommendationItem],
+    ) -> List[RecommendationItem]:
+        """Keep one recommendation per same-action / overlapping intent group."""
+        by_id = {item.id: item for item in items}
+        drop: set = set()
+        for group in ACTION_INTENT_GROUPS:
+            present = [by_id[i] for i in group if i in by_id]
+            if len(present) <= 1:
+                continue
+            present.sort(
+                key=lambda r: (
+                    PRIORITY_RANK.get(r.priority, 9),
+                    -r.confidence,
+                    r.id,
+                )
+            )
+            for loser in present[1:]:
+                drop.add(loser.id)
+        if not drop:
+            return items
+        return [item for item in items if item.id not in drop]
+
+    @staticmethod
+    def _suppress_status_affirmations(
+        items: List[RecommendationItem],
+    ) -> List[RecommendationItem]:
+        """Hide completed-style status cards when actionable coaching remains."""
+
+        def _is_status(item: RecommendationItem) -> bool:
+            if item.id in STATUS_AFFIRMATION_IDS:
+                return True
+            return item.id.startswith("challenge-maintain")
+
+        actionables = [i for i in items if not _is_status(i)]
+        if not actionables:
+            return items
+        if any(
+            i.priority
+            in (RecommendationPriority.HIGH, RecommendationPriority.MEDIUM)
+            for i in actionables
+        ):
+            return [i for i in items if not _is_status(i)]
+        return items
+
+    @staticmethod
+    def _prioritize_next_action(
+        items: List[RecommendationItem],
+        progress: Dict[str, Any],
+    ) -> List[RecommendationItem]:
+        """Boost the single next onboarding milestone to the front of the feed."""
+        next_ids = set(progress.get("next_rec_ids") or ())
+        if not next_ids or not items:
+            return RecommendationService._dedupe_and_sort(items)
+
+        onboarding_ids = {
+            rid for _, ids in ONBOARDING_SEQUENCE for rid in ids
+        }
+
+        def _is_next(item: RecommendationItem) -> bool:
+            if item.id in next_ids:
+                return True
+            return item.id.startswith("challenge-getting_started") and any(
+                n.startswith("challenge-getting_started") for n in next_ids
+            )
+
+        boosted: List[RecommendationItem] = []
+        for item in items:
+            if _is_next(item):
+                boosted.append(
+                    item.model_copy(
+                        update={"priority": RecommendationPriority.HIGH}
+                    )
+                )
+            elif (
+                item.id in onboarding_ids
+                or item.id.startswith("challenge-getting_started")
+            ) and item.priority == RecommendationPriority.HIGH:
+                boosted.append(
+                    item.model_copy(
+                        update={"priority": RecommendationPriority.MEDIUM}
+                    )
+                )
+            else:
+                boosted.append(item)
+
+        return RecommendationService._dedupe_and_sort(boosted)
 
     @staticmethod
     def _dedupe_and_sort(

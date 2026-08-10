@@ -27,6 +27,9 @@ from app.models import challenge_session  # noqa: E402, F401
 from app.models import alarm_wake_event  # noqa: E402, F401
 from app.models import alarm_snooze_event  # noqa: E402, F401
 from app.models import analytics_event  # noqa: E402, F401
+from app.models import notification  # noqa: E402, F401
+from app.models import system_settings  # noqa: E402, F401
+from app.models import coach_assignment  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # Alembic Config object — provides access to values in alembic.ini

@@ -1,0 +1,4 @@
+# Load-test dependencies for the dashboard performance suite.
+# Installed separately from requirements.txt so production images stay lean:
+#   pip install -r perf/requirements-perf.txt
+locust==2.32.4

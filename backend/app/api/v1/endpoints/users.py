@@ -9,7 +9,17 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.user import User, UserRole
 from app.models.alarm import Alarm, AlarmChallengeLog
+from app.models.alarm_snooze_event import AlarmSnoozeEvent
+from app.models.alarm_wake_event import AlarmWakeEvent
+from app.models.analytics_event import AnalyticsEvent
+from app.models.challenge_session import ChallengeSession
+from app.models.notification import (
+    Notification,
+    NotificationPreference,
+    UserDeviceToken,
+)
 from app.models.profile import UserProfile, DifficultyPreference
+from app.models.system_settings import SystemSettings
 from app.schemas.user import UserResponse, UserUpdate, AdminUserUpdate
 from app.api.deps import get_current_user, get_current_admin
 from app.api.v1.endpoints.profiles import _get_or_create_profile
@@ -18,6 +28,7 @@ from app.services.habit_score import (
     load_verified_wake_events,
     resolve_habit_score_inputs,
 )
+from app.services.coach_service import CoachService
 from app.services.day_streak import DayStreakService
 from app.services.profile_service import ProfileService
 from app.services.recommendation_cache import RecommendationCache
@@ -359,6 +370,38 @@ def delete_my_account(
 # ── Admin user management ──
 
 
+def _purge_user_dependent_rows(db: Session, user_id: int) -> None:
+    """Remove rows that reference a user but are not ORM-cascaded from it.
+
+    Only ``UserProfile`` and ``Alarm`` (and, through the alarm, its challenge
+    logs) are reachable via ``User`` relationships. Every other table below
+    stores a bare ``user_id``, so without this the rows survive the delete and
+    surface as orphans in the admin integrity report and analytics counts.
+    """
+    for model in (
+        AlarmChallengeLog,
+        AlarmWakeEvent,
+        AlarmSnoozeEvent,
+        ChallengeSession,
+        AnalyticsEvent,
+        Notification,
+        UserDeviceToken,
+        NotificationPreference,
+    ):
+        db.query(model).filter(model.user_id == user_id).delete(
+            synchronize_session=False
+        )
+
+    # Audit pointer, not ownership — keep the settings row, drop the reference.
+    db.query(SystemSettings).filter(
+        SystemSettings.updated_by_user_id == user_id
+    ).update({SystemSettings.updated_by_user_id: None}, synchronize_session=False)
+
+    # Coach assignments key off both coach_id and client_id, so they need their
+    # own predicate rather than the plain user_id loop above.
+    CoachService.purge_user_assignments(db, user_id)
+
+
 @router.get("/", response_model=list[UserResponse])
 def list_users(
     skip: int = Query(0, ge=0),
@@ -410,6 +453,20 @@ def update_user(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid role: {update_data['role']}",
+            )
+
+    # Mirror the deactivate guard: an admin editing their own row must not be
+    # able to lock themselves out of the admin area mid-session.
+    if str(current_user.id) == str(user_id):
+        if update_data.get("is_active") is False:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot deactivate your own account",
+            )
+        if update_data.get("role") not in (None, UserRole.ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot change your own admin role",
             )
 
     for field, value in update_data.items():
@@ -469,13 +526,19 @@ def delete_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Delete a user (admin only)."""
+    """Delete a user and all of their dependent records (admin only)."""
+    if str(current_user.id) == str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own account",
+        )
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+    _purge_user_dependent_rows(db, user.id)
     db.delete(user)
     db.commit()
     return None

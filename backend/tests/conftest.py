@@ -22,6 +22,9 @@ from app.models.challenge_session import ChallengeSession  # noqa: F401
 from app.models.alarm_wake_event import AlarmWakeEvent  # noqa: F401
 from app.models.alarm_snooze_event import AlarmSnoozeEvent  # noqa: F401
 from app.models.analytics_event import AnalyticsEvent  # noqa: F401
+from app.models.notification import Notification  # noqa: F401
+from app.models.system_settings import SystemSettings  # noqa: F401
+from app.models.coach_assignment import CoachAssignment  # noqa: F401
 from app.core.security import create_access_token
 
 # Use a single shared in-memory SQLite database for the whole test session.
@@ -43,6 +46,9 @@ def db_session():
     Sets up all tables before the test and tears them down after,
     ensuring complete isolation between tests.
     """
+    from app.services.system_settings_service import SystemSettingsService
+
+    SystemSettingsService.reset_maintenance_cache()
     Base.metadata.create_all(bind=engine)
     session = TestingSessionLocal()
     try:
@@ -50,6 +56,7 @@ def db_session():
     finally:
         session.close()
         Base.metadata.drop_all(bind=engine)
+        SystemSettingsService.reset_maintenance_cache()
 
 
 @pytest.fixture(scope="function")
@@ -106,6 +113,33 @@ def admin_user(db_session):
     db_session.commit()
     db_session.refresh(user)
     return user
+
+
+@pytest.fixture
+def coach_user(db_session):
+    """Create and return a wellness coach test user."""
+    user = User(
+        email="coach@example.com",
+        username="coachuser",
+        hashed_password=get_password_hash("CoachPass123"),
+        full_name="Coach User",
+        role=UserRole.WELLNESS_COACH,
+        is_active=True,
+        is_verified=True,
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
+def coach_headers(coach_user):
+    """Return Authorization headers with a valid JWT for the coach test user."""
+    token = create_access_token(
+        data={"sub": str(coach_user.id), "role": coach_user.role.value}
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture

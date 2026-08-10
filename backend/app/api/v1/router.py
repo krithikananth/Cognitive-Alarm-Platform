@@ -6,8 +6,13 @@ from app.api.v1.endpoints import (
     profiles,
     alarms,
     admin,
+    coach,
     recommendations,
     analytics,
+    dashboard,
+    notifications,
+    reports,
+    system,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -19,4 +24,9 @@ api_router.include_router(alarms.router)
 api_router.include_router(recommendations.router)
 api_router.include_router(analytics.router)
 api_router.include_router(admin.router)
+api_router.include_router(coach.router)
+api_router.include_router(dashboard.router)
+api_router.include_router(notifications.router)
+api_router.include_router(reports.router)
+api_router.include_router(system.router)
 

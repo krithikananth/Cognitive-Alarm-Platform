@@ -73,6 +73,8 @@ class Alarm(Base):
         label: Optional user-defined label / tag.
         next_trigger_at: Computed datetime of the next firing.
         last_triggered_at: Datetime of the most recent firing.
+        last_notified_trigger_at: ``next_trigger_at`` value the server-side
+            dispatcher has already pushed a ring notification for.
         total_dismissals: Lifetime count of dismissals.
         total_snoozes: Snooze count for the current wake cycle
             (reset to 0 on verified dismiss; rolled into profile.total_snoozes).
@@ -82,6 +84,14 @@ class Alarm(Base):
     """
 
     __tablename__ = "alarms"
+    __table_args__ = (
+        # Every per-user alarm read filters user_id, usually with is_active
+        Index("ix_alarms_user_active", "user_id", "is_active"),
+        # Upcoming-alarm lookups order by next_trigger_at within a user
+        Index("ix_alarms_user_next_trigger", "user_id", "next_trigger_at"),
+        # Server-side dispatcher sweeps every armed alarm across all users
+        Index("ix_alarms_active_next_trigger", "is_active", "next_trigger_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -105,6 +115,7 @@ class Alarm(Base):
     label = Column(String(255), nullable=True)
     next_trigger_at = Column(DateTime, nullable=True)
     last_triggered_at = Column(DateTime, nullable=True)
+    last_notified_trigger_at = Column(DateTime, nullable=True)
     total_dismissals = Column(Integer, default=0, nullable=False)
     total_snoozes = Column(Integer, default=0, nullable=False)
     created_at = Column(

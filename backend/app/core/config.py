@@ -43,6 +43,19 @@ class Settings(BaseSettings):
         OAUTH2_GOOGLE_CLIENT_ID: Google OAuth2 client ID for social login.
         OAUTH2_GOOGLE_CLIENT_SECRET: Google OAuth2 client secret for social login.
         OAUTH2_GOOGLE_REDIRECT_URI: Backend callback URL registered with Google.
+        FCM_ENABLED: Master switch for Firebase Cloud Messaging push delivery.
+        FIREBASE_CREDENTIALS_PATH: Path to the service-account JSON file.
+        FIREBASE_CREDENTIALS_JSON: Inline service-account JSON (raw or base64).
+        NOTIFICATION_PROCESSING_INTERVAL_SECONDS: Queue drain cadence.
+        NOTIFICATION_RETRY_INTERVAL_SECONDS: Failed-push retry sweep cadence.
+        NOTIFICATION_MAX_PUSH_ATTEMPTS: Attempts before a push is given up on.
+        NOTIFICATION_RETRY_BACKOFF_SECONDS: Exponential backoff base for retries.
+        ALARM_DISPATCH_ENABLED: Master switch for server-side alarm ringing.
+        ALARM_DISPATCH_INTERVAL_SECONDS: How often due alarms are swept.
+        ALARM_DISPATCH_MAX_LATENESS_MINUTES: Catch-up window after downtime;
+            alarms later than this are never pushed.
+        ALARM_MISSED_ROLLOVER_MINUTES: Age at which an unattended alarm is
+            advanced to its next occurrence (or retired, if one-time).
     """
 
     model_config = SettingsConfigDict(
@@ -64,6 +77,11 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
+
+    # Optional first-run administrator. No account is seeded when unset.
+    INITIAL_ADMIN_EMAIL: Optional[str] = None
+    INITIAL_ADMIN_USERNAME: str = "admin"
+    INITIAL_ADMIN_PASSWORD: Optional[str] = None
 
     # ── Database ──────────────────────────────────────────────────────
     DATABASE_URL: str = "sqlite:///./icap.db"
@@ -122,6 +140,27 @@ class Settings(BaseSettings):
         "http://localhost:8000/api/v1/auth/oauth/google/callback"
     )
     GEMINI_API_KEY: Optional[str] = None
+
+    # ── Firebase Cloud Messaging ──────────────────────────────────
+    FCM_ENABLED: bool = False
+    FIREBASE_CREDENTIALS_PATH: Optional[str] = None
+    # Inline service-account JSON (raw or base64) for deployments without a
+    # writable filesystem. Takes precedence over FIREBASE_CREDENTIALS_PATH.
+    FIREBASE_CREDENTIALS_JSON: Optional[str] = None
+
+    # ── Notification queue / delivery retry ───────────────────────
+    NOTIFICATION_PROCESSING_INTERVAL_SECONDS: int = 60
+    NOTIFICATION_RETRY_INTERVAL_SECONDS: int = 300
+    NOTIFICATION_MAX_PUSH_ATTEMPTS: int = 3
+    NOTIFICATION_RETRY_BACKOFF_SECONDS: int = 300
+
+    # ── Server-side alarm dispatch ────────────────────────────────
+    # Rings alarms from the backend so a closed browser tab cannot cause a
+    # missed wake-up. The frontend ring experience is unchanged.
+    ALARM_DISPATCH_ENABLED: bool = True
+    ALARM_DISPATCH_INTERVAL_SECONDS: int = 20
+    ALARM_DISPATCH_MAX_LATENESS_MINUTES: int = 15
+    ALARM_MISSED_ROLLOVER_MINUTES: int = 60
 
 
 # Singleton settings instance used across the application

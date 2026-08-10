@@ -37,6 +37,10 @@ SELECTABLE_CHALLENGE_TYPES = [
 # Network / UI grace added on top of the published time limit (seconds)
 VERIFY_TIME_GRACE_SECONDS = 5
 
+# Sentinel alarm_id for practice sessions (ChallengeSession has no FK to alarms).
+# Practice must never write AlarmChallengeLog / wake / streak side effects.
+PRACTICE_ALARM_ID = 0
+
 # Recent attempts used for adaptive difficulty / type weighting
 PERFORMANCE_WINDOW = 20
 
@@ -484,7 +488,9 @@ class ChallengeService:
 
         Returns dict with keys: difficulty, adjustment (-1/0/+1), reason,
         success_streak, failure_streak, effective_success_streak,
-        effective_failure_streak, streak_threshold.
+        effective_failure_streak, streak_threshold, started.
+        ``started`` is True once a streak has reached the threshold or a
+        watermark shows a prior adapt (adaptive learning has begun).
         """
         base = _clamp_difficulty(base_difficulty)
         threshold = int(
@@ -540,6 +546,16 @@ class ChallengeService:
                 f"(threshold {threshold}) — lowering difficulty."
             )
 
+        # Adaptive learning begins at the first threshold crossing (or after
+        # a prior adapt watermark). Until then Analytics shows an onboarding
+        # message instead of live personalization metrics.
+        started = (
+            last_succ > 0
+            or last_fail > 0
+            or succ >= threshold
+            or fail >= threshold
+        )
+
         new_idx = max(0, min(len(DIFFICULTY_LEVELS) - 1, idx + adjustment))
         return {
             "difficulty": DIFFICULTY_LEVELS[new_idx],
@@ -551,6 +567,7 @@ class ChallengeService:
             "effective_failure_streak": effective_fail,
             "streak_threshold": threshold,
             "sample_size": succ + fail,
+            "started": started,
         }
 
     @staticmethod
@@ -853,6 +870,7 @@ class ChallengeService:
             recommendations.append({
                 "priority": "high",
                 "category": "practice_focus",
+                "challenge_type": weak["type"],
                 "title": f"Focus on {weak['type'].replace('_', ' ')} challenges",
                 "detail": (
                     f"Your accuracy on {weak['type'].replace('_', ' ')} is "
@@ -1763,7 +1781,102 @@ class ChallengeService:
             {
                 "q": "What runs but never walks?",
                 "a": "Water",
-                "opts": ["Water", "A car", "A horse", "Wind"],
+                "opts": ["Water", "A stone", "A horse", "A statue"],
+            },
+            {
+                "q": "What gets bigger the more you take away from it?",
+                "a": "A hole",
+                "opts": ["A hole", "A box", "A rope", "A cake"],
+            },
+            {
+                "q": "What has a thumb and four fingers but is not alive?",
+                "a": "A glove",
+                "opts": ["A glove", "A sock", "A shoe", "A hat"],
+            },
+            {
+                "q": "What kind of band never plays music?",
+                "a": "A rubber band",
+                "opts": ["A rubber band", "A rock band", "A marching band", "A jazz band"],
+            },
+            {
+                "q": "What has many keys but cannot open a single door, and sits on a desk?",
+                "a": "A keyboard",
+                "opts": ["A keyboard", "A janitor", "A locksmith", "A car"],
+            },
+            {
+                "q": "What has a ring but no finger?",
+                "a": "A telephone",
+                "opts": ["A telephone", "A bracelet", "A crown", "A rope"],
+            },
+            {
+                "q": "What goes up and down but never moves?",
+                "a": "A staircase",
+                "opts": ["A staircase", "A balloon", "A yo-yo", "A swing"],
+            },
+            {
+                "q": "What has a bottom at the top?",
+                "a": "Your legs",
+                "opts": ["Your legs", "A cup", "A hill", "A ladder"],
+            },
+            {
+                "q": "What can you break without ever touching it?",
+                "a": "A promise",
+                "opts": ["A promise", "A window", "A plate", "A stick"],
+            },
+            {
+                "q": "What has a spine but no bones?",
+                "a": "A book",
+                "opts": ["A book", "A snake", "A fish", "A leaf"],
+            },
+            {
+                "q": "What is easy to lift but hard to throw?",
+                "a": "A feather",
+                "opts": ["A feather", "A stone", "A brick", "A ball"],
+            },
+            {
+                "q": "What has a tongue but cannot taste?",
+                "a": "A shoe",
+                "opts": ["A shoe", "A cat", "A frog", "A cow"],
+            },
+            {
+                "q": "What has an eye but cannot see, and spins in the sky?",
+                "a": "A hurricane",
+                "opts": ["A hurricane", "A needle", "A camera", "A potato"],
+            },
+            {
+                "q": "What kind of coat is best put on wet?",
+                "a": "A coat of paint",
+                "opts": ["A coat of paint", "A raincoat", "A winter coat", "A fur coat"],
+            },
+            {
+                "q": "What can fill a room but takes up no space?",
+                "a": "Light",
+                "opts": ["Light", "Water", "Sand", "Furniture"],
+            },
+            {
+                "q": "What do you throw away to use, and take back in when you are done?",
+                "a": "An anchor",
+                "opts": ["An anchor", "A hammer", "A rope", "A boat"],
+            },
+            {
+                "q": "What is always coming but never actually arrives?",
+                "a": "Tomorrow",
+                "opts": ["Tomorrow", "Yesterday", "Today", "Noon"],
+            },
+            {
+                "q": "What kind of tree can you carry in your hand?",
+                "a": "A palm",
+                "opts": ["A palm", "An oak", "A pine", "A maple"],
+            },
+            {
+                "q": "What is black when it is clean and white when it is dirty?",
+                "a": "A chalkboard",
+                "opts": ["A chalkboard", "A shirt", "A window", "A plate"],
+            },
+            {
+                "q": "What can you serve but never eat?",
+                "a": "A tennis ball",
+                "opts": ["A tennis ball", "A pizza", "A soup", "A cake"],
             },
         ]
 
@@ -1818,6 +1931,106 @@ class ChallengeService:
                 "a": "A mushroom",
                 "opts": ["A mushroom", "A cellar", "A cave", "A vault"],
             },
+            {
+                "q": "What can be cracked, made, told, and played?",
+                "a": "A joke",
+                "opts": ["A joke", "A code", "An egg", "A game"],
+            },
+            {
+                "q": "What runs around a yard but never moves?",
+                "a": "A fence",
+                "opts": ["A fence", "A dog", "A hose", "A sprinkler"],
+            },
+            {
+                "q": "What has one head, one foot, and four legs?",
+                "a": "A bed",
+                "opts": ["A bed", "A table", "A horse", "A chair"],
+            },
+            {
+                "q": "What gets sharper the more you use it?",
+                "a": "Your brain",
+                "opts": ["Your brain", "A knife", "A pencil", "A razor"],
+            },
+            {
+                "q": "What has a thousand needles but cannot sew?",
+                "a": "A pine tree",
+                "opts": ["A pine tree", "A clock", "A compass", "A record player"],
+            },
+            {
+                "q": "What breaks the moment you say its name?",
+                "a": "Silence",
+                "opts": ["Silence", "A promise", "Glass", "A rule"],
+            },
+            {
+                "q": "What goes through towns and over hills but never moves?",
+                "a": "A road",
+                "opts": ["A road", "A car", "A river", "A train"],
+            },
+            {
+                "q": "What can you keep even after giving it to someone?",
+                "a": "Your word",
+                "opts": ["Your word", "A gift", "Money", "A book"],
+            },
+            {
+                "q": "What kind of ship has two mates but no captain?",
+                "a": "A relationship",
+                "opts": ["A relationship", "A battleship", "A sailboat", "A ferry"],
+            },
+            {
+                "q": "Which shape has no beginning, no end, and no middle?",
+                "a": "A circle",
+                "opts": ["A circle", "A line", "A square", "A triangle"],
+            },
+            {
+                "q": "What word becomes shorter when you add two letters to it?",
+                "a": "Short",
+                "opts": ["Short", "Long", "Small", "Brief"],
+            },
+            {
+                "q": "What has a bark but no bite?",
+                "a": "A tree",
+                "opts": ["A tree", "A dog", "A wolf", "A fox"],
+            },
+            {
+                "q": "What is placed on a table and cut, but never eaten?",
+                "a": "A deck of cards",
+                "opts": ["A deck of cards", "A cake", "A steak", "A pie"],
+            },
+            {
+                "q": "What has many rings but no fingers?",
+                "a": "A tree trunk",
+                "opts": ["A tree trunk", "A glove", "A hand", "A necklace"],
+            },
+            {
+                "q": "What is as light as a feather, yet no person can hold it for long?",
+                "a": "Your breath",
+                "opts": ["Your breath", "A cloud", "A shadow", "A whisper"],
+            },
+            {
+                "q": "What has six strings and a neck but cannot sing on its own?",
+                "a": "A guitar",
+                "opts": ["A guitar", "A violin", "A harp", "A piano"],
+            },
+            {
+                "q": "What goes up when the rain comes down?",
+                "a": "An umbrella",
+                "opts": ["An umbrella", "A stone", "A window", "A cloud"],
+            },
+            {
+                "q": "What loses its head every morning and gets it back at night?",
+                "a": "A pillow",
+                "opts": ["A pillow", "A clock", "A candle", "A door"],
+            },
+            {
+                "q": "What tastes better than it smells?",
+                "a": "A tongue",
+                "opts": ["A tongue", "A nose", "A flower", "A cake"],
+            },
+            {
+                "q": "What has a head like a cat and a tail like a cat, but is not a cat?",
+                "a": "A kitten",
+                "opts": ["A kitten", "A dog", "A tiger", "A mouse"],
+            },
         ]
 
         hard = [
@@ -1834,7 +2047,7 @@ class ChallengeService:
             {
                 "q": "What begins with T, ends with T, and has T in it?",
                 "a": "A teapot",
-                "opts": ["A teapot", "Toast", "A tent", "Trust"],
+                "opts": ["A teapot", "A kettle", "A mug", "A saucer"],
             },
             {
                 "q": "What word is spelled incorrectly in every dictionary?",
@@ -1854,7 +2067,7 @@ class ChallengeService:
             {
                 "q": "I have branches, but no fruit, trunk, or leaves. What am I?",
                 "a": "A bank",
-                "opts": ["A bank", "A tree", "A river", "A family"],
+                "opts": ["A bank", "A tree", "A ladder", "A window"],
             },
             {
                 "q": "The more you take of them, the more you leave behind. What are they?",
@@ -1864,7 +2077,7 @@ class ChallengeService:
             {
                 "q": "What building has the most stories?",
                 "a": "A library",
-                "opts": ["A library", "A skyscraper", "A hotel", "A school"],
+                "opts": ["A library", "A cottage", "A garage", "A barn"],
             },
             {
                 "q": "I fly without wings and cry without eyes. Whenever I go, darkness flies. What am I?",
@@ -1880,6 +2093,148 @@ class ChallengeService:
                 "q": "Forward I am heavy, but backward I am not. What am I?",
                 "a": "A ton",
                 "opts": ["A ton", "A pound", "Lead", "Stone"],
+            },
+            {
+                "q": "Which English word keeps the same pronunciation after "
+                     "four of its five letters are removed?",
+                "a": "Queue",
+                "opts": ["Queue", "Aisle", "Eight", "Ocean"],
+            },
+            {
+                "q": "A man pushes his car up to a hotel and immediately tells "
+                     "the owner he is bankrupt. Why?",
+                "a": "He is playing Monopoly",
+                "opts": [
+                    "He is playing Monopoly",
+                    "His car ran out of fuel",
+                    "He lost his wallet",
+                    "The hotel is closed",
+                ],
+            },
+            {
+                "q": "What occurs twice in a week, once in a year, but never in a day?",
+                "a": "The letter E",
+                "opts": ["The letter E", "The letter K", "A weekend", "A holiday"],
+            },
+            {
+                "q": "What is seen in the middle of March and April that cannot "
+                     "be seen at the start or end of either month?",
+                "a": "The letter R",
+                "opts": ["The letter R", "The letter A", "A full moon", "Spring"],
+            },
+            {
+                "q": "A woman shoots her husband, holds him underwater for five "
+                     "minutes, then hangs him. Ten minutes later they have dinner "
+                     "together. How?",
+                "a": "She is a photographer",
+                "opts": [
+                    "She is a photographer",
+                    "She is a doctor",
+                    "It was only a dream",
+                    "He is a mannequin",
+                ],
+            },
+            {
+                "q": "What has 21 eyes but cannot see?",
+                "a": "A die",
+                "opts": ["A die", "A spider", "A potato", "A peacock feather"],
+            },
+            {
+                "q": "How many times can you subtract 10 from 100?",
+                "a": "Once",
+                "opts": ["Once", "Ten times", "Nine times", "Infinitely many times"],
+            },
+            {
+                "q": "Which letter comes next? O, T, T, F, F, S, S, ?",
+                "a": "E",
+                "opts": ["E", "N", "T", "S"],
+            },
+            {
+                "q": "If you have me, you want to share me. If you share me, "
+                     "you no longer have me. What am I?",
+                "a": "A secret",
+                "opts": ["A secret", "A gift", "Money", "A song"],
+            },
+            {
+                "q": "A rooster lays an egg on the exact peak of a barn roof. "
+                     "Which way does the egg roll?",
+                "a": "Roosters do not lay eggs",
+                "opts": [
+                    "Roosters do not lay eggs",
+                    "To the left",
+                    "To the right",
+                    "Straight down",
+                ],
+            },
+            {
+                "q": "Two fathers and two sons went fishing and caught exactly "
+                     "three fish, yet each took home one whole fish. How?",
+                "a": "There were only three people: a grandfather, a father, and a son",
+                "opts": [
+                    "There were only three people: a grandfather, a father, and a son",
+                    "One fish was shared between two of them",
+                    "One person caught nothing",
+                    "They miscounted the fish",
+                ],
+            },
+            {
+                "q": "Which single word contains all 26 letters of the alphabet?",
+                "a": "Alphabet",
+                "opts": ["Alphabet", "Dictionary", "Encyclopedia", "Pangram"],
+            },
+            {
+                "q": "I am an odd number. Take away one letter and I become even. "
+                     "What am I?",
+                "a": "Seven",
+                "opts": ["Seven", "Nine", "Eleven", "Three"],
+            },
+            {
+                "q": "What can you put into a bucket to make it lighter?",
+                "a": "A hole",
+                "opts": ["A hole", "Water", "Sand", "Air"],
+            },
+            {
+                "q": "In a single-story pink house, everything inside is pink. "
+                     "What color are the stairs?",
+                "a": "There are no stairs",
+                "opts": ["There are no stairs", "Pink", "White", "Brown"],
+            },
+            {
+                "q": "What always comes down but never goes up?",
+                "a": "Rain",
+                "opts": ["Rain", "A balloon", "Smoke", "An elevator"],
+            },
+            {
+                "q": "Mary's father has five daughters: Nana, Nene, Nini, Nono, "
+                     "and who else?",
+                "a": "Mary",
+                "opts": ["Mary", "Nunu", "Nana", "Nini"],
+            },
+            {
+                "q": "How many months of the year have 28 days?",
+                "a": "All 12",
+                "opts": ["All 12", "One", "Two", "Eleven"],
+            },
+            {
+                "q": "Which is heavier: a kilogram of feathers or a kilogram of iron?",
+                "a": "They weigh the same",
+                "opts": [
+                    "They weigh the same",
+                    "The iron",
+                    "The feathers",
+                    "It depends on the volume",
+                ],
+            },
+            {
+                "q": "A plane crashes exactly on the border between two countries. "
+                     "Where are the survivors buried?",
+                "a": "Survivors are not buried",
+                "opts": [
+                    "Survivors are not buried",
+                    "In the first country",
+                    "In the second country",
+                    "In both countries",
+                ],
             },
         ]
 
@@ -1968,6 +2323,112 @@ class ChallengeService:
                     "Birds are not animals",
                 ],
             },
+            {
+                "q": "Which number comes next? 2, 4, 6, 8, ?",
+                "a": "10",
+                "opts": ["10", "11", "12", "9"],
+            },
+            {
+                "q": "Complete the analogy: Hot is to Cold as Day is to ?",
+                "a": "Night",
+                "opts": ["Night", "Sun", "Morning", "Light"],
+            },
+            {
+                "q": "Which word does not belong? Dog, Cow, Horse, Spoon",
+                "a": "Spoon",
+                "opts": ["Spoon", "Dog", "Cow", "Horse"],
+            },
+            {
+                "q": "If yesterday was Monday, what day is today?",
+                "a": "Tuesday",
+                "opts": ["Tuesday", "Sunday", "Wednesday", "Monday"],
+            },
+            {
+                "q": "Which number is the smallest? 12, 21, 9, 15",
+                "a": "9",
+                "opts": ["9", "12", "15", "21"],
+            },
+            {
+                "q": "All cats are animals. Fluffy is a cat. What must be true?",
+                "a": "Fluffy is an animal",
+                "opts": [
+                    "Fluffy is an animal",
+                    "All animals are cats",
+                    "Fluffy is a dog",
+                    "Some cats are not animals",
+                ],
+            },
+            {
+                "q": "Which of these shapes has no straight sides?",
+                "a": "Circle",
+                "opts": ["Circle", "Square", "Triangle", "Rectangle"],
+            },
+            {
+                "q": "Complete the analogy: Bird is to Sky as Fish is to ?",
+                "a": "Water",
+                "opts": ["Water", "Net", "Scale", "Boat"],
+            },
+            {
+                "q": "Which number comes next? 10, 20, 30, 40, ?",
+                "a": "50",
+                "opts": ["50", "45", "60", "55"],
+            },
+            {
+                "q": "Sam has 3 apples and buys 2 more. How many apples does he have?",
+                "a": "5",
+                "opts": ["5", "4", "6", "7"],
+            },
+            {
+                "q": "Which does not belong? Monday, Tuesday, March, Friday",
+                "a": "March",
+                "opts": ["March", "Monday", "Tuesday", "Friday"],
+            },
+            {
+                "q": "If today is Friday, what day was it 2 days ago?",
+                "a": "Wednesday",
+                "opts": ["Wednesday", "Thursday", "Tuesday", "Saturday"],
+            },
+            {
+                "q": "Complete the analogy: Big is to Small as Tall is to ?",
+                "a": "Short",
+                "opts": ["Short", "Wide", "Long", "Huge"],
+            },
+            {
+                "q": "Which letter comes next? A, B, C, D, ?",
+                "a": "E",
+                "opts": ["E", "F", "G", "H"],
+            },
+            {
+                "q": "Ann is younger than Bob. Bob is younger than Carl. Who is oldest?",
+                "a": "Carl",
+                "opts": ["Carl", "Ann", "Bob", "Cannot tell"],
+            },
+            {
+                "q": "Which number does not belong with the odd numbers? 3, 5, 8, 7, 9",
+                "a": "8",
+                "opts": ["8", "3", "7", "9"],
+            },
+            {
+                "q": "Complete the analogy: Teacher is to School as Doctor is to ?",
+                "a": "Hospital",
+                "opts": ["Hospital", "Patient", "Medicine", "Nurse"],
+            },
+            {
+                "q": "Which is the heaviest? 1 kg, 500 g, 250 g, 100 g",
+                "a": "1 kg",
+                "opts": ["1 kg", "500 g", "250 g", "100 g"],
+            },
+            {
+                "q": "Which number comes next? 1, 3, 5, 7, ?",
+                "a": "9",
+                "opts": ["9", "8", "10", "11"],
+            },
+            {
+                "q": "All squares have four sides. This shape is a square. "
+                     "How many sides does it have?",
+                "a": "4",
+                "opts": ["4", "3", "5", "6"],
+            },
         ]
 
         medium = [
@@ -2013,6 +2474,125 @@ class ChallengeService:
                 "a": "12",
                 "opts": ["12", "15", "Neither", "Both 12 and 15"],
             },
+            {
+                "q": "Which number comes next? 3, 6, 12, 24, ?",
+                "a": "48",
+                "opts": ["48", "36", "30", "42"],
+            },
+            {
+                "q": "Some doctors are runners. All runners are athletes. "
+                     "What must be true?",
+                "a": "Some doctors are athletes",
+                "opts": [
+                    "Some doctors are athletes",
+                    "All doctors are athletes",
+                    "No doctors are athletes",
+                    "All athletes are doctors",
+                ],
+            },
+            {
+                "q": "Complete the analogy: Hammer is to Nail as Screwdriver is to ?",
+                "a": "Screw",
+                "opts": ["Screw", "Wood", "Toolbox", "Hinge"],
+            },
+            {
+                "q": "If 3 workers build a wall in 6 hours, how long do 6 workers "
+                     "take at the same rate?",
+                "a": "3 hours",
+                "opts": ["3 hours", "6 hours", "12 hours", "2 hours"],
+            },
+            {
+                "q": "Which letter comes next? B, D, G, K, ?",
+                "a": "P",
+                "opts": ["P", "O", "N", "Q"],
+            },
+            {
+                "q": "A shirt costs $40 after a 20% discount. What was the original price?",
+                "a": "$50",
+                "opts": ["$50", "$48", "$45", "$60"],
+            },
+            {
+                "q": "Find the odd one out: Copper, Iron, Gold, Plastic",
+                "a": "Plastic",
+                "opts": ["Plastic", "Copper", "Iron", "Gold"],
+            },
+            {
+                "q": "In a queue, Raj is 4th from the front and 6th from the back. "
+                     "How many people are in the queue?",
+                "a": "9",
+                "opts": ["9", "10", "11", "8"],
+            },
+            {
+                "q": "Complete the analogy: Second is to Minute as Minute is to ?",
+                "a": "Hour",
+                "opts": ["Hour", "Day", "Clock", "Week"],
+            },
+            {
+                "q": "If some X are Y and all Y are Z, which must be true?",
+                "a": "Some X are Z",
+                "opts": ["Some X are Z", "All X are Z", "No X are Z", "All Z are X"],
+            },
+            {
+                "q": "Which number completes the series? 1, 4, 9, 16, ?",
+                "a": "25",
+                "opts": ["25", "20", "24", "36"],
+            },
+            {
+                "q": "A box holds exactly 6 eggs. How many boxes are needed for 27 eggs?",
+                "a": "5",
+                "opts": ["5", "4", "6", "3"],
+            },
+            {
+                "q": "Ravi is heavier than Sam but lighter than Tom. Who is heaviest?",
+                "a": "Tom",
+                "opts": ["Tom", "Ravi", "Sam", "Cannot tell"],
+            },
+            {
+                "q": "Find the odd one out: Violin, Guitar, Flute, Cello",
+                "a": "Flute",
+                "opts": ["Flute", "Violin", "Guitar", "Cello"],
+            },
+            {
+                "q": "Which day comes 3 days after the day that comes 2 days after Monday?",
+                "a": "Saturday",
+                "opts": ["Saturday", "Friday", "Sunday", "Thursday"],
+            },
+            {
+                "q": "Complete the analogy: Pen is to Write as Scissors is to ?",
+                "a": "Cut",
+                "opts": ["Cut", "Paper", "Sharp", "Draw"],
+            },
+            {
+                "q": "A train leaves at 9:45 and arrives at 12:15. How long is the journey?",
+                "a": "2 hours 30 minutes",
+                "opts": [
+                    "2 hours 30 minutes",
+                    "2 hours 45 minutes",
+                    "3 hours",
+                    "2 hours",
+                ],
+            },
+            {
+                "q": "If no fish are mammals and all whales are mammals, what follows?",
+                "a": "No whales are fish",
+                "opts": [
+                    "No whales are fish",
+                    "All fish are whales",
+                    "Some whales are fish",
+                    "Nothing follows",
+                ],
+            },
+            {
+                "q": "Which number comes next? 100, 90, 81, 73, ?",
+                "a": "66",
+                "opts": ["66", "65", "64", "67"],
+            },
+            {
+                "q": "Five people each shake hands with every other person exactly "
+                     "once. How many handshakes occur?",
+                "a": "10",
+                "opts": ["10", "15", "20", "5"],
+            },
         ]
 
         hard = [
@@ -2046,7 +2626,7 @@ class ChallengeService:
                 "opts": ["Ava", "Ben", "Dan", "Eve"],
             },
             {
-                "q": "If RED = 27 and BLUE = 37, what is GREEN equal to? "
+                "q": "If RED = 27 and BLUE = 40, what is GREEN equal to? "
                      "(A=1 … Z=26, sum of letter values)",
                 "a": "49",
                 "opts": ["49", "47", "52", "44"],
@@ -2056,6 +2636,125 @@ class ChallengeService:
                      "and minute hands?",
                 "a": "7.5°",
                 "opts": ["7.5°", "0°", "15°", "30°"],
+            },
+            {
+                "q": "Which number completes the series? 1, 1, 2, 3, 5, 8, ?",
+                "a": "13",
+                "opts": ["13", "11", "12", "14"],
+            },
+            {
+                "q": "A bat and a ball cost $1.10 together. The bat costs $1.00 "
+                     "more than the ball. How much does the ball cost?",
+                "a": "$0.05",
+                "opts": ["$0.05", "$0.10", "$0.15", "$1.00"],
+            },
+            {
+                "q": "If 5 machines make 5 widgets in 5 minutes, how long do "
+                     "100 machines take to make 100 widgets?",
+                "a": "5 minutes",
+                "opts": ["5 minutes", "100 minutes", "20 minutes", "1 minute"],
+            },
+            {
+                "q": "A patch of lily pads doubles in size every day and covers "
+                     "the lake on day 48. On which day is the lake half covered?",
+                "a": "Day 47",
+                "opts": ["Day 47", "Day 24", "Day 46", "Day 12"],
+            },
+            {
+                "q": "Which number completes the series? 3, 7, 16, 35, ?",
+                "a": "74",
+                "opts": ["74", "70", "72", "76"],
+            },
+            {
+                "q": "In a class of 30 students, 18 play chess and 20 play tennis. "
+                     "Every student plays at least one. How many play both?",
+                "a": "8",
+                "opts": ["8", "6", "10", "12"],
+            },
+            {
+                "q": "How many times in 24 hours do the hour and minute hands "
+                     "of a clock overlap?",
+                "a": "22",
+                "opts": ["22", "24", "12", "20"],
+            },
+            {
+                "q": "If A=2, B=4, C=6 and so on, what is the total value of "
+                     "the word CAB?",
+                "a": "12",
+                "opts": ["12", "10", "14", "16"],
+            },
+            {
+                "q": "Three friends split a bill evenly and each pays $18. "
+                     "If $9 of the total was tip, what was the bill before tip?",
+                "a": "$45",
+                "opts": ["$45", "$54", "$36", "$27"],
+            },
+            {
+                "q": "All engineers are graduates. Some graduates are managers. "
+                     "Which conclusion is valid?",
+                "a": "It does not follow that any engineer is a manager",
+                "opts": [
+                    "It does not follow that any engineer is a manager",
+                    "All engineers are managers",
+                    "No engineers are managers",
+                    "All managers are engineers",
+                ],
+            },
+            {
+                "q": "A cube is painted on every face and then cut into 27 equal "
+                     "smaller cubes. How many small cubes have exactly one painted face?",
+                "a": "6",
+                "opts": ["6", "8", "12", "1"],
+            },
+            {
+                "q": "Which number completes the series? 2, 3, 5, 7, 11, ?",
+                "a": "13",
+                "opts": ["13", "12", "14", "15"],
+            },
+            {
+                "q": "If today is Tuesday, what day will it be after 100 days?",
+                "a": "Thursday",
+                "opts": ["Thursday", "Wednesday", "Friday", "Tuesday"],
+            },
+            {
+                "q": "A rope ladder hangs over a ship's side with rungs 30 cm apart "
+                     "and the bottom rung touching the water. The tide rises 90 cm. "
+                     "How many rungs are submerged?",
+                "a": "None",
+                "opts": ["None", "Three", "Four", "One"],
+            },
+            {
+                "q": "Which letter comes next? B, C, E, G, K, ?",
+                "a": "M",
+                "opts": ["M", "L", "N", "O"],
+            },
+            {
+                "q": "You have 8 identical-looking balls; one is heavier. What is "
+                     "the minimum number of balance weighings that always finds it?",
+                "a": "2",
+                "opts": ["2", "3", "4", "1"],
+            },
+            {
+                "q": "A shopkeeper marks up a $200 item by 25%, then gives a 20% "
+                     "discount on the marked price. What is the final price?",
+                "a": "$200",
+                "opts": ["$200", "$210", "$190", "$250"],
+            },
+            {
+                "q": "If P is true and Q is false, what is the value of (P AND NOT Q)?",
+                "a": "True",
+                "opts": ["True", "False", "Undefined", "Depends on P"],
+            },
+            {
+                "q": "Which number completes the series? 4, 9, 19, 39, ?",
+                "a": "79",
+                "opts": ["79", "78", "80", "76"],
+            },
+            {
+                "q": "Two trains 300 km apart move toward each other at 60 km/h "
+                     "and 40 km/h. How long until they meet?",
+                "a": "3 hours",
+                "opts": ["3 hours", "2 hours", "5 hours", "4 hours"],
             },
         ]
 
@@ -2090,6 +2789,114 @@ class ChallengeService:
                      "and 86 legs. How many chickens are there?",
                 "a": "17",
                 "opts": ["17", "13", "15", "20"],
+            },
+            {
+                "q": "Knights always tell the truth and knaves always lie. "
+                     "A says: 'We are both knaves.' What is A?",
+                "a": "A knave",
+                "opts": ["A knave", "A knight", "Cannot be determined", "Both at once"],
+            },
+            {
+                "q": "Which number completes the series? 1, 2, 6, 24, 120, ?",
+                "a": "720",
+                "opts": ["720", "600", "620", "840"],
+            },
+            {
+                "q": "Three switches outside a sealed room control three bulbs "
+                     "inside, and you may enter only once. Besides light, which "
+                     "property identifies the switches?",
+                "a": "Bulb warmth",
+                "opts": ["Bulb warmth", "Bulb color", "Switch labels", "Bulb sound"],
+            },
+            {
+                "q": "With 12 balls where exactly one differs in weight (heavier or "
+                     "lighter), what is the minimum number of balance weighings "
+                     "guaranteed to identify it?",
+                "a": "3",
+                "opts": ["3", "2", "4", "5"],
+            },
+            {
+                "q": "Which number completes the series? 2, 12, 36, 80, ?",
+                "a": "150",
+                "opts": ["150", "140", "160", "120"],
+            },
+            {
+                "q": "A logician says: 'If I am wrong, then 2+2=5.' Given that "
+                     "2+2 does not equal 5, what follows in classical logic?",
+                "a": "The logician is not wrong",
+                "opts": [
+                    "The logician is not wrong",
+                    "2+2 equals 5",
+                    "The statement is meaningless",
+                    "Nothing follows",
+                ],
+            },
+            {
+                "q": "In how many distinct orders can 5 people be seated in a row?",
+                "a": "120",
+                "opts": ["120", "25", "60", "720"],
+            },
+            {
+                "q": "What is the probability of rolling a total of 7 with two "
+                     "fair six-sided dice?",
+                "a": "1/6",
+                "opts": ["1/6", "1/12", "1/8", "1/36"],
+            },
+            {
+                "q": "If ¬(P OR Q) is true, what must be the case?",
+                "a": "Both P and Q are false",
+                "opts": [
+                    "Both P and Q are false",
+                    "Both P and Q are true",
+                    "P is true and Q is false",
+                    "Only Q is true",
+                ],
+            },
+            {
+                "q": "Which letter comes next? A, E, F, H, I, ?",
+                "a": "K",
+                "opts": ["K", "J", "L", "G"],
+            },
+            {
+                "q": "A snail climbs 3 m each day and slips back 2 m each night "
+                     "in a 10 m well. On which day does it reach the top?",
+                "a": "Day 8",
+                "opts": ["Day 8", "Day 10", "Day 9", "Day 7"],
+            },
+            {
+                "q": "In a single-elimination tournament with 64 players, how many "
+                     "matches are played in total?",
+                "a": "63",
+                "opts": ["63", "64", "32", "127"],
+            },
+            {
+                "q": "If all Bloops are Razzies and all Razzies are Lazzies, "
+                     "which must be true?",
+                "a": "All Bloops are Lazzies",
+                "opts": [
+                    "All Bloops are Lazzies",
+                    "All Lazzies are Bloops",
+                    "No Bloops are Lazzies",
+                    "Some Lazzies are not Razzies",
+                ],
+            },
+            {
+                "q": "You have two ropes that each burn unevenly in exactly 60 "
+                     "minutes. How do you measure 45 minutes?",
+                "a": "Burn rope one at both ends and rope two at one end, then "
+                     "light rope two's other end when rope one finishes",
+                "opts": [
+                    "Burn rope one at both ends and rope two at one end, then "
+                    "light rope two's other end when rope one finishes",
+                    "Cut one rope exactly in half and burn it",
+                    "Burn both ropes at one end at the same time",
+                    "Burn both ropes at both ends at the same time",
+                ],
+            },
+            {
+                "q": "How many trailing zeros does 25! (25 factorial) have?",
+                "a": "6",
+                "opts": ["6", "5", "4", "7"],
             },
         ]
 
@@ -2141,29 +2948,53 @@ class ChallengeService:
 
         # (word, distractors for multiple choice)
         easy_words = [
-            ("CAT", ["ACT", "TAC", "CTA"]),
-            ("DOG", ["GOD", "ODG", "DGO"]),
-            ("SUN", ["NUS", "USN", "NSU"]),
+            ("CAT", ["TAC", "CTA", "TCA"]),
+            ("DOG", ["ODG", "DGO", "GDO"]),
+            ("SUN", ["USN", "NSU", "SNU"]),
             ("BOOK", ["KOOB", "OBOK", "BOKO"]),
-            ("TREE", ["REET", "ETER", "ERTE"]),
+            ("TREE", ["ETER", "ERTE", "EETR"]),
             ("FISH", ["HSIF", "SIHF", "IFHS"]),
             ("MOON", ["NOOM", "OMON", "ONOM"]),
-            ("STAR", ["RATS", "TARS", "ARST"]),
+            ("STAR", ["ARST", "ATSR", "TSRA"]),
+            ("BIRD", ["BRID", "IBDR", "RIBD"]),
+            ("MILK", ["KLIM", "MLIK", "IMKL"]),
+            ("FROG", ["GORF", "RFOG", "OFGR"]),
+            ("HAND", ["DNAH", "NAHD", "ADHN"]),
+            ("ROAD", ["ORDA", "DAOR", "ADOR"]),
+            ("CAKE", ["KACE", "ECAK", "AKEC"]),
+            ("WIND", ["DNIW", "NIWD", "IWDN"]),
+            ("RICE", ["CIRE", "ECIR", "IREC"]),
+            ("BALL", ["LLAB", "ABLL", "BLAL"]),
+            ("DESK", ["KSED", "SEDK", "EDKS"]),
+            ("GOLD", ["DLOG", "OGLD", "LGOD"]),
+            ("KING", ["GNIK", "NIKG", "IKGN"]),
         ]
 
         medium_words = [
             ("APPLE", ["PAPLE", "ALPEP", "PELPA"]),
             ("HOUSE", ["SEUOH", "HUOSE", "OSEUH"]),
-            ("WATER", ["RETAW", "TAWER", "AWRET"]),
+            ("WATER", ["RETAW", "AWRET", "TEWRA"]),
             ("LIGHT", ["THGIL", "GLITH", "LGIHT"]),
             ("MUSIC", ["CISUM", "MUISC", "SICUM"]),
-            ("BRAIN", ["NIARB", "RABIN", "AIRBN"]),
+            ("BRAIN", ["NIARB", "AIRBN", "IRNAB"]),
             ("CLOCK", ["KCOLC", "COLCK", "LCOKC"]),
             ("PLANT", ["TNALP", "LAPTN", "NAPLT"]),
+            ("BREAD", ["DAERB", "BREDA", "RBEAD"]),
+            ("CHAIR", ["RIAHC", "CHIAR", "HCAIR"]),
+            ("TABLE", ["ELBAT", "TABEL", "BATLE"]),
+            ("RIVER", ["REVIR", "RIVRE", "IREVR"]),
+            ("CLOUD", ["DUOLC", "CLUOD", "LCOUD"]),
+            ("TIGER", ["REGIT", "GITER", "REIGT"]),
+            ("HONEY", ["YENOH", "HONYE", "NOHEY"]),
+            ("SUGAR", ["RAGUS", "SUGRA", "GUSAR"]),
+            ("TRAIN", ["NIART", "TRIAN", "RTAIN"]),
+            ("BEACH", ["HCAEB", "BECAH", "ABECH"]),
+            ("GREEN", ["NEERG", "GERNE", "REGEN"]),
+            ("SMILE", ["ELIMS", "SMLIE", "MSILE"]),
         ]
 
         hard_words = [
-            ("PUZZLE", ["ZELPUP", "PUZZEL", "ZLPEUZ"]),
+            ("PUZZLE", ["PUZZEL", "ZLPEUZ", "ULZZPE"]),
             ("ORANGE", ["EGNARO", "ORGNAE", "NAROGE"]),
             ("PLANET", ["TENALP", "PLENTA", "NEPTAL"]),
             ("GUITAR", ["RATIUG", "GIUTAR", "TARIGU"]),
@@ -2171,6 +3002,18 @@ class ChallengeService:
             ("CASTLE", ["ELTASC", "CASLTE", "TLECAS"]),
             ("WINTER", ["RETNIW", "WINTRE", "TINWER"]),
             ("SILVER", ["REVILS", "SILVRE", "VILSER"]),
+            ("GARDEN", ["NEDRAG", "GARDNE", "RADGEN"]),
+            ("MARKET", ["TEKRAM", "MARKTE", "KRAMET"]),
+            ("FOREST", ["TSEROF", "ROFEST", "OTEFSR"]),
+            ("CANDLE", ["ELDNAC", "CANDEL", "NACDLE"]),
+            ("ROCKET", ["TEKCOR", "ROCKTE", "KCORET"]),
+            ("FLOWER", ["REWOLF", "FLOWRE", "ROFELW"]),
+            ("MONKEY", ["YEKNOM", "MONKYE", "KNOMEY"]),
+            ("PENCIL", ["LICNEP", "PENCLI", "NECPIL"]),
+            ("SUMMER", ["REMMUS", "SUMMRE", "MMUSER"]),
+            ("TEMPLE", ["ELPMET", "TEMPEL", "PMETLE"]),
+            ("VELVET", ["TEVLEV", "VELVTE", "LEVVET"]),
+            ("YELLOW", ["WOLLEY", "YELLWO", "LLOWEY"]),
         ]
 
         expert_words = [
@@ -2182,6 +3025,18 @@ class ChallengeService:
             ("WHISPER", ["REPSIHW", "WHISPRE", "SIPREHW"]),
             ("GALAXY", ["YXALAG", "AXALGY", "GLAXAY"]),
             ("ECLIPSE", ["ESPILCE", "ECLISPE", "CLIPSEE"]),
+            ("DIAMOND", ["DNOMAID", "DIAMNOD", "MONDAID"]),
+            ("HARMONY", ["YNOMRAH", "HARMYON", "MONYHAR"]),
+            ("LANTERN", ["NRETNAL", "LANTREN", "TERNLAN"]),
+            ("MONSOON", ["NOOSNOM", "MONSONO", "SOONMON"]),
+            ("PYRAMID", ["DIMARYP", "PYRAMDI", "RAMIDPY"]),
+            ("QUANTUM", ["MUTNAUQ", "QUANTMU", "TUMQUAN"]),
+            ("RAINBOW", ["WOBNIAR", "RAINBWO", "BOWRAIN"]),
+            ("THUNDER", ["REDNUHT", "THUNDRE", "DERTHUN"]),
+            ("VOYAGER", ["REGAYOV", "VOYAGRE", "GERVOYA"]),
+            ("WILDCAT", ["TACDLIW", "WILDCTA", "CATWILD"]),
+            ("CAPTAIN", ["NIATPAC", "CAPTIAN", "TAINCAP"]),
+            ("TRIUMPH", ["HPMUIRT", "TRIUMHP", "UMPHTRI"]),
         ]
 
         if difficulty in ("beginner", "easy"):
@@ -2235,6 +3090,96 @@ class ChallengeService:
                     "q": "Which word does not belong? Monday, Friday, Sunday, Winter",
                     "a": "Winter",
                     "opts": ["Winter", "Monday", "Friday", "Sunday"],
+                },
+                {
+                    "q": "Which word does not belong? Rose, Tulip, Daisy, Hammer",
+                    "a": "Hammer",
+                    "opts": ["Hammer", "Rose", "Tulip", "Daisy"],
+                },
+                {
+                    "q": "Which word does not belong? Guitar, Piano, Drum, Bread",
+                    "a": "Bread",
+                    "opts": ["Bread", "Guitar", "Piano", "Drum"],
+                },
+                {
+                    "q": "Which word does not belong? Copper, Silver, Gold, Cotton",
+                    "a": "Cotton",
+                    "opts": ["Cotton", "Copper", "Silver", "Gold"],
+                },
+                {
+                    "q": "Which word does not belong? January, April, July, Tuesday",
+                    "a": "Tuesday",
+                    "opts": ["Tuesday", "January", "April", "July"],
+                },
+                {
+                    "q": "Which word does not belong? Eye, Nose, Ear, Brick",
+                    "a": "Brick",
+                    "opts": ["Brick", "Eye", "Nose", "Ear"],
+                },
+                {
+                    "q": "Which word does not belong? Circle, Square, Triangle, Yellow",
+                    "a": "Yellow",
+                    "opts": ["Yellow", "Circle", "Square", "Triangle"],
+                },
+                {
+                    "q": "Which word does not belong? Doctor, Teacher, Engineer, Mountain",
+                    "a": "Mountain",
+                    "opts": ["Mountain", "Doctor", "Teacher", "Engineer"],
+                },
+                {
+                    "q": "Which word does not belong? Rain, Snow, Hail, Sofa",
+                    "a": "Sofa",
+                    "opts": ["Sofa", "Rain", "Snow", "Hail"],
+                },
+                {
+                    "q": "Which word does not belong? Football, Tennis, Cricket, Sandwich",
+                    "a": "Sandwich",
+                    "opts": ["Sandwich", "Football", "Tennis", "Cricket"],
+                },
+                {
+                    "q": "Which word does not belong? Ocean, River, Lake, Desert",
+                    "a": "Desert",
+                    "opts": ["Desert", "Ocean", "River", "Lake"],
+                },
+                {
+                    "q": "Which word does not belong? Hindi, English, Spanish, Paris",
+                    "a": "Paris",
+                    "opts": ["Paris", "Hindi", "English", "Spanish"],
+                },
+                {
+                    "q": "Which word does not belong? Lion, Tiger, Leopard, Sparrow",
+                    "a": "Sparrow",
+                    "opts": ["Sparrow", "Lion", "Tiger", "Leopard"],
+                },
+                {
+                    "q": "Which word does not belong? Hospital, School, Library, Pillow",
+                    "a": "Pillow",
+                    "opts": ["Pillow", "Hospital", "School", "Library"],
+                },
+                {
+                    "q": "Which word does not belong? Milk, Juice, Water, Stone",
+                    "a": "Stone",
+                    "opts": ["Stone", "Milk", "Juice", "Water"],
+                },
+                {
+                    "q": "Which word does not belong? Sun, Moon, Star, Spoon",
+                    "a": "Spoon",
+                    "opts": ["Spoon", "Sun", "Moon", "Star"],
+                },
+                {
+                    "q": "Which word does not belong? Happy, Sad, Angry, Iron",
+                    "a": "Iron",
+                    "opts": ["Iron", "Happy", "Sad", "Angry"],
+                },
+                {
+                    "q": "Which word does not belong? Nose, Finger, Thumb, Wheel",
+                    "a": "Wheel",
+                    "opts": ["Wheel", "Nose", "Finger", "Thumb"],
+                },
+                {
+                    "q": "Which word does not belong? Shirt, Trousers, Jacket, Cabbage",
+                    "a": "Cabbage",
+                    "opts": ["Cabbage", "Shirt", "Trousers", "Jacket"],
                 },
             ]
             return ChallengeService._pick_mcq_from_bank(
@@ -2326,6 +3271,26 @@ class ChallengeService:
             {"q": "How many hours are in a day?", "a": "24", "opts": ["24", "12", "48", "60"]},
             {"q": "How many months are in a year?", "a": "12", "opts": ["12", "10", "11", "13"]},
             {"q": "What process do plants use to make food from sunlight?", "a": "Photosynthesis", "opts": ["Photosynthesis", "Digestion", "Respiration", "Evaporation"]},
+            {"q": "How many legs does a spider have?", "a": "8", "opts": ["8", "6", "10", "4"]},
+            {"q": "What is the largest land animal?", "a": "African elephant", "opts": ["African elephant", "Giraffe", "Hippopotamus", "Rhinoceros"]},
+            {"q": "Which animal is traditionally called man's best friend?", "a": "Dog", "opts": ["Dog", "Cat", "Horse", "Rabbit"]},
+            {"q": "What is frozen water called?", "a": "Ice", "opts": ["Ice", "Steam", "Sand", "Salt"]},
+            {"q": "How many colors are traditionally listed in a rainbow?", "a": "7", "opts": ["7", "5", "6", "9"]},
+            {"q": "What is the capital of Japan?", "a": "Tokyo", "opts": ["Tokyo", "Kyoto", "Osaka", "Seoul"]},
+            {"q": "Which planet is closest to the Sun?", "a": "Mercury", "opts": ["Mercury", "Venus", "Earth", "Mars"]},
+            {"q": "How many sides does a square have?", "a": "4", "opts": ["4", "3", "5", "6"]},
+            {"q": "Which drink do cows produce for people?", "a": "Milk", "opts": ["Milk", "Honey", "Juice", "Oil"]},
+            {"q": "Which season comes directly after summer?", "a": "Autumn", "opts": ["Autumn", "Spring", "Winter", "Monsoon"]},
+            {"q": "How many minutes are in an hour?", "a": "60", "opts": ["60", "30", "90", "100"]},
+            {"q": "What is the largest mammal on Earth?", "a": "Blue whale", "opts": ["Blue whale", "Elephant", "Great white shark", "Giraffe"]},
+            {"q": "Which gas do humans need to breathe to survive?", "a": "Oxygen", "opts": ["Oxygen", "Carbon dioxide", "Nitrogen", "Hydrogen"]},
+            {"q": "What color is a ripe banana?", "a": "Yellow", "opts": ["Yellow", "Green", "Red", "Blue"]},
+            {"q": "How many wheels does a standard bicycle have?", "a": "2", "opts": ["2", "3", "4", "1"]},
+            {"q": "What is the capital of Italy?", "a": "Rome", "opts": ["Rome", "Milan", "Venice", "Naples"]},
+            {"q": "Which flightless bird lives in Antarctica?", "a": "Penguin", "opts": ["Penguin", "Eagle", "Sparrow", "Owl"]},
+            {"q": "What is a baby frog called?", "a": "Tadpole", "opts": ["Tadpole", "Kitten", "Calf", "Chick"]},
+            {"q": "How many letters are in the English alphabet?", "a": "26", "opts": ["26", "24", "25", "27"]},
+            {"q": "What shape is a standard stop sign?", "a": "Octagon", "opts": ["Octagon", "Hexagon", "Square", "Circle"]},
         ]
 
         medium = [
@@ -2337,6 +3302,26 @@ class ChallengeService:
             {"q": "Which country is home to the kangaroo?", "a": "Australia", "opts": ["Australia", "Brazil", "India", "South Africa"]},
             {"q": "What is the positive square root of 81?", "a": "9", "opts": ["9", "8", "7", "10"]},
             {"q": "In which sport is the term 'love' used for a score of zero?", "a": "Tennis", "opts": ["Tennis", "Golf", "Soccer", "Cricket"]},
+            {"q": "Who wrote the play 'Romeo and Juliet'?", "a": "William Shakespeare", "opts": ["William Shakespeare", "Charles Dickens", "Jane Austen", "Mark Twain"]},
+            {"q": "Which planet is the largest in our solar system?", "a": "Jupiter", "opts": ["Jupiter", "Saturn", "Neptune", "Earth"]},
+            {"q": "What is the currency of Japan?", "a": "Yen", "opts": ["Yen", "Won", "Yuan", "Ringgit"]},
+            {"q": "How many players from one soccer team are on the field at kickoff?", "a": "11", "opts": ["11", "9", "10", "12"]},
+            {"q": "What is the freezing point of water in Celsius?", "a": "0°C", "opts": ["0°C", "32°C", "100°C", "-10°C"]},
+            {"q": "On which continent is the Sahara Desert located?", "a": "Africa", "opts": ["Africa", "Asia", "Australia", "South America"]},
+            {"q": "What is the tallest mountain above sea level?", "a": "Mount Everest", "opts": ["Mount Everest", "K2", "Kilimanjaro", "Denali"]},
+            {"q": "Who was the first person to walk on the Moon?", "a": "Neil Armstrong", "opts": ["Neil Armstrong", "Buzz Aldrin", "Yuri Gagarin", "Michael Collins"]},
+            {"q": "What is the chemical symbol for oxygen?", "a": "O", "opts": ["O", "C", "N", "Os"]},
+            {"q": "How many strings does a standard violin have?", "a": "4", "opts": ["4", "6", "5", "3"]},
+            {"q": "Which language has the most native speakers worldwide?", "a": "Mandarin Chinese", "opts": ["Mandarin Chinese", "English", "Spanish", "Hindi"]},
+            {"q": "What is the capital of Australia?", "a": "Canberra", "opts": ["Canberra", "Sydney", "Melbourne", "Perth"]},
+            {"q": "How many degrees are in a right angle?", "a": "90", "opts": ["90", "45", "180", "60"]},
+            {"q": "What is the main ingredient in traditional guacamole?", "a": "Avocado", "opts": ["Avocado", "Tomato", "Pepper", "Cucumber"]},
+            {"q": "Which organ pumps blood around the human body?", "a": "Heart", "opts": ["Heart", "Liver", "Lungs", "Kidney"]},
+            {"q": "In which country were the ancient Olympic Games first held?", "a": "Greece", "opts": ["Greece", "Italy", "Egypt", "France"]},
+            {"q": "How many zeros are in one million?", "a": "6", "opts": ["6", "5", "7", "9"]},
+            {"q": "Which metal is liquid at room temperature?", "a": "Mercury", "opts": ["Mercury", "Iron", "Lead", "Zinc"]},
+            {"q": "How many days are in a leap year?", "a": "366", "opts": ["366", "365", "364", "367"]},
+            {"q": "Which instrument measures temperature?", "a": "Thermometer", "opts": ["Thermometer", "Barometer", "Altimeter", "Odometer"]},
         ]
 
         hard = [
@@ -2348,6 +3333,26 @@ class ChallengeService:
             {"q": "What is the capital of Canada?", "a": "Ottawa", "opts": ["Ottawa", "Toronto", "Vancouver", "Montreal"]},
             {"q": "How many chambers does a human heart have?", "a": "4", "opts": ["4", "2", "3", "5"]},
             {"q": "Which planet is famous for its prominent ring system?", "a": "Saturn", "opts": ["Saturn", "Jupiter", "Uranus", "Neptune"]},
+            {"q": "Which element has the atomic number 1?", "a": "Hydrogen", "opts": ["Hydrogen", "Helium", "Oxygen", "Carbon"]},
+            {"q": "Who wrote the novel '1984'?", "a": "George Orwell", "opts": ["George Orwell", "Aldous Huxley", "Ray Bradbury", "H.G. Wells"]},
+            {"q": "What is the smallest country in the world by area?", "a": "Vatican City", "opts": ["Vatican City", "Monaco", "San Marino", "Liechtenstein"]},
+            {"q": "Which sea creature has three hearts?", "a": "Octopus", "opts": ["Octopus", "Dolphin", "Shark", "Jellyfish"]},
+            {"q": "In which year did the Berlin Wall fall?", "a": "1989", "opts": ["1989", "1991", "1987", "1990"]},
+            {"q": "What is the scientific study of earthquakes called?", "a": "Seismology", "opts": ["Seismology", "Geology", "Meteorology", "Volcanology"]},
+            {"q": "Which planet has the shortest day?", "a": "Jupiter", "opts": ["Jupiter", "Mercury", "Earth", "Mars"]},
+            {"q": "What is the chemical symbol for potassium?", "a": "K", "opts": ["K", "P", "Po", "Pt"]},
+            {"q": "Who was the first woman to win a Nobel Prize?", "a": "Marie Curie", "opts": ["Marie Curie", "Rosalind Franklin", "Dorothy Hodgkin", "Ada Lovelace"]},
+            {"q": "What is the longest bone in the human body?", "a": "Femur", "opts": ["Femur", "Tibia", "Humerus", "Fibula"]},
+            {"q": "Which ancient civilization built Machu Picchu?", "a": "Inca", "opts": ["Inca", "Aztec", "Maya", "Olmec"]},
+            {"q": "What is the SI unit of electric current?", "a": "Ampere", "opts": ["Ampere", "Volt", "Ohm", "Watt"]},
+            {"q": "How many time zones does Russia span?", "a": "11", "opts": ["11", "9", "12", "8"]},
+            {"q": "What is the term for animals that are active mainly at night?", "a": "Nocturnal", "opts": ["Nocturnal", "Diurnal", "Crepuscular", "Hibernating"]},
+            {"q": "Which gas makes up about 78% of Earth's atmosphere?", "a": "Nitrogen", "opts": ["Nitrogen", "Oxygen", "Argon", "Carbon dioxide"]},
+            {"q": "Who composed the Ninth Symphony that includes 'Ode to Joy'?", "a": "Beethoven", "opts": ["Beethoven", "Mozart", "Brahms", "Schubert"]},
+            {"q": "What is the capital of Brazil?", "a": "Brasília", "opts": ["Brasília", "Rio de Janeiro", "São Paulo", "Salvador"]},
+            {"q": "Which blood type is the universal donor for red blood cells?", "a": "O negative", "opts": ["O negative", "AB positive", "A positive", "B negative"]},
+            {"q": "What is the process called when a liquid turns to gas at its surface below boiling point?", "a": "Evaporation", "opts": ["Evaporation", "Condensation", "Sublimation", "Precipitation"]},
+            {"q": "How many players from one basketball team are on the court at a time?", "a": "5", "opts": ["5", "6", "7", "4"]},
         ]
 
         expert = [
@@ -2359,6 +3364,26 @@ class ChallengeService:
             {"q": "What is the largest internal organ in the human body?", "a": "Liver", "opts": ["Liver", "Lungs", "Brain", "Stomach"]},
             {"q": "Which composer wrote 'The Four Seasons'?", "a": "Vivaldi", "opts": ["Vivaldi", "Bach", "Mozart", "Beethoven"]},
             {"q": "What does DNA stand for?", "a": "Deoxyribonucleic acid", "opts": ["Deoxyribonucleic acid", "Dinucleic acid", "Deoxyribose acid", "Dual nucleic acid"]},
+            {"q": "What is the value of pi to two decimal places?", "a": "3.14", "opts": ["3.14", "3.41", "3.12", "3.16"]},
+            {"q": "Which subatomic particle carries a negative electric charge?", "a": "Electron", "opts": ["Electron", "Proton", "Neutron", "Positron"]},
+            {"q": "Who formulated the three laws of planetary motion?", "a": "Johannes Kepler", "opts": ["Johannes Kepler", "Nicolaus Copernicus", "Galileo Galilei", "Tycho Brahe"]},
+            {"q": "What is the second most abundant element in the universe?", "a": "Helium", "opts": ["Helium", "Oxygen", "Carbon", "Neon"]},
+            {"q": "In computing, what does CPU stand for?", "a": "Central Processing Unit", "opts": ["Central Processing Unit", "Central Power Unit", "Computer Processing Unit", "Core Processing Unit"]},
+            {"q": "Half-life is used to measure the rate of which process?", "a": "Radioactive decay", "opts": ["Radioactive decay", "Chemical bonding", "Thermal expansion", "Electrical resistance"]},
+            {"q": "Which scientist published the periodic table based on periodic law?", "a": "Dmitri Mendeleev", "opts": ["Dmitri Mendeleev", "Robert Boyle", "John Dalton", "Antoine Lavoisier"]},
+            {"q": "What is the largest artery in the human body?", "a": "Aorta", "opts": ["Aorta", "Pulmonary artery", "Carotid artery", "Femoral artery"]},
+            {"q": "In which year did the Wright brothers make their first powered flight?", "a": "1903", "opts": ["1903", "1900", "1905", "1912"]},
+            {"q": "What does HTTP stand for?", "a": "HyperText Transfer Protocol", "opts": ["HyperText Transfer Protocol", "HyperText Transmission Protocol", "High Transfer Text Protocol", "Hyperlink Text Transfer Process"]},
+            {"q": "Which law states that energy cannot be created or destroyed?", "a": "First law of thermodynamics", "opts": ["First law of thermodynamics", "Second law of thermodynamics", "Newton's first law", "Boyle's law"]},
+            {"q": "What is the SI unit of frequency?", "a": "Hertz", "opts": ["Hertz", "Newton", "Joule", "Pascal"]},
+            {"q": "Who wrote 'On the Origin of Species'?", "a": "Charles Darwin", "opts": ["Charles Darwin", "Gregor Mendel", "Alfred Russel Wallace", "Jean-Baptiste Lamarck"]},
+            {"q": "What is the approximate age of the Earth?", "a": "4.5 billion years", "opts": ["4.5 billion years", "2.5 billion years", "6 billion years", "13.8 billion years"]},
+            {"q": "Which type of blood vessel carries blood away from the heart?", "a": "Artery", "opts": ["Artery", "Vein", "Capillary", "Venule"]},
+            {"q": "What is the derivative of x squared with respect to x?", "a": "2x", "opts": ["2x", "x", "x squared", "2"]},
+            {"q": "What is the name of the galaxy containing our solar system?", "a": "The Milky Way", "opts": ["The Milky Way", "Andromeda", "Triangulum", "Whirlpool"]},
+            {"q": "In programming, what is it called when a function calls itself?", "a": "Recursion", "opts": ["Recursion", "Iteration", "Inheritance", "Polymorphism"]},
+            {"q": "What is the boiling point of water at sea level in Fahrenheit?", "a": "212°F", "opts": ["212°F", "100°F", "180°F", "232°F"]},
+            {"q": "What does RAM stand for in computing?", "a": "Random Access Memory", "opts": ["Random Access Memory", "Read Access Memory", "Rapid Access Memory", "Runtime Allocated Memory"]},
         ]
 
         return {

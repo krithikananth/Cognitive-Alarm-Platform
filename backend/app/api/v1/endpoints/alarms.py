@@ -20,13 +20,18 @@ from app.models.alarm import Alarm, AlarmType, ChallengeType, AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
 from app.models.alarm_snooze_event import AlarmSnoozeEvent
 from app.models.challenge_session import ChallengeSession
-from app.services.challenge_service import ChallengeService, VERIFY_TIME_GRACE_SECONDS
+from app.services.challenge_service import (
+    ChallengeService,
+    PRACTICE_ALARM_ID,
+    VERIFY_TIME_GRACE_SECONDS,
+)
 from app.services.attempt_log_service import AttemptLogService
 from app.services.analytics_ingestion_service import AnalyticsIngestionService
 from app.services.recommendation_cache import RecommendationCache
 from app.services.profile_service import ProfileService
 from app.services.adaptive_scheduling_service import AdaptiveSchedulingService
 from app.services.day_streak import DayStreakService
+from app.services.notification_scheduler import refresh_user_notifications
 from app.schemas.alarm import (
     AlarmCreate,
     AlarmUpdate,
@@ -141,6 +146,7 @@ def create_alarm(
     db.commit()
     db.refresh(alarm)
     RecommendationCache.invalidate_user(current_user.id)
+    refresh_user_notifications(current_user.id)
     return alarm
 
 
@@ -442,6 +448,7 @@ def update_alarm(
     db.commit()
     db.refresh(alarm)
     RecommendationCache.invalidate_user(current_user.id)
+    refresh_user_notifications(current_user.id)
     return alarm
 
 
@@ -469,6 +476,9 @@ def delete_alarm(
 
     # Clear dependents first so FK constraints (Postgres / SQLite with FKs on)
     # cannot block the alarm row delete.
+    from app.services.notification_service import NotificationService
+
+    NotificationService.cancel_pending_for_alarm(db, alarm_id)
     db.query(ChallengeSession).filter(ChallengeSession.alarm_id == alarm_id).delete(
         synchronize_session=False
     )
@@ -482,6 +492,7 @@ def delete_alarm(
     db.delete(alarm)
     db.commit()
     RecommendationCache.invalidate_user(current_user.id)
+    refresh_user_notifications(current_user.id)
     return None
 
 
@@ -514,10 +525,15 @@ def toggle_alarm(
         alarm.next_trigger_at = _calculate_next_trigger(
             alarm, user_tz=user_tz, db=db, user_id=current_user.id
         )
+    else:
+        from app.services.notification_service import NotificationService
+
+        NotificationService.cancel_pending_for_alarm(db, alarm.id)
 
     db.commit()
     db.refresh(alarm)
     RecommendationCache.invalidate_user(current_user.id)
+    refresh_user_notifications(current_user.id)
     return alarm
 
 
@@ -576,6 +592,8 @@ def snooze_alarm(
 
     db.commit()
     db.refresh(alarm)
+    # Snooze shifts next_trigger_at — keep wake reminder in sync (no duplicates).
+    refresh_user_notifications(current_user.id)
     return alarm
 
 
@@ -1192,6 +1210,8 @@ def _fail_wake_internal(
     db.refresh(alarm)
     db.refresh(profile)
     RecommendationCache.invalidate_user(current_user.id)
+    # Recurring / one-shot next_trigger advanced — resync wake reminders.
+    refresh_user_notifications(current_user.id)
 
     failure_streak = int(profile.consecutive_failure_streak or 0)
     success_streak = int(profile.consecutive_success_streak or 0)
@@ -1329,6 +1349,8 @@ def _dismiss_alarm_internal(
     db.commit()
     db.refresh(alarm)
     RecommendationCache.invalidate_user(current_user.id)
+    # Advance recurring next_trigger / deactivate one-shot — resync reminders.
+    refresh_user_notifications(current_user.id)
     return alarm
 
 
@@ -1394,6 +1416,202 @@ def get_challenge_history(
             }
             for log in logs
         ],
+    }
+
+
+# ── Practice mode (no wake / streak / attempt-log side effects) ─────────
+
+
+class PracticeStartRequest(BaseModel):
+    """Optional overrides for a practice challenge session."""
+
+    challenge_type: Optional[str] = Field(
+        None,
+        description="Challenge type (math, logic, …) or random. Defaults to profile preference / random.",
+    )
+    difficulty: Optional[str] = Field(
+        None,
+        description="Difficulty override. Defaults to profile baseline.",
+    )
+
+
+def _parse_practice_challenge_type(raw: Optional[str]) -> ChallengeType:
+    """Resolve a client challenge-type string into a ChallengeType enum."""
+    if not raw:
+        return ChallengeType.RANDOM
+    value = str(raw).strip().lower()
+    if value in ("word", ChallengeType.WORD.value):
+        value = ChallengeType.WORD_GAME.value
+    allowed = {ct.value for ct in ChallengeType if ct != ChallengeType.WORD}
+    if value not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported challenge type: {raw}",
+        )
+    return ChallengeType(value)
+
+
+@router.post(
+    "/challenge/practice",
+    summary="Start a practice cognitive challenge",
+)
+def start_practice_challenge(
+    data: PracticeStartRequest = PracticeStartRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Issue a practice puzzle using the real challenge engine.
+
+    Practice sessions are keyed by ``PRACTICE_ALARM_ID`` and do **not**:
+    - write ``alarm_challenge_logs``
+    - mutate adaptive / day streaks
+    - create wake events or dismiss alarms
+    """
+    profile = ProfileService.get_or_create_profile(db, current_user.id)
+    habits = profile.habit_preferences or {}
+    preferred_types = habits.get("preferred_challenge_types")
+
+    challenge_type = _parse_practice_challenge_type(data.challenge_type)
+    if data.difficulty:
+        difficulty = AttemptLogService.normalize_difficulty(data.difficulty)
+    else:
+        difficulty = ChallengeService.resolve_baseline_difficulty(profile, None)
+
+    recent_logs = (
+        db.query(AlarmChallengeLog)
+        .filter(AlarmChallengeLog.user_id == current_user.id)
+        .order_by(AlarmChallengeLog.created_at.desc())
+        .limit(25)
+        .all()
+    )
+
+    user_tz_name = profile.timezone or "UTC"
+    current_hour = datetime.now(_resolve_timezone(user_tz_name)).hour
+
+    active = ChallengeService.get_challenge_session(
+        current_user.id, PRACTICE_ALARM_ID, db
+    )
+    exclude_prompts = []
+    if active and active.get("prompt"):
+        exclude_prompts.append(active["prompt"])
+
+    challenge = ChallengeService.generate_challenge(
+        challenge_type=challenge_type,
+        difficulty=difficulty,
+        current_hour=current_hour,
+        preferred_types=preferred_types,
+        recent_logs=recent_logs,
+        exclude_prompts=exclude_prompts or None,
+        # Practice should not shift adaptive difficulty from wake streaks.
+        apply_adaptive_difficulty=False,
+    )
+
+    ChallengeService.store_challenge_session(
+        current_user.id,
+        PRACTICE_ALARM_ID,
+        challenge,
+        db,
+        required_correct=1,
+        escalation_level=0,
+        reset_progress=True,
+    )
+    payload = ChallengeService.public_challenge_payload(
+        challenge,
+        consecutive_correct=0,
+        required_correct=1,
+        escalation_level=0,
+    )
+    payload["mode"] = "practice"
+    return payload
+
+
+@router.post(
+    "/challenge/practice/verify",
+    summary="Verify a practice challenge answer",
+)
+def verify_practice_challenge(
+    data: VerifyAnswerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Verify a practice answer against the server-stored practice session.
+
+    Always returns HTTP 200 with ``correct`` so the UI can continue the
+    practice loop without treating wrong answers as API failures.
+    Does not log attempts or update streaks / wakes.
+    """
+    session = ChallengeService.get_challenge_session(
+        current_user.id, PRACTICE_ALARM_ID, db
+    )
+    if not session or not session.get("answer"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active practice challenge. Start one first.",
+        )
+
+    expected = session["answer"]
+    difficulty = AttemptLogService.normalize_difficulty(session["difficulty"])
+    resolved_type = AttemptLogService.normalize_challenge_type(
+        session.get("challenge_type") or "math"
+    )
+    max_time = int(session["time_limit_seconds"] or 30)
+    issued_at = session["issued_at"]
+    if issued_at.tzinfo is None:
+        issued_at = issued_at.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - issued_at).total_seconds()
+    client_time = max(0, int(data.time_taken_seconds or 0))
+    time_taken = max(int(round(elapsed)), client_time)
+    timed_out = time_taken > (max_time + VERIFY_TIME_GRACE_SECONDS)
+
+    is_correct = ChallengeService.verify_answer(expected, data.user_answer)
+    actually_correct = is_correct and not timed_out
+    score = ChallengeService.calculate_score(
+        challenge_type=resolved_type,
+        difficulty=difficulty,
+        time_taken_seconds=time_taken,
+        is_correct=actually_correct,
+    )
+
+    # Consume the puzzle so it cannot be replayed (same as wake flow).
+    ChallengeService.clear_puzzle_fields(
+        current_user.id, PRACTICE_ALARM_ID, db
+    )
+
+    if timed_out:
+        return {
+            "mode": "practice",
+            "correct": False,
+            "timed_out": True,
+            "message": (
+                f"Time's up! Limit was {max_time}s for {difficulty} difficulty."
+            ),
+            "score": score,
+            "time_taken_seconds": time_taken,
+            "challenge_type": resolved_type,
+            "difficulty": difficulty,
+        }
+
+    if actually_correct:
+        return {
+            "mode": "practice",
+            "correct": True,
+            "timed_out": False,
+            "message": "Correct! Nice work — try another.",
+            "score": score,
+            "time_taken_seconds": time_taken,
+            "challenge_type": resolved_type,
+            "difficulty": difficulty,
+        }
+
+    return {
+        "mode": "practice",
+        "correct": False,
+        "timed_out": False,
+        "message": "Incorrect answer. Try another challenge.",
+        "score": score,
+        "time_taken_seconds": time_taken,
+        "challenge_type": resolved_type,
+        "difficulty": difficulty,
     }
 
 

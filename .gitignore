@@ -28,6 +28,12 @@ ENV/
 .env.production
 .env.staging
 
+# ----- Firebase service account credentials (never commit private keys) -----
+firebase-credentials.json
+firebase-adminsdk*.json
+*-firebase-adminsdk-*.json
+serviceAccountKey.json
+
 # ----- Database -----
 *.db
 *.sqlite3

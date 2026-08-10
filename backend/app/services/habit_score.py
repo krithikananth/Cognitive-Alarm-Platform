@@ -5,6 +5,9 @@ All dashboard, profile, recommendation, and analytics paths must use
 ``calculate_habit_score`` from this module. Do not reimplement the formula
 elsewhere.
 
+Display format is always ``N/100`` via ``format_habit_score`` (0–100 scale,
+never as a percentage or bare decimal in user-facing copy).
+
 When verified wake events are available, input counters are derived by
 replaying the same dismiss-path rules used when updating ``UserProfile``.
 Otherwise stored profile counters are used (backward compatible).
@@ -71,6 +74,23 @@ _NEUTRAL_COMPONENT_SCORE = 50.0
 _CONSISTENCY_CLEAN_WAKE_DELTA = 5.0
 _CONSISTENCY_MID_CYCLE_SNOOZE_DELTA = 5.0
 _CONSISTENCY_SNOOZE_EXHAUSTED_DELTA = 10.0
+
+
+def format_habit_score(value: Any, *, empty: str = "—") -> str:
+    """Canonical Habit Score display string: ``N/100`` (0–100 scale, not %).
+
+    Use this for Dashboard/Analytics/Reports/Recommendation copy so surfaces
+    never mix percentage and bare-decimal formats.
+    """
+    if value is None:
+        return empty
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return empty
+    if numeric != numeric:  # NaN
+        return empty
+    return f"{int(round(numeric))}/100"
 
 
 def calculate_habit_score(

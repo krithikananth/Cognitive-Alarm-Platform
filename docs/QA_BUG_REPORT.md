@@ -27,9 +27,9 @@ No calculation defects in Habit Score SSOT or behavioral analytics formulas afte
 
 Added `GET /api/v1/users/profile/preferences` returning preferred challenge types, difficulty preference, productivity goals, and habit preferences. Covered by `test_preferences_get_returns_expected_shape`.
 
-### BUG-002 — Password reset client stubs → Fixed (deferred feature)
+### BUG-002 — Password reset client stubs → Fixed (feature shipped)
 
-Removed unused `forgotPassword` / `resetPassword` from `frontend/src/services/api.js`. Login still shows “Password reset is not available yet.” Backend routes intentionally absent until email flow ships.
+Password reset is now implemented end to end. `POST /api/v1/auth/forgot-password` and `POST /api/v1/auth/reset-password` are live in `auth.py`, both returning generic messages to prevent email enumeration. `frontend/src/services/api.js` exposes `forgotPassword` / `resetPassword` against those routes, and Login links to the `/forgot-password` and `/reset-password` pages. Covered by `test_forgot_and_reset_password_success` plus token and weak-password rejection tests.
 
 ### BUG-003 — Wake consistency score vs displayed std drift → Fixed
 
