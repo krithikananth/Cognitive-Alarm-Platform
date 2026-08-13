@@ -43,7 +43,7 @@
   "devDependencies": {
     "@playwright/test": "^1.49.1",
     "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^14.3.1",
+    "@testing-library/react": "^16.3.2",
     "autoprefixer": "^10.4.19",
     "postcss": "^8.4.38",
     "react-scripts": "5.0.1",
