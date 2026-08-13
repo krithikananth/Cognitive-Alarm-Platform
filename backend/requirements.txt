@@ -1,4 +1,4 @@
-fastapi==0.116.1
+fastapi==0.141.1
 # Pinned explicitly (FastAPI allows <0.41.0): 0.38.6 carries several DoS and
 # multipart advisories. Keep this pin in step with the FastAPI range.
 starlette==0.47.2
