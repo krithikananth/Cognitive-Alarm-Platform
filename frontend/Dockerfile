@@ -46,7 +46,7 @@ RUN npm run build && npm run check:bundle-size
 
 # Alpine's own nginx is used instead of the nginx.org image because only Alpine
 # packages a prebuilt brotli module; nginx.org publishes no brotli package.
-FROM alpine:3.20 AS runtime
+FROM alpine:3.24 AS runtime
 
 RUN apk add --no-cache nginx nginx-mod-http-brotli
 
