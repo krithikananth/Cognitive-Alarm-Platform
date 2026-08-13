@@ -11,9 +11,10 @@ import {
 } from 'react-icons/hi2';
 import toast from 'react-hot-toast';
 import useAuthStore from '../store/authStore';
-import { userAPI, notificationAPI } from '../services/api';
+import { userAPI, notificationAPI, authAPI } from '../services/api';
 import { ROLES } from '../utils/routeAccess';
 import { formatTimeDisplay, formatTime12Hour, computeBedtime } from '../utils/timeFormat';
+import HabitScoreCard from '../components/profile/HabitScoreCard';
 
 const TABS = [
   { id: 'profile', label: 'Profile', icon: HiOutlineUser },
@@ -139,8 +140,8 @@ export default function Profile() {
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === tab.id
-                  ? 'bg-primary-600/20 text-primary-300 border border-primary-500/30'
-                  : 'text-slate-400 hover:text-white hover:bg-surface-700/30'
+                ? 'bg-primary-600/20 text-primary-300 border border-primary-500/30'
+                : 'text-slate-400 hover:text-white hover:bg-surface-700/30'
                 }`}
             >
               <tab.icon className="w-4 h-4" />
@@ -166,7 +167,12 @@ export default function Profile() {
         )}
         {activeTab === 'preferences' && !isCoach && (
           profile
-            ? <PreferencesTab profile={profile} onUpdate={refreshAll} />
+            ? (
+              <div className="space-y-6">
+                <PreferencesTab profile={profile} onUpdate={refreshAll} />
+                <HabitScoreCard />
+              </div>
+            )
             : (
               <div className="card">
                 <p className="text-sm text-slate-400">Loading preferences…</p>
@@ -194,7 +200,11 @@ function ProfileTab({ user, profile, onUpdate }) {
   });
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [signingOutAll, setSigningOutAll] = useState(false);
+  const [email, setEmail] = useState(user?.email || '');
+  const [savingEmail, setSavingEmail] = useState(false);
   const logout = useAuthStore((s) => s.logout);
+  const logoutAll = useAuthStore((s) => s.logoutAll);
 
   // Keep the form in sync when the profile bundle finishes loading / refreshes.
   useEffect(() => {
@@ -204,6 +214,28 @@ function ProfileTab({ user, profile, onUpdate }) {
       timezone: resolvedTimezone,
     });
   }, [user?.full_name, user?.username, resolvedTimezone, reset]);
+
+  useEffect(() => {
+    setEmail(user?.email || '');
+  }, [user?.email]);
+
+  const handleSaveEmail = async (event) => {
+    event.preventDefault();
+    const next = email.trim();
+    if (!next || next === user?.email || savingEmail) return;
+    setSavingEmail(true);
+    try {
+      await authAPI.updateMe({ email: next });
+      toast.success('Email updated — verify the new address to keep alerts working');
+      await onUpdate?.();
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Could not update email');
+      setEmail(user?.email || '');
+    } finally {
+      setSavingEmail(false);
+    }
+  };
 
   const onSubmit = async (data) => {
     try {
@@ -228,6 +260,18 @@ function ProfileTab({ user, profile, onUpdate }) {
     }
   };
 
+  const handleSignOutEverywhere = async () => {
+    if (signingOutAll) return;
+    setSigningOutAll(true);
+    const result = await logoutAll();
+    if (result?.success) {
+      toast.success('Signed out on all devices');
+    } else {
+      toast.error('Could not revoke other sessions — signed out here only');
+    }
+    setSigningOutAll(false);
+  };
+
   return (
     <div className="space-y-6">
       <div className="card">
@@ -249,6 +293,52 @@ function ProfileTab({ user, profile, onUpdate }) {
           </div>
           <button type="submit" className="btn-primary">Save Changes</button>
         </form>
+      </div>
+
+      {/* Email lives on the user row, not the profile, so it has its own save. */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-white mb-2">Email Address</h3>
+        <p className="text-sm text-slate-400 mb-4">
+          Password resets, verification links and reminder emails all go to this
+          address. Changing it takes effect immediately.
+        </p>
+        <form onSubmit={handleSaveEmail} className="flex flex-col sm:flex-row gap-3">
+          <input
+            type="email"
+            className="input flex-1"
+            id="profile-email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+          />
+          <button
+            type="submit"
+            id="save-email-btn"
+            disabled={savingEmail || !email.trim() || email.trim() === user?.email}
+            className="btn-primary sm:w-auto disabled:opacity-50"
+          >
+            {savingEmail ? 'Saving…' : 'Update Email'}
+          </button>
+        </form>
+      </div>
+
+      {/* Sessions — revoke tokens issued to every other browser/device */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-white mb-2">Active Sessions</h3>
+        <p className="text-sm text-slate-400 mb-4">
+          Signing out everywhere revokes every token issued to this account, so any
+          other browser or device is signed out immediately. Use this if you left
+          yourself logged in somewhere you no longer control.
+        </p>
+        <button
+          type="button"
+          onClick={handleSignOutEverywhere}
+          disabled={signingOutAll}
+          id="sign-out-everywhere-btn"
+          className="px-4 py-2 rounded-lg border border-surface-600 text-slate-300 text-sm font-medium hover:bg-surface-700 transition-all disabled:opacity-50"
+        >
+          {signingOutAll ? 'Signing out…' : 'Sign out on all devices'}
+        </button>
       </div>
 
       {/* Danger Zone — Delete Account */}
@@ -415,20 +505,26 @@ function PreferencesTab({ profile, onUpdate }) {
         // Backend accepts a list; persist exactly one preferred type.
         preferred_challenge_types: [selectedType],
         difficulty_preference: difficulty,
-        productivity_goals: goals,
       });
+      // Goals have their own endpoint, which normalizes the free-text field
+      // into the stored list. Only written when the text actually changed.
+      const goalsRes =
+        (serverGoals ?? '') === goals
+          ? null
+          : await userAPI.updateGoals({ productivity_goals: goals });
+      const saved = goalsRes?.data || res.data;
       // Trust the write response immediately so a slow refresh cannot flash
       // an older selection.
-      const savedDifficulty = normalizeDifficultyPreference(res.data);
+      const savedDifficulty = normalizeDifficultyPreference(saved);
       if (savedDifficulty != null) {
         setDifficulty(savedDifficulty);
         setPrefsReady(true);
       }
-      const savedType = readPreferredChallengeType(res.data);
+      const savedType = readPreferredChallengeType(saved);
       if (savedType != null) {
         setSelectedType(savedType);
       }
-      const savedGoals = readProductivityGoals(res.data);
+      const savedGoals = readProductivityGoals(saved);
       if (savedGoals != null) {
         setGoals(savedGoals);
       }
@@ -460,8 +556,8 @@ function PreferencesTab({ profile, onUpdate }) {
                 aria-checked={isSelected}
                 onClick={() => setSelectedType(type)}
                 className={`p-3 rounded-xl border text-sm font-medium capitalize transition-all ${isSelected
-                    ? 'border-accent-500 bg-accent-500/10 text-accent-300'
-                    : 'border-surface-700/50 text-slate-400 hover:border-surface-600'
+                  ? 'border-accent-500 bg-accent-500/10 text-accent-300'
+                  : 'border-surface-700/50 text-slate-400 hover:border-surface-600'
                   }`}
               >
                 {isSelected && <HiOutlineCheckCircle className="w-4 h-4 inline mr-1" />}
@@ -484,8 +580,8 @@ function PreferencesTab({ profile, onUpdate }) {
               key={d}
               onClick={() => setDifficulty(d)}
               className={`flex-1 py-3 rounded-xl text-sm font-medium capitalize transition-all ${difficulty === d
-                  ? 'gradient-accent text-white'
-                  : 'bg-surface-800/50 text-slate-400 border border-surface-700/30 hover:border-surface-600'
+                ? 'gradient-accent text-white'
+                : 'bg-surface-800/50 text-slate-400 border border-surface-700/30 hover:border-surface-600'
                 }`}
             >
               {d}
@@ -549,7 +645,7 @@ const NOTIFICATION_FREQUENCIES = [
   {
     value: 'all',
     label: 'All',
-    description: 'Bedtime, wake, habit, and motivational',
+    description: 'Bedtime, wake, habit, challenge, progress, and motivational',
   },
   {
     value: 'essential',
@@ -591,6 +687,8 @@ function snapshotReminderToggles(prefs) {
     bedtime_reminder_enabled: !!prefs.bedtime_reminder_enabled,
     wake_reminder_enabled: !!prefs.wake_reminder_enabled,
     habit_alerts_enabled: !!prefs.habit_alerts_enabled,
+    challenge_reminders_enabled: !!prefs.challenge_reminders_enabled,
+    progress_updates_enabled: !!prefs.progress_updates_enabled,
     motivational_enabled: !!prefs.motivational_enabled,
   };
 }
@@ -601,6 +699,8 @@ function withRemindersDisabled(prefs) {
     bedtime_reminder_enabled: false,
     wake_reminder_enabled: false,
     habit_alerts_enabled: false,
+    challenge_reminders_enabled: false,
+    progress_updates_enabled: false,
     motivational_enabled: false,
   };
 }
@@ -664,6 +764,12 @@ function NotificationPreferencesCard() {
         habit_alerts_enabled: snap
           ? snap.habit_alerts_enabled
           : prev.habit_alerts_enabled,
+        challenge_reminders_enabled: snap
+          ? snap.challenge_reminders_enabled
+          : prev.challenge_reminders_enabled,
+        progress_updates_enabled: snap
+          ? snap.progress_updates_enabled
+          : prev.progress_updates_enabled,
         motivational_enabled: snap
           ? snap.motivational_enabled
           : prev.motivational_enabled,
@@ -685,6 +791,8 @@ function NotificationPreferencesCard() {
             bedtime_reminder_enabled: prefs.bedtime_reminder_enabled,
             wake_reminder_enabled: prefs.wake_reminder_enabled,
             habit_alerts_enabled: prefs.habit_alerts_enabled,
+            challenge_reminders_enabled: prefs.challenge_reminders_enabled,
+            progress_updates_enabled: prefs.progress_updates_enabled,
             motivational_enabled: prefs.motivational_enabled,
           };
 
@@ -766,6 +874,8 @@ function NotificationPreferencesCard() {
   const bedtimeAllowed = masterOn && (freq === 'all' || freq === 'essential');
   const wakeAllowed = masterOn;
   const habitAllowed = masterOn && freq === 'all';
+  const challengeAllowed = masterOn && freq === 'all';
+  const progressAllowed = masterOn && freq === 'all';
   const motivationalAllowed = masterOn && freq === 'all';
 
   return (
@@ -879,6 +989,22 @@ function NotificationPreferencesCard() {
         />
 
         <ToggleRow
+          label="Challenge reminder"
+          description="Practice nudge after a couple of days without a challenge"
+          checked={!!prefs.challenge_reminders_enabled}
+          disabled={!challengeAllowed}
+          onChange={(v) => patch('challenge_reminders_enabled', v)}
+        />
+
+        <ToggleRow
+          label="Progress update"
+          description="Weekly recap of wake-ups, challenges, and streak milestones"
+          checked={!!prefs.progress_updates_enabled}
+          disabled={!progressAllowed}
+          onChange={(v) => patch('progress_updates_enabled', v)}
+        />
+
+        <ToggleRow
           label="Daily motivational"
           description="One encouraging message per day"
           checked={!!prefs.motivational_enabled}
@@ -962,8 +1088,8 @@ function NotificationPreferencesCard() {
                   disabled={!masterOn}
                   onClick={() => patch('notification_sound', opt.value)}
                   className={`py-2.5 rounded-xl text-sm font-medium transition-all ${selected
-                      ? 'border border-primary-500 bg-primary-500/10 text-primary-300'
-                      : 'border border-surface-700/50 text-slate-400 hover:border-surface-600'
+                    ? 'border border-primary-500 bg-primary-500/10 text-primary-300'
+                    : 'border border-surface-700/50 text-slate-400 hover:border-surface-600'
                     } disabled:cursor-not-allowed`}
                 >
                   {opt.label}
@@ -987,8 +1113,8 @@ function NotificationPreferencesCard() {
                   disabled={!masterOn}
                   onClick={() => patch('notification_frequency', opt.value)}
                   className={`w-full text-left px-3 py-2.5 rounded-xl transition-all ${selected
-                      ? 'border border-primary-500 bg-primary-500/10'
-                      : 'border border-surface-700/50 hover:border-surface-600'
+                    ? 'border border-primary-500 bg-primary-500/10'
+                    : 'border border-surface-700/50 hover:border-surface-600'
                     } disabled:cursor-not-allowed`}
                 >
                   <p className={`text-sm font-medium ${selected ? 'text-primary-300' : 'text-slate-200'}`}>

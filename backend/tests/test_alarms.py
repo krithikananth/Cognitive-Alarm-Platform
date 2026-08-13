@@ -9,6 +9,48 @@ Aligned with the actual wired API (``app/api/v1/endpoints/alarms.py`` +
 - Snooze/dismiss return the full ``AlarmResponse``.
 """
 
+from datetime import date, datetime, time, timezone
+
+import pytest
+
+from app.api.v1.endpoints import alarms as alarms_module
+from app.models.alarm import Alarm, AlarmType
+
+# Reference calendar used by the scheduling tests (August 2026):
+#   Mon 10 · Tue 11 · Wed 12 · Thu 13 · Fri 14 · Sat 15 · Sun 16 · Mon 17
+WED = datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc)
+FRI = datetime(2026, 8, 14, 9, 0, tzinfo=timezone.utc)
+SAT = datetime(2026, 8, 15, 9, 0, tzinfo=timezone.utc)
+SUN = datetime(2026, 8, 16, 9, 0, tzinfo=timezone.utc)
+
+
+def _freeze_now(monkeypatch, moment):
+    """Pin ``datetime.now`` inside the alarms endpoint module to ``moment``."""
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment if tz is None else moment.astimezone(tz)
+
+    monkeypatch.setattr(alarms_module, "datetime", _Frozen)
+
+
+def _alarm(alarm_type, alarm_time, days_of_week=None, one_time_date=None):
+    """Build an unpersisted Alarm for direct next-trigger calculations."""
+    return Alarm(
+        user_id=1,
+        title="Scheduling",
+        alarm_time=alarm_time,
+        alarm_type=alarm_type,
+        days_of_week=days_of_week,
+        one_time_date=one_time_date,
+    )
+
+
+def _next_trigger(alarm, user_tz="UTC"):
+    """Next trigger as a naive UTC datetime (matches the stored column)."""
+    return alarms_module._calculate_next_trigger(alarm, user_tz=user_tz)
+
 
 class TestCreateAlarm:
     """Tests for POST /api/v1/alarms/."""
@@ -590,3 +632,390 @@ class TestAlarmUnauthorized:
         ).status_code == 401
         assert client.post("/api/v1/alarms/1/snooze").status_code == 401
         assert client.post("/api/v1/alarms/1/dismiss").status_code == 401
+
+
+class TestNextTriggerCalculation:
+    """Regression tests for ``_calculate_next_trigger`` on every alarm type.
+
+    ``now`` is frozen so each expected trigger is an exact datetime rather than
+    a property that happens to hold on the day the suite runs.
+    """
+
+    # ── Daily ────────────────────────────────────────────────────
+
+    def test_daily_later_today(self, monkeypatch):
+        """A daily alarm still ahead of now fires today."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.DAILY, time(10, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 12, 10, 0)
+
+    def test_daily_rolls_to_tomorrow(self, monkeypatch):
+        """A daily alarm whose time has passed fires tomorrow."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.DAILY, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 13, 7, 0)
+
+    def test_daily_respects_user_timezone(self, monkeypatch):
+        """alarm_time is wall-clock local and is converted to UTC."""
+        # 20:00 UTC Wed == 01:30 Thu in Asia/Kolkata (UTC+5:30)
+        _freeze_now(monkeypatch, datetime(2026, 8, 12, 20, 0, tzinfo=timezone.utc))
+        alarm = _alarm(AlarmType.DAILY, time(7, 0))
+        assert _next_trigger(alarm, "Asia/Kolkata") == datetime(2026, 8, 13, 1, 30)
+
+    # ── Weekday ──────────────────────────────────────────────────
+
+    def test_weekday_midweek_rolls_to_next_day(self, monkeypatch):
+        """Wednesday → Thursday for a Mon-Fri alarm."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.WEEKDAY, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 13, 7, 0)
+
+    def test_weekday_skips_the_weekend(self, monkeypatch):
+        """Friday after the alarm time jumps the weekend to Monday."""
+        _freeze_now(monkeypatch, FRI)
+        alarm = _alarm(AlarmType.WEEKDAY, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 17, 7, 0)
+
+    def test_weekday_on_saturday_targets_monday(self, monkeypatch):
+        """A weekday alarm never fires on a Saturday or Sunday."""
+        _freeze_now(monkeypatch, SAT)
+        alarm = _alarm(AlarmType.WEEKDAY, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 17, 7, 0)
+
+    # ── Weekend ──────────────────────────────────────────────────
+
+    def test_weekend_from_midweek_targets_saturday(self, monkeypatch):
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.WEEKEND, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 15, 7, 0)
+
+    def test_weekend_on_saturday_rolls_to_sunday(self, monkeypatch):
+        _freeze_now(monkeypatch, SAT)
+        alarm = _alarm(AlarmType.WEEKEND, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 16, 7, 0)
+
+    def test_weekend_on_sunday_wraps_to_next_saturday(self, monkeypatch):
+        """The forward scan must wrap a full week, not stop at 7 offsets."""
+        _freeze_now(monkeypatch, SUN)
+        alarm = _alarm(AlarmType.WEEKEND, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 22, 7, 0)
+
+    # ── Custom days ──────────────────────────────────────────────
+
+    def test_custom_days_pick_the_next_selected_weekday(self, monkeypatch):
+        """Mon/Wed/Fri from Wednesday morning-passed → Friday."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.DAILY, time(7, 0), days_of_week=[0, 2, 4])
+        assert _next_trigger(alarm) == datetime(2026, 8, 14, 7, 0)
+
+    def test_custom_days_can_still_fire_later_today(self, monkeypatch):
+        """Today is selected and the time has not passed → today."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.DAILY, time(10, 0), days_of_week=[0, 2, 4])
+        assert _next_trigger(alarm) == datetime(2026, 8, 12, 10, 0)
+
+    def test_single_custom_day_wraps_a_full_week(self, monkeypatch):
+        """Wednesday-only, already past → the following Wednesday."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.DAILY, time(7, 0), days_of_week=[2])
+        assert _next_trigger(alarm) == datetime(2026, 8, 19, 7, 0)
+
+    def test_custom_days_narrow_the_weekday_pattern(self, monkeypatch):
+        """Mon/Sat/Sun on a weekday alarm resolves to Monday only."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.WEEKDAY, time(7, 0), days_of_week=[0, 5, 6])
+        assert _next_trigger(alarm) == datetime(2026, 8, 17, 7, 0)
+
+    def test_custom_days_disjoint_from_pattern_fall_back_to_pattern(
+        self, monkeypatch
+    ):
+        """A selection excluding every base day must not strand the alarm."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.WEEKEND, time(7, 0), days_of_week=[0, 1, 2])
+        assert _next_trigger(alarm) == datetime(2026, 8, 15, 7, 0)
+
+    def test_empty_custom_days_keep_pattern_defaults(self, monkeypatch):
+        """An empty list behaves exactly like no selection at all."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.DAILY, time(7, 0), days_of_week=[])
+        assert _next_trigger(alarm) == datetime(2026, 8, 13, 7, 0)
+
+    def test_custom_days_apply_to_smart_adaptive(self, monkeypatch):
+        """Smart alarms without DB context still honour the day filter."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.SMART_ADAPTIVE, time(7, 0), days_of_week=[5, 6])
+        assert _next_trigger(alarm) == datetime(2026, 8, 15, 7, 0)
+
+    # ── One-time ─────────────────────────────────────────────────
+
+    def test_one_time_uses_stored_date(self, monkeypatch):
+        """The stored date drives the trigger, not 'today or tomorrow'."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(
+            AlarmType.ONE_TIME, time(7, 0), one_time_date=date(2026, 8, 20)
+        )
+        assert _next_trigger(alarm) == datetime(2026, 8, 20, 7, 0)
+
+    def test_one_time_explicit_argument_wins(self, monkeypatch):
+        """The create request's date takes precedence over a stored one."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(
+            AlarmType.ONE_TIME, time(7, 0), one_time_date=date(2026, 8, 20)
+        )
+        result = alarms_module._calculate_next_trigger(
+            alarm, user_tz="UTC", one_time_date=date(2026, 8, 18)
+        )
+        assert result == datetime(2026, 8, 18, 7, 0)
+
+    def test_one_time_in_the_past_has_no_trigger(self, monkeypatch):
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(
+            AlarmType.ONE_TIME, time(7, 0), one_time_date=date(2026, 8, 11)
+        )
+        assert _next_trigger(alarm) is None
+
+    def test_one_time_ignores_days_of_week(self, monkeypatch):
+        """A dated one-time alarm fires on its date whatever days are set."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(
+            AlarmType.ONE_TIME,
+            time(7, 0),
+            days_of_week=[0],
+            one_time_date=date(2026, 8, 20),
+        )
+        assert _next_trigger(alarm) == datetime(2026, 8, 20, 7, 0)
+
+    def test_legacy_one_time_without_date_keeps_old_behaviour(self, monkeypatch):
+        """Rows created before the date was stored still schedule sensibly."""
+        _freeze_now(monkeypatch, WED)
+        alarm = _alarm(AlarmType.ONE_TIME, time(7, 0))
+        assert _next_trigger(alarm) == datetime(2026, 8, 13, 7, 0)
+
+
+class TestOneTimeDatePersistence:
+    """A one-time alarm must keep its date across edits and re-enables."""
+
+    @pytest.fixture
+    def one_time_alarm(self, client, auth_headers):
+        """Create a one-time alarm well into the future."""
+        response = client.post(
+            "/api/v1/alarms/",
+            json={
+                "title": "Flight",
+                "alarm_time": "04:30",
+                "alarm_type": "one_time",
+                "one_time_date": "2030-03-09",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    def test_one_time_date_is_returned(self, one_time_alarm):
+        assert one_time_alarm["one_time_date"] == "2030-03-09"
+        assert one_time_alarm["next_trigger_at"] == "2030-03-09T04:30:00Z"
+
+    def test_unrelated_edit_keeps_the_trigger(
+        self, client, auth_headers, one_time_alarm
+    ):
+        """Renaming an alarm must not touch its schedule."""
+        response = client.put(
+            f"/api/v1/alarms/{one_time_alarm['id']}",
+            json={"label": "Airport run"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["next_trigger_at"] == "2030-03-09T04:30:00Z"
+
+    def test_time_edit_stays_on_the_same_date(
+        self, client, auth_headers, one_time_alarm
+    ):
+        """Changing only the time used to silently reschedule to tomorrow."""
+        response = client.put(
+            f"/api/v1/alarms/{one_time_alarm['id']}",
+            json={"alarm_time": "05:15"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["one_time_date"] == "2030-03-09"
+        assert body["next_trigger_at"] == "2030-03-09T05:15:00Z"
+
+    def test_date_can_be_moved(self, client, auth_headers, one_time_alarm):
+        response = client.put(
+            f"/api/v1/alarms/{one_time_alarm['id']}",
+            json={"one_time_date": "2030-03-11"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["one_time_date"] == "2030-03-11"
+        assert body["next_trigger_at"] == "2030-03-11T04:30:00Z"
+
+    def test_toggle_off_and_on_keeps_the_date(
+        self, client, auth_headers, one_time_alarm
+    ):
+        """Re-enabling used to reschedule the alarm to today/tomorrow."""
+        alarm_id = one_time_alarm["id"]
+        off = client.patch(
+            f"/api/v1/alarms/{alarm_id}/toggle",
+            json={"is_active": False},
+            headers=auth_headers,
+        )
+        assert off.status_code == 200
+
+        on = client.patch(
+            f"/api/v1/alarms/{alarm_id}/toggle",
+            json={"is_active": True},
+            headers=auth_headers,
+        )
+        assert on.status_code == 200
+        body = on.json()
+        assert body["one_time_date"] == "2030-03-09"
+        assert body["next_trigger_at"] == "2030-03-09T04:30:00Z"
+
+
+class TestDaysOfWeekApi:
+    """days_of_week must round-trip and actually shape the schedule."""
+
+    def test_custom_days_round_trip_and_constrain_trigger(
+        self, client, auth_headers
+    ):
+        response = client.post(
+            "/api/v1/alarms/",
+            json={
+                "title": "Gym",
+                "alarm_time": "06:00",
+                "alarm_type": "daily",
+                "days_of_week": [1, 3],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["days_of_week"] == [1, 3]
+
+        trigger = datetime.fromisoformat(
+            body["next_trigger_at"].replace("Z", "+00:00")
+        )
+        assert trigger.weekday() in {1, 3}
+
+    def test_updating_days_recomputes_the_trigger(self, client, auth_headers):
+        created = client.post(
+            "/api/v1/alarms/",
+            json={
+                "title": "Gym",
+                "alarm_time": "06:00",
+                "alarm_type": "daily",
+                "days_of_week": [1, 3],
+            },
+            headers=auth_headers,
+        )
+        alarm_id = created.json()["id"]
+
+        response = client.put(
+            f"/api/v1/alarms/{alarm_id}",
+            json={"days_of_week": [5, 6]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["days_of_week"] == [5, 6]
+
+        trigger = datetime.fromisoformat(
+            body["next_trigger_at"].replace("Z", "+00:00")
+        )
+        assert trigger.weekday() in {5, 6}
+
+    def test_smart_adaptive_honours_custom_days(self, client, auth_headers):
+        """Adaptive time selection still lands on an allowed weekday."""
+        response = client.post(
+            "/api/v1/alarms/",
+            json={
+                "title": "Smart weekend",
+                "alarm_time": "07:00",
+                "alarm_type": "smart_adaptive",
+                "days_of_week": [5, 6],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        body = response.json()
+
+        trigger = datetime.fromisoformat(
+            body["next_trigger_at"].replace("Z", "+00:00")
+        )
+        assert trigger.weekday() in {5, 6}
+
+    def test_out_of_range_day_is_rejected(self, client, auth_headers):
+        response = client.post(
+            "/api/v1/alarms/",
+            json={
+                "title": "Bad days",
+                "alarm_time": "06:00",
+                "days_of_week": [0, 9],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+
+class TestAlarmCustomizationFields:
+    """Every backend-supported customization option must round-trip."""
+
+    def test_full_customization_round_trip(self, client, auth_headers):
+        payload = {
+            "title": "Fully configured",
+            "label": "Fully configured",
+            "description": "Deep work start",
+            "alarm_time": "05:45",
+            "alarm_type": "daily",
+            "days_of_week": [0, 1, 2, 3, 4],
+            "snooze_limit": 0,
+            "snooze_interval_minutes": 9,
+            "challenge_type": "logic",
+            "challenge_count": 3,
+            "challenge_difficulty": "hard",
+            "volume": 35,
+            "vibrate": False,
+        }
+        response = client.post(
+            "/api/v1/alarms/", json=payload, headers=auth_headers
+        )
+        assert response.status_code == 201
+        body = response.json()
+
+        assert body["description"] == "Deep work start"
+        assert body["days_of_week"] == [0, 1, 2, 3, 4]
+        assert body["snooze_limit"] == 0
+        assert body["snooze_interval_minutes"] == 9
+        assert body["challenge_type"] == "logic"
+        assert body["challenge_count"] == 3
+        assert body["challenge_difficulty"] == "hard"
+        assert body["volume"] == 35
+        assert body["vibrate"] is False
+
+    def test_customization_can_be_updated(self, client, auth_headers):
+        created = client.post(
+            "/api/v1/alarms/",
+            json={"title": "Plain", "alarm_time": "07:00"},
+            headers=auth_headers,
+        )
+        alarm_id = created.json()["id"]
+
+        response = client.put(
+            f"/api/v1/alarms/{alarm_id}",
+            json={
+                "description": "Updated note",
+                "volume": 15,
+                "vibrate": False,
+                "challenge_count": 4,
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["description"] == "Updated note"
+        assert body["volume"] == 15
+        assert body["vibrate"] is False
+        assert body["challenge_count"] == 4

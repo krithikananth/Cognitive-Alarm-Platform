@@ -23,6 +23,9 @@ import useAuthStore from '../store/authStore';
 import useAlarmStore from '../store/alarmStore';
 import { userAPI, dashboardAPI, analyticsAPI } from '../services/api';
 import { formatHabitScore } from '../utils/habitScore';
+import { formatTimeDisplay } from '../utils/timeFormat';
+import SleepPatternsPanel from '../components/dashboard/SleepPatternsPanel';
+import ProductivityCorrelationsPanel from '../components/dashboard/ProductivityCorrelationsPanel';
 
 const CHART_TOOLTIP_STYLE = {
   contentStyle: { background: '#1e293b', border: '1px solid #334155', borderRadius: 12 },
@@ -103,6 +106,9 @@ const fadeUp = {
 
 const HISTORY_PER_PAGE = 6;
 
+// Ignore a repeat sleep log this soon after a successful one (double-click guard)
+const SLEEP_LOG_COOLDOWN_MS = 3000;
+
 export default function UserDashboard() {
   const { user } = useAuthStore();
   const { alarms, fetchAlarms, fetchUpcoming } = useAlarmStore();
@@ -120,6 +126,12 @@ export default function UserDashboard() {
   const [productivity, setProductivity] = useState(null);
   const [habitTrend, setHabitTrend] = useState(null);
   const [activityTrend, setActivityTrend] = useState(null);
+  const [verification, setVerification] = useState(null);
+  const [snoozePattern, setSnoozePattern] = useState(null);
+  const [sleepAdherence, setSleepAdherence] = useState(null);
+  const [sleepPatterns, setSleepPatterns] = useState(null);
+  const [correlations, setCorrelations] = useState(null);
+  const [loggingSleep, setLoggingSleep] = useState(false);
 
   const [historyEvents, setHistoryEvents] = useState([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -131,8 +143,12 @@ export default function UserDashboard() {
   // (covers rapid refresh clicks and weekly/monthly toggles).
   const requestIdRef = useRef(0);
 
+  // Double-click guards for the sleep log button
+  const sleepLogLockRef = useRef(false);
+  const lastSleepLogRef = useRef(0);
+
   const loadStats = useCallback(() => {
-    userAPI.getStats().then((res) => setStats(res.data)).catch(() => {});
+    userAPI.getStats().then((res) => setStats(res.data)).catch(() => { });
   }, []);
 
   const loadInsights = useCallback(async (p) => {
@@ -146,12 +162,24 @@ export default function UserDashboard() {
         dashboardAPI.getChallengePerformance(days),
         dashboardAPI.getProductivity(days),
         analyticsAPI.getHabitTrends(days),
-        analyticsAPI.getMonthlyTrends(days),
+        // Match the trend series to the selected period — a weekly view backed
+        // by the monthly aggregate reports a window the user did not ask for.
+        p === 'monthly'
+          ? analyticsAPI.getMonthlyTrends(days)
+          : analyticsAPI.getWeeklyTrends(days),
+        analyticsAPI.getVerificationAccuracy(days),
+        analyticsAPI.getSnoozePattern(days),
+        analyticsAPI.getSleepAdherence(days),
+        analyticsAPI.getSleepPatterns(days),
+        analyticsAPI.getProductivityCorrelation(days),
       ]);
       // Drop stale responses from an older period/refresh click.
       if (requestId !== requestIdRef.current) return;
 
-      const [summaryRes, wakeRes, challengeRes, prodRes, habitRes, trendRes] = results;
+      const [
+        summaryRes, wakeRes, challengeRes, prodRes, habitRes, trendRes, verifyRes,
+        snoozeRes, adherenceRes, sleepPatternsRes, correlationsRes,
+      ] = results;
       const allFailed = results.every((r) => r.status === 'rejected');
 
       setSummaryStats(summaryRes.status === 'fulfilled' ? summaryRes.value.data : null);
@@ -160,6 +188,15 @@ export default function UserDashboard() {
       setProductivity(prodRes.status === 'fulfilled' ? prodRes.value.data : null);
       setHabitTrend(habitRes.status === 'fulfilled' ? habitRes.value.data : null);
       setActivityTrend(trendRes.status === 'fulfilled' ? trendRes.value.data : null);
+      setVerification(verifyRes.status === 'fulfilled' ? verifyRes.value.data : null);
+      setSnoozePattern(snoozeRes.status === 'fulfilled' ? snoozeRes.value.data : null);
+      setSleepAdherence(adherenceRes.status === 'fulfilled' ? adherenceRes.value.data : null);
+      setSleepPatterns(
+        sleepPatternsRes.status === 'fulfilled' ? sleepPatternsRes.value?.data ?? null : null
+      );
+      setCorrelations(
+        correlationsRes.status === 'fulfilled' ? correlationsRes.value?.data ?? null : null
+      );
       setError(allFailed ? 'Failed to load dashboard insights.' : null);
     } finally {
       if (requestId === requestIdRef.current) {
@@ -191,6 +228,36 @@ export default function UserDashboard() {
     loadInsights(period);
     loadHistory(1, period);
   }, [refreshing, loading, loadInsights, loadHistory, period]);
+
+  // Records a real sleep boundary through the existing analytics ingest path.
+  // Alternates start/end so one button covers both ends of a night.
+  const logSleep = useCallback(async () => {
+    // Latched on a ref, not on `loggingSleep`: both halves of a double click
+    // run in the same tick and would each still read the pre-update state.
+    if (sleepLogLockRef.current) return;
+    // A fast round-trip can finish between the two halves of a double click,
+    // so also refuse a repeat that lands inside the cooldown.
+    if (Date.now() - lastSleepLogRef.current < SLEEP_LOG_COOLDOWN_MS) return;
+
+    sleepLogLockRef.current = true;
+    setLoggingSleep(true);
+    const openNight = (sleepPatterns || productivity?.sleep_patterns)?.has_open_session;
+    const eventType = openNight ? 'sleep.ended' : 'sleep.started';
+    try {
+      await analyticsAPI.postEvent({
+        event_type: eventType,
+        source: 'client',
+        event_data: { at: new Date().toISOString() },
+      });
+      lastSleepLogRef.current = Date.now();
+      loadInsights(period);
+    } catch {
+      // Nothing was recorded, so leave the cooldown clear for an instant retry
+    } finally {
+      sleepLogLockRef.current = false;
+      setLoggingSleep(false);
+    }
+  }, [productivity, loadInsights, period]);
 
   // Keep a ref to the latest refresh so the event listener (attached once)
   // never captures a stale `period` closure.
@@ -290,19 +357,40 @@ export default function UserDashboard() {
     ];
   }, [productivity]);
 
+  const productivityImprovement = productivity?.productivity_improvement;
+
   const productivityCompareData = useMemo(() => {
-    if (!productivity?.trend) return [];
+    const metrics = productivityImprovement?.metrics;
+    if (productivityImprovement?.status !== 'ok' || !metrics) return [];
     return [
-      { name: 'Previous', rate: productivity.trend.previous_clean_wake_rate },
-      { name: 'Recent', rate: productivity.trend.recent_clean_wake_rate },
+      {
+        metric: 'Cognitive readiness',
+        previous: metrics.cognitive_readiness_score.previous,
+        current: metrics.cognitive_readiness_score.current,
+      },
+      {
+        metric: 'Morning routine',
+        previous: metrics.morning_routine_score.previous,
+        current: metrics.morning_routine_score.current,
+      },
+      {
+        metric: 'Challenge accuracy',
+        previous: metrics.challenge_accuracy.previous,
+        current: metrics.challenge_accuracy.current,
+      },
+      {
+        metric: 'Wakefulness',
+        previous: metrics.avg_wakefulness.previous,
+        current: metrics.avg_wakefulness.current,
+      },
     ];
-  }, [productivity]);
+  }, [productivityImprovement]);
 
   const habitScoreTrendMeta = trendMeta(habitTrend?.trend);
   const HabitTrendIcon = habitScoreTrendMeta.Icon;
   const challengeTrendMeta = trendMeta(challengePerf?.trend?.direction);
   const ChallengeTrendIcon = challengeTrendMeta.Icon;
-  const productivityTrendMeta = trendMeta(productivity?.trend?.direction);
+  const productivityTrendMeta = trendMeta(productivityImprovement?.direction);
   const ProductivityTrendIcon = productivityTrendMeta.Icon;
 
   const habitWeights = habitTrend?.weights || {
@@ -376,11 +464,10 @@ export default function UserDashboard() {
                 key={view}
                 type="button"
                 onClick={() => setPeriod(view)}
-                className={`text-xs px-3 py-1.5 rounded-lg border transition capitalize ${
-                  period === view
-                    ? 'bg-primary-500/20 text-primary-200 border-primary-500/40'
-                    : 'bg-surface-800 text-slate-400 border-surface-700/50 hover:text-white'
-                }`}
+                className={`text-xs px-3 py-1.5 rounded-lg border transition capitalize ${period === view
+                  ? 'bg-primary-500/20 text-primary-200 border-primary-500/40'
+                  : 'bg-surface-800 text-slate-400 border-surface-700/50 hover:text-white'
+                  }`}
               >
                 {view}
               </button>
@@ -558,7 +645,7 @@ export default function UserDashboard() {
           <HiOutlineSun className="w-5 h-5 text-amber-400" />
           Wake-up Statistics
         </h2>
-        <div className="grid lg:grid-cols-3 gap-6">
+        <div className="grid lg:grid-cols-2 gap-6">
           <div>
             <h3 className="text-sm font-semibold text-white mb-3">By Weekday</h3>
             {loading ? (
@@ -618,6 +705,44 @@ export default function UserDashboard() {
                 <Row label="Avg snoozes" value={wakeStats.avg_snoozes_before_dismiss ?? 0} />
                 <Row label="Avg failed attempts" value={wakeStats.avg_failed_attempts ?? 0} />
               </dl>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-surface-700/50 bg-surface-900/30 p-4">
+            <p className="text-sm font-medium text-white mb-1">Verification Accuracy</p>
+            <p className="text-[11px] text-slate-500 mb-3">
+              How often the wake-up check reached the right verdict on the answers it
+              collected — separate from how often you woke up successfully.
+            </p>
+            {verification?.status !== 'ok' ? (
+              <p className="text-xs text-slate-500 py-4 text-center">
+                Needs {verification?.min_decisions_required ?? 3} completed wake-ups
+                in this window ({verification?.decisions ?? 0} so far).
+              </p>
+            ) : (
+              <>
+                <p className="text-3xl font-bold text-white">{verification.accuracy_rate}%</p>
+                <p className="text-xs text-slate-400 mb-3">
+                  {verification.correct_decisions} of {verification.decisions} verdicts
+                  matched the evidence held
+                </p>
+                <dl className="space-y-2">
+                  <Row
+                    label="Confirmed first try"
+                    value={
+                      verification.first_pass_rate != null
+                        ? `${verification.first_pass_rate}%`
+                        : '—'
+                    }
+                  />
+                  <Row
+                    label="Answers per confirmed wake"
+                    value={verification.avg_answers_per_verification ?? '—'}
+                  />
+                  <Row label="Released unconfirmed" value={verification.false_verifications} />
+                  <Row label="Confirmed but rejected" value={verification.missed_verifications} />
+                </dl>
+              </>
             )}
           </div>
         </div>
@@ -693,6 +818,110 @@ export default function UserDashboard() {
         )}
       </motion.div>
 
+      {/* ─── 3b. What drives the snooze / sleep sub-scores ─── */}
+      <motion.div {...fadeUp} transition={{ delay: 0.2 }} className="card">
+        <h2 className="text-lg font-semibold text-white flex items-center gap-2 mb-1">
+          <HiOutlineMoon className="w-5 h-5 text-indigo-300" />
+          Snooze &amp; Sleep Schedule
+        </h2>
+        <p className="text-xs text-slate-500 mb-4">
+          The measurements behind the &ldquo;Snooze control&rdquo; and &ldquo;Sleep adherence&rdquo;
+          components of your habit score, for the selected period.
+        </p>
+
+        {!snoozePattern && !sleepAdherence ? (
+          <p className="text-sm text-slate-500 py-4 text-center">
+            Behaviour analytics could not be loaded for this period.
+          </p>
+        ) : (
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="rounded-xl border border-surface-700/50 bg-surface-900/30 p-4">
+              <p className="text-xs uppercase tracking-wider text-slate-500 mb-3">
+                Snooze pattern
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs text-slate-400">Snoozes per wake-up</p>
+                  <p className="text-xl font-semibold text-sky-300">
+                    {snoozePattern?.avg_snoozes_per_wake ?? '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400">Total snoozes</p>
+                  <p className="text-xl font-semibold text-white">
+                    {snoozePattern?.total_snoozes ?? '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400">Hit the snooze limit</p>
+                  <p className="text-sm text-slate-200 mt-1">
+                    {snoozePattern
+                      ? `${snoozePattern.limit_hit_count} time${snoozePattern.limit_hit_count === 1 ? '' : 's'} (${snoozePattern.limit_hit_rate}%)`
+                      : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400">Peak snooze hour</p>
+                  <p className="text-sm text-slate-200 mt-1">
+                    {snoozePattern?.peak_hour == null
+                      ? '—'
+                      : hourLabel(snoozePattern.peak_hour)}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mt-3" title="Snoozes per wake-up in this period against the period before it. Positive means you snoozed less.">
+                {snoozePattern?.reduction?.status === 'ok'
+                  ? `Snooze reduction ${snoozePattern.reduction.reduction_rate > 0 ? '+' : ''}${snoozePattern.reduction.reduction_rate}% vs the previous ${snoozePattern.reduction.period_days} days`
+                  : 'Snooze reduction needs a comparable previous period.'}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-surface-700/50 bg-surface-900/30 p-4">
+              <p className="text-xs uppercase tracking-wider text-slate-500 mb-3">
+                Sleep schedule adherence
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs text-slate-400">Adherence rate</p>
+                  <p className="text-xl font-semibold text-indigo-300">
+                    {sleepAdherence ? `${sleepAdherence.adherence_rate}%` : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400">On-schedule days</p>
+                  <p className="text-xl font-semibold text-white">
+                    {sleepAdherence
+                      ? `${sleepAdherence.adherent_days}/${sleepAdherence.observed_days}`
+                      : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400">Suggested bedtime</p>
+                  <p className="text-sm text-slate-200 mt-1">
+                    {sleepAdherence?.suggested_bedtime
+                      ? formatTimeDisplay(sleepAdherence.suggested_bedtime)
+                      : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400">Avg deviation</p>
+                  <p className="text-sm text-slate-200 mt-1">
+                    {sleepAdherence?.avg_deviation_minutes == null
+                      ? '—'
+                      : `${sleepAdherence.avg_deviation_minutes} min`}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mt-3">
+                {sleepAdherence
+                  ? `A day counts as on schedule when your wake-up lands within ${sleepAdherence.tolerance_minutes} minutes of your goal. Current streak ${sleepAdherence.profile_streak_days}d.`
+                  : 'Set a wake goal to unlock schedule adherence.'}
+              </p>
+            </div>
+          </div>
+        )}
+      </motion.div>
+
       {/* ─── 4. Challenge Performance ─── */}
       <motion.div {...fadeUp} transition={{ delay: 0.22 }} className="card">
         <div className="flex items-center justify-between mb-4">
@@ -707,6 +936,27 @@ export default function UserDashboard() {
             </span>
           )}
         </div>
+        {challengePerf?.completion?.served > 0 && (
+          <div
+            className="rounded-xl border border-surface-700/50 bg-surface-900/30 p-4 mb-4"
+            title="Share of challenges served to you that you finished inside the time limit. Unanswered and timed-out challenges never reach the attempt log, so accuracy cannot show them."
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+              <p className="text-sm font-medium text-white">Challenge completion</p>
+              <p className="text-lg font-semibold text-emerald-300">
+                {challengePerf.completion.completion_rate}%
+              </p>
+            </div>
+            <p className="text-xs text-slate-400">
+              You finished {challengePerf.completion.completed} of{' '}
+              {challengePerf.completion.served} challenges served
+              {' · '}
+              {challengePerf.completion.timed_out} timed out
+              {' · '}
+              {challengePerf.completion.abandoned} left unanswered
+            </p>
+          </div>
+        )}
         {!challengePerf || challengePerf.total_attempts === 0 ? (
           <p className="text-sm text-slate-500 py-8 text-center">
             No challenge attempts yet in this period. Solve a challenge when your alarm rings to see charts here.
@@ -818,19 +1068,33 @@ export default function UserDashboard() {
 
             {productivityCompareData.length > 0 && (
               <div className="lg:col-span-3">
-                <h3 className="text-sm font-semibold text-white mb-3">Clean Wake Rate: Recent vs Previous</h3>
-                <div className="h-36">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                  <h3 className="text-sm font-semibold text-white">
+                    Productivity: last {productivityImprovement.period_days} days vs the{' '}
+                    {productivityImprovement.period_days} before
+                  </h3>
+                  {productivityImprovement.improvement_rate != null && (
+                    <span className={`text-xs ${productivityTrendMeta.color}`}>
+                      Cognitive readiness{' '}
+                      {productivityImprovement.improvement_rate > 0 ? '+' : ''}
+                      {productivityImprovement.improvement_rate}%
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mb-3">
+                  Headline movement is measured on cognitive readiness; its inputs and the
+                  morning routine score are shown beside it.
+                </p>
+                <div className="h-48">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={productivityCompareData} layout="vertical" margin={{ left: 10 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                       <XAxis type="number" domain={[0, 100]} stroke="#94a3b8" tick={{ fontSize: 11 }} />
-                      <YAxis type="category" dataKey="name" stroke="#94a3b8" tick={{ fontSize: 12 }} width={70} />
+                      <YAxis type="category" dataKey="metric" stroke="#94a3b8" tick={{ fontSize: 11 }} width={120} />
                       <Tooltip {...CHART_TOOLTIP_STYLE} />
-                      <Bar dataKey="rate" radius={[0, 8, 8, 0]} name="Clean wake rate %">
-                        {productivityCompareData.map((d, i) => (
-                          <Cell key={d.name} fill={i === 0 ? '#64748b' : '#fbbf24'} />
-                        ))}
-                      </Bar>
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      <Bar dataKey="previous" fill="#64748b" radius={[0, 8, 8, 0]} name="Previous" />
+                      <Bar dataKey="current" fill="#38bdf8" radius={[0, 8, 8, 0]} name="Current" />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -839,6 +1103,24 @@ export default function UserDashboard() {
           </div>
         )}
       </motion.div>
+
+      {/* ─── 6. Sleep Patterns (recorded logs preferred over estimates) ─── */}
+      <motion.div {...fadeUp} transition={{ delay: 0.3 }}>
+        <SleepPatternsPanel
+          sleep={sleepPatterns || productivity?.sleep_patterns}
+          onLogSleep={logSleep}
+          logging={loggingSleep}
+        />
+      </motion.div>
+
+      {/* ─── 7. Behaviour ↔ Productivity correlations ─── */}
+      {(correlations || productivity?.correlations) && (
+        <motion.div {...fadeUp} transition={{ delay: 0.34 }}>
+          <ProductivityCorrelationsPanel
+            correlations={correlations || productivity.correlations}
+          />
+        </motion.div>
+      )}
 
       {/* ─── Upcoming Alarms + Quick Actions ─── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

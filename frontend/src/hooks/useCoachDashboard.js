@@ -20,6 +20,9 @@ const CLIENT_RESOURCES = [
   'recommendations',
   'productivity',
   'challenge',
+  'sleepTrends',
+  'wakeConsistency',
+  'habitScore',
 ];
 
 const NO_CLIENT_ERRORS = Object.freeze(
@@ -32,6 +35,9 @@ const EMPTY_CLIENT_DATA = {
   digest: null,
   productivity: null,
   challenge: null,
+  sleepTrends: null,
+  wakeConsistency: null,
+  habitScore: null,
 };
 
 /** Message for a failed panel request, distinguishing 403/404 from an outage. */
@@ -161,11 +167,23 @@ export default function useCoachDashboard() {
       coachAPI.getRecommendations(clientId),
       coachAPI.getProductivity(clientId, windowDays),
       coachAPI.getChallengePerformance(clientId, windowDays),
+      coachAPI.getSleepTrends(clientId, windowDays),
+      coachAPI.getWakeConsistency(clientId, windowDays),
+      coachAPI.getHabitScore(clientId, windowDays),
     ]);
 
     if (requestId !== clientRequestRef.current) return;
 
-    const [detailRes, behavioralRes, digestRes, productivityRes, challengeRes] = results;
+    const [
+      detailRes,
+      behavioralRes,
+      digestRes,
+      productivityRes,
+      challengeRes,
+      sleepTrendsRes,
+      wakeConsistencyRes,
+      habitScoreRes,
+    ] = results;
 
     setClientData({
       clientDetail: detailRes.status === 'fulfilled' ? detailRes.value.data : null,
@@ -176,6 +194,14 @@ export default function useCoachDashboard() {
         productivityRes.status === 'fulfilled' ? productivityRes.value.data.data : null,
       challenge:
         challengeRes.status === 'fulfilled' ? challengeRes.value.data.data : null,
+      sleepTrends:
+        sleepTrendsRes.status === 'fulfilled' ? sleepTrendsRes.value.data.data : null,
+      wakeConsistency:
+        wakeConsistencyRes.status === 'fulfilled'
+          ? wakeConsistencyRes.value.data.data
+          : null,
+      habitScore:
+        habitScoreRes.status === 'fulfilled' ? habitScoreRes.value.data.data : null,
     });
 
     const fallbacks = {
@@ -184,6 +210,9 @@ export default function useCoachDashboard() {
       recommendations: 'Coaching recommendations could not be loaded.',
       productivity: 'Productivity analytics could not be loaded.',
       challenge: 'Challenge performance could not be loaded.',
+      sleepTrends: 'Sleep trends could not be loaded.',
+      wakeConsistency: 'Wake consistency could not be loaded.',
+      habitScore: 'Habit score could not be loaded.',
     };
     setClientErrors(
       CLIENT_RESOURCES.reduce((acc, key, index) => {
@@ -231,6 +260,11 @@ export default function useCoachDashboard() {
   const periodIsLoading =
     loadedRosterDays !== days || Boolean(selectedId && loadedClientDays !== days);
 
+  // Each panel prefers its dedicated route's payload and falls back to the
+  // behavioural umbrella, so one failed request degrades instead of blanking.
+  const merge = (extra) =>
+    extra ? { ...(clientData.behavioral || {}), ...extra } : clientData.behavioral;
+
   return {
     // roster
     overview,
@@ -256,6 +290,9 @@ export default function useCoachDashboard() {
     setSelectedId,
     clientRow,
     ...clientData,
+    behaviourPayload: merge(clientData.wakeConsistency),
+    habitPayload: merge(clientData.habitScore),
+    sleepPayload: merge(clientData.sleepTrends),
     clientErrors,
     clientErrorSummary,
     clientLoading,

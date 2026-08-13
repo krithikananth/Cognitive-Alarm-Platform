@@ -18,7 +18,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.report import ReportResponse, ReportTypeListResponse
-from app.services.report_export import export_report
+from app.services.report_export import content_disposition, export_report
 from app.services.report_service import REPORT_META, ReportService, ReportType
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -127,6 +127,6 @@ def export_report_file(
         content=content,
         media_type=media_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": content_disposition(filename),
         },
     )

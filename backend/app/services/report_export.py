@@ -5,6 +5,7 @@ PDF and Excel exporters for user lifestyle reports.
 from __future__ import annotations
 
 import io
+import re
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -501,6 +502,24 @@ def render_excel(report: Dict[str, Any]) -> bytes:
     return buf.getvalue()
 
 
+#: Everything outside this set is replaced in a download filename. Keeps path
+#: separators, quotes and CR/LF out of the ``Content-Disposition`` header, so a
+#: report field can never break the header or suggest a path to the browser.
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_attachment_filename(name: str, *, fallback: str = "icap_report") -> str:
+    """Reduce ``name`` to a filename that is safe to put in a header."""
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", str(name or "")).strip("._")
+    # A leading dot or a bare extension is not a usable download name.
+    return cleaned[:120] if cleaned and not cleaned.startswith(".") else fallback
+
+
+def content_disposition(filename: str) -> str:
+    """Build an ``attachment`` header value that cannot be injected into."""
+    return f'attachment; filename="{safe_attachment_filename(filename)}"'
+
+
 def export_report(report: Dict[str, Any], fmt: str) -> Tuple[bytes, str, str]:
     """Return ``(content, media_type, filename)`` for pdf or excel."""
     report_type = report.get("report_type", "report")
@@ -510,12 +529,16 @@ def export_report(report: Dict[str, Any], fmt: str) -> Tuple[bytes, str, str]:
     fmt = (fmt or "pdf").lower()
     if fmt in ("xlsx", "excel", "xls"):
         content = render_excel(report)
-        filename = f"icap_{report_type}_report_{start}_to_{end}.xlsx"
+        filename = safe_attachment_filename(
+            f"icap_{report_type}_report_{start}_to_{end}.xlsx"
+        )
         return content, (
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ), filename
     if fmt != "pdf":
         raise ValueError("format must be 'pdf' or 'excel'")
     content = render_pdf(report)
-    filename = f"icap_{report_type}_report_{start}_to_{end}.pdf"
+    filename = safe_attachment_filename(
+        f"icap_{report_type}_report_{start}_to_{end}.pdf"
+    )
     return content, "application/pdf", filename

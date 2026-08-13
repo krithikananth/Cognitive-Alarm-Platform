@@ -37,6 +37,9 @@ class AnalyticsEventType:
     CHALLENGE_ISSUED = "challenge.issued"
     CHALLENGE_ATTEMPTED = "challenge.attempted"
     WAKE_VERIFIED = "wake.verified"
+    # Explicitly logged sleep boundaries (client-recorded, never inferred)
+    SLEEP_STARTED = "sleep.started"
+    SLEEP_ENDED = "sleep.ended"
     PROFILE_UPDATED = "profile.updated"
     RECOMMENDATION_VIEWED = "recommendation.viewed"
     RECOMMENDATION_ACTED = "recommendation.acted"
@@ -47,6 +50,7 @@ ALLOWED_CLIENT_EVENT_PREFIXES = (
     "alarm.",
     "challenge.",
     "wake.",
+    "sleep.",
     "profile.",
     "habit.",
     "recommendation.",

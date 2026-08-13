@@ -320,6 +320,7 @@ def get_client_wake_consistency(
         days,
         {
             "wake_up_consistency": overview["wake_up_consistency"],
+            "verification_accuracy": overview["verification_accuracy"],
             "snooze_pattern": overview["snooze_pattern"],
             "weekly_trends": overview["weekly_trends"],
         },

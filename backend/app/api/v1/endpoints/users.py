@@ -20,7 +20,14 @@ from app.models.notification import (
 )
 from app.models.profile import UserProfile, DifficultyPreference
 from app.models.system_settings import SystemSettings
-from app.schemas.user import UserResponse, UserUpdate, AdminUserUpdate
+from app.schemas.user import (
+    AdminUserUpdate,
+    UserPreferencesResponse,
+    UserProfileBundleResponse,
+    UserResponse,
+    UserStatsResponse,
+    UserUpdate,
+)
 from app.api.deps import get_current_user, get_current_admin
 from app.api.v1.endpoints.profiles import _get_or_create_profile
 from app.services.habit_score import (
@@ -143,7 +150,7 @@ def _weekly_tracker(db: Session, user_id: int) -> list[dict]:
 # ── Current-user profile routes (must be registered before /{user_id}) ──
 
 
-@router.get("/profile")
+@router.get("/profile", response_model=UserProfileBundleResponse)
 def get_my_profile(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -154,7 +161,7 @@ def get_my_profile(
     return _profile_bundle(current_user, profile)
 
 
-@router.put("/profile")
+@router.put("/profile", response_model=UserProfileBundleResponse)
 def update_my_profile(
     data: ProfileUserUpdate,
     db: Session = Depends(get_db),
@@ -184,7 +191,7 @@ def update_my_profile(
     return _profile_bundle(current_user, profile)
 
 
-@router.get("/profile/stats")
+@router.get("/profile/stats", response_model=UserStatsResponse)
 def get_my_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -244,7 +251,7 @@ def get_my_stats(
     }
 
 
-@router.put("/profile/sleep-schedule")
+@router.put("/profile/sleep-schedule", response_model=UserProfileBundleResponse)
 def update_my_sleep_schedule(
     data: SleepScheduleBody,
     db: Session = Depends(get_db),
@@ -266,7 +273,7 @@ def update_my_sleep_schedule(
     return _profile_bundle(current_user, profile)
 
 
-@router.put("/profile/goals")
+@router.put("/profile/goals", response_model=UserProfileBundleResponse)
 def update_my_goals(
     data: dict,
     db: Session = Depends(get_db),
@@ -287,7 +294,7 @@ def update_my_goals(
     return _profile_bundle(current_user, profile)
 
 
-@router.get("/profile/preferences")
+@router.get("/profile/preferences", response_model=UserPreferencesResponse)
 def get_my_preferences(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -316,7 +323,7 @@ def get_my_preferences(
     }
 
 
-@router.put("/profile/preferences")
+@router.put("/profile/preferences", response_model=UserProfileBundleResponse)
 def update_my_preferences(
     data: PreferencesBody,
     db: Session = Depends(get_db),

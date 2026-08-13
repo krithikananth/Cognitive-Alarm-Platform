@@ -8,6 +8,7 @@ for all cryptographic operations.
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from fastapi import HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -18,6 +19,27 @@ from app.core.config import settings
 # OAuth2 scheme that extracts the bearer token from the Authorization header.
 # tokenUrl must match POST /auth/token (OAuth2 password form) used by Swagger Authorize.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/token")
+
+# Same scheme without the automatic 401 — the request may instead carry the
+# HttpOnly session cookie, which the dependency layer resolves.
+oauth2_scheme_optional = OAuth2PasswordBearer(
+    tokenUrl=f"{settings.API_V1_STR}/auth/token", auto_error=False
+)
+
+
+def _identity_claims() -> Dict[str, Any]:
+    """Claims that make a token individually identifiable and revocable.
+
+    ``iat_ms`` carries millisecond precision because the standard ``iat`` claim
+    is whole seconds, which is too coarse to order a token against a
+    revoke-all cut-off taken moments earlier.
+    """
+    now = datetime.now(timezone.utc)
+    return {
+        "jti": uuid4().hex,
+        "iat": now,
+        "iat_ms": int(now.timestamp() * 1000),
+    }
 
 
 def create_access_token(
@@ -41,6 +63,7 @@ def create_access_token(
         if expires_delta is not None
         else timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
+    to_encode.update(_identity_claims())
     to_encode.update({"exp": expire, "type": "access"})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
@@ -59,6 +82,7 @@ def create_refresh_token(data: Dict[str, Any]) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
         days=settings.REFRESH_TOKEN_EXPIRE_DAYS
     )
+    to_encode.update(_identity_claims())
     to_encode.update({"exp": expire, "type": "refresh"})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 

@@ -35,6 +35,7 @@ export default function ChallengePerformance({ challenge, clientRow, error, onRe
   const timezone = clientTimezoneOf(clientRow);
   const trend = trendMeta(challenge?.trend?.direction);
   const TrendIcon = trend.Icon;
+  const completion = challenge?.completion;
   // The chip reports the accuracy trend, which needs attempts in two periods —
   // it is not a verdict on whether the section has data.
   const hasTrend = ['improving', 'declining', 'stable'].includes(
@@ -121,6 +122,27 @@ export default function ChallengePerformance({ challenge, clientRow, error, onRe
               value={challenge?.total_points_earned ?? 0}
             />
           </div>
+
+          {completion?.served > 0 && (
+            <div
+              className="rounded-xl border border-surface-700/40 bg-surface-900/40 p-4 mb-5"
+              title="Share of challenges served to this client that they finished inside the time limit. Unanswered and timed-out challenges never reach the attempt log, so accuracy cannot show them."
+            >
+              <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                <p className="text-sm font-medium text-white">Challenge completion</p>
+                <p className="text-lg font-semibold text-emerald-300">
+                  {completion.completion_rate}%
+                </p>
+              </div>
+              <p className="text-xs text-slate-400">
+                Finished {completion.completed} of {completion.served} challenges served
+                {' · '}
+                {completion.timed_out} timed out
+                {' · '}
+                {completion.abandoned} left unanswered
+              </p>
+            </div>
+          )}
 
           {!challenge?.total_attempts ? (
             <EmptyChart message="No data available for this period. Accuracy by puzzle type appears once this client solves alarm challenges." />

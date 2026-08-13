@@ -6,11 +6,12 @@ Includes strict validation for email, password strength, and username format.
 
 import re
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.models.user import UserRole
+from app.schemas.common import AggregateResponse
 
 
 class UserCreate(BaseModel):
@@ -171,3 +172,46 @@ class UserListResponse(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class UserProfileBundleResponse(AggregateResponse):
+    """Account + profile bundle used by the Profile page.
+
+    Returned by ``GET/PUT /users/profile`` and the sleep-schedule and goals
+    updates, which all render the same view.
+    """
+
+    id: int
+    email: str
+    username: str
+    full_name: Optional[str] = None
+    role: str
+    timezone: Optional[str] = None
+    is_active: bool
+    profile: Dict[str, Any] = Field(default_factory=dict)
+
+
+class UserStatsResponse(AggregateResponse):
+    """GET /users/profile/stats — headline figures for the profile header."""
+
+    active_alarms: int
+    current_habit_score: float
+    current_streak: int
+    success_streak: int
+    failure_streak: int
+    wakeup_success_rate: float
+    preferred_wakeup_time: Optional[str] = None
+    weekly_on_time: int
+    weekly_total: int
+    weekly_tracker: List[Dict[str, Any]] = Field(default_factory=list)
+    last_successful_wake_date: Optional[str] = None
+    best_streak: Optional[int] = None
+
+
+class UserPreferencesResponse(AggregateResponse):
+    """GET/PUT /users/profile/preferences."""
+
+    preferred_challenge_types: List[str] = Field(default_factory=list)
+    difficulty_preference: str
+    productivity_goals: List[str] = Field(default_factory=list)
+    habit_preferences: Dict[str, Any] = Field(default_factory=dict)

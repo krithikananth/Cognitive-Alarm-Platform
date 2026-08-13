@@ -192,13 +192,13 @@ export default function ActiveAlarmModal() {
   const timerProgress = Math.max(0, (timeLeft / maxTime) * 100);
   const timerColor =
     timeLeft > maxTime * 0.5 ? 'text-emerald-400' :
-    timeLeft > maxTime * 0.2 ? 'text-amber-400' : 'text-red-400';
+      timeLeft > maxTime * 0.2 ? 'text-amber-400' : 'text-red-400';
   const timerBgColor =
     timeLeft > maxTime * 0.5 ? 'bg-emerald-500/20' :
-    timeLeft > maxTime * 0.2 ? 'bg-amber-500/20' : 'bg-red-500/20';
+      timeLeft > maxTime * 0.2 ? 'bg-amber-500/20' : 'bg-red-500/20';
   const timerBarColor =
     timeLeft > maxTime * 0.5 ? 'bg-emerald-500' :
-    timeLeft > maxTime * 0.2 ? 'bg-amber-500' : 'bg-red-500';
+      timeLeft > maxTime * 0.2 ? 'bg-amber-500' : 'bg-red-500';
 
   const snoozeBlockedMessage =
     snoozeLimit === 0
@@ -310,18 +310,22 @@ export default function ActiveAlarmModal() {
                       )} CHALLENGE
                     </span>
                     {challenge.difficulty && (
-                      <span className={`text-xs font-bold tracking-widest uppercase px-2 py-0.5 rounded-full ${
-                        challenge.difficulty === 'beginner' ? 'bg-emerald-500/20 text-emerald-400' :
-                        challenge.difficulty === 'easy' ? 'bg-teal-500/20 text-teal-400' :
-                        challenge.difficulty === 'medium' ? 'bg-amber-500/20 text-amber-400' :
-                        challenge.difficulty === 'hard' ? 'bg-orange-500/20 text-orange-400' :
-                        'bg-red-500/20 text-red-400'
-                      }`}>
+                      <span className={`text-xs font-bold tracking-widest uppercase px-2 py-0.5 rounded-full ${challenge.difficulty === 'beginner' ? 'bg-emerald-500/20 text-emerald-400' :
+                          challenge.difficulty === 'easy' ? 'bg-teal-500/20 text-teal-400' :
+                            challenge.difficulty === 'medium' ? 'bg-amber-500/20 text-amber-400' :
+                              challenge.difficulty === 'hard' ? 'bg-orange-500/20 text-orange-400' :
+                                'bg-red-500/20 text-red-400'
+                        }`}>
                         {challenge.difficulty}
                         {escalationLevel > 0 ? ' ↑' : ''}
                       </span>
                     )}
                   </div>
+                  {challenge.source === 'ai' && (
+                    <p className="text-[10px] tracking-widest uppercase text-violet-300/80 mb-2">
+                      AI-generated
+                    </p>
+                  )}
 
                   {isMemoryChallenge ? (
                     <div className="my-6">

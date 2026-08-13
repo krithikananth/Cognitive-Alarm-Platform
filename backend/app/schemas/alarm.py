@@ -41,7 +41,11 @@ class AlarmCreate(BaseModel):
         default=AlarmType.DAILY, description="Recurrence pattern"
     )
     days_of_week: Optional[List[int]] = Field(
-        None, description="Days of week (0=Mon … 6=Sun)"
+        None,
+        description=(
+            "Days of week (0=Mon … 6=Sun) narrowing the recurrence pattern. "
+            "Omit for the pattern's default days. Ignored for one-time alarms."
+        ),
     )
     snooze_limit: int = Field(
         default=3, ge=0, le=10, description="Max snoozes"
@@ -127,7 +131,10 @@ class AlarmUpdate(BaseModel):
     description: Optional[str] = None
     alarm_time: Optional[time] = None
     alarm_type: Optional[AlarmType] = None
-    days_of_week: Optional[List[int]] = None
+    days_of_week: Optional[List[int]] = Field(
+        None,
+        description="Days of week (0=Mon … 6=Sun) narrowing the recurrence pattern",
+    )
     snooze_limit: Optional[int] = Field(None, ge=0, le=10)
     snooze_interval_minutes: Optional[int] = Field(None, ge=1, le=60)
     challenge_type: Optional[ChallengeType] = None
@@ -188,6 +195,7 @@ class AlarmResponse(BaseModel):
     alarm_time: time
     alarm_type: AlarmType
     days_of_week: Optional[List[int]] = None
+    one_time_date: Optional[date] = None
     is_active: bool
     snooze_limit: int
     snooze_interval_minutes: int

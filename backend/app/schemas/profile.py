@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from app.models.profile import DifficultyPreference
+from app.schemas.common import AggregateResponse
 
 
 class ProfileCreate(BaseModel):
@@ -183,3 +184,14 @@ class ProfileResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class HabitScoreResponse(AggregateResponse):
+    """GET /profiles/me/habit-score — score with its weighted components."""
+
+    habit_score: float
+    breakdown: Dict[str, Any] = Field(default_factory=dict)
+    weights: Dict[str, Any] = Field(default_factory=dict)
+    success_streak: int
+    failure_streak: int
+    streak_days: int

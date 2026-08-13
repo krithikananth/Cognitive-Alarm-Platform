@@ -17,6 +17,7 @@ from sqlalchemy import engine_from_config, pool
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.core.config import settings  # noqa: E402
+from app.core.logging_config import is_logging_configured  # noqa: E402
 from app.db.base import Base  # noqa: E402
 
 # Import all model modules so Base.metadata is fully populated
@@ -24,12 +25,15 @@ from app.models import user  # noqa: E402, F401
 from app.models import profile  # noqa: E402, F401
 from app.models import alarm  # noqa: E402, F401
 from app.models import challenge_session  # noqa: E402, F401
+from app.models import challenge_delivery  # noqa: E402, F401
+from app.models import recommendation_feedback  # noqa: E402, F401
 from app.models import alarm_wake_event  # noqa: E402, F401
 from app.models import alarm_snooze_event  # noqa: E402, F401
 from app.models import analytics_event  # noqa: E402, F401
 from app.models import notification  # noqa: E402, F401
 from app.models import system_settings  # noqa: E402, F401
 from app.models import coach_assignment  # noqa: E402, F401
+from app.models import revoked_token  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # Alembic Config object — provides access to values in alembic.ini
@@ -42,9 +46,15 @@ if database_url:
     # configparser interpolates `%` — escape for URLs that contain them
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
-# Set up Python logging from the config file
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+# Set up Python logging from the config file.
+#
+# Only when Alembic owns the process. `fileConfig` rewrites the whole logging
+# tree — it would reset the root logger to WARN and (by default) disable every
+# logger the application already created, silently killing application logging
+# for any in-process migration run. `disable_existing_loggers=False` is kept as
+# well so the standalone path cannot mute already-imported app loggers either.
+if config.config_file_name is not None and not is_logging_configured():
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # MetaData object for 'autogenerate' support
 target_metadata = Base.metadata

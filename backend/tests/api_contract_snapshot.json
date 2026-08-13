@@ -1,0 +1,1122 @@
+{
+  "routes": {
+    "DELETE /api/v1/admin/coach-assignments": {
+      "path_params": [],
+      "response_model": "",
+      "status_code": 204,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "DELETE /api/v1/alarms/{alarm_id}": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "",
+      "status_code": 204,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "DELETE /api/v1/notifications/device-token": {
+      "path_params": [],
+      "response_model": "DeviceTokenRemovedResponse",
+      "status_code": 200,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "DELETE /api/v1/recommendations/{recommendation_id}/feedback": {
+      "path_params": [
+        "recommendation_id"
+      ],
+      "response_model": "",
+      "status_code": 204,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "DELETE /api/v1/users/account": {
+      "path_params": [],
+      "response_model": "",
+      "status_code": 204,
+      "tags": [
+        "Users"
+      ]
+    },
+    "DELETE /api/v1/users/{user_id}": {
+      "path_params": [
+        "user_id"
+      ],
+      "response_model": "",
+      "status_code": 204,
+      "tags": [
+        "Users"
+      ]
+    },
+    "GET /": {
+      "path_params": [],
+      "response_model": "RootResponse",
+      "status_code": null,
+      "tags": [
+        "Root"
+      ]
+    },
+    "GET /api/v1/admin/alarms": {
+      "path_params": [],
+      "response_model": "AdminAlarmsResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/analytics": {
+      "path_params": [],
+      "response_model": "AdminAnalyticsResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/coach-assignments": {
+      "path_params": [],
+      "response_model": "CoachAssignmentListResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/dashboard": {
+      "path_params": [],
+      "response_model": "AdminDashboardResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/notification-settings": {
+      "path_params": [],
+      "response_model": "SystemNotificationSettingsResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/recommendations": {
+      "path_params": [],
+      "response_model": "AdminRecommendationsResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/reports": {
+      "path_params": [],
+      "response_model": "AdminReportsResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/statistics": {
+      "path_params": [],
+      "response_model": "AdminStatisticsResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/system-reports": {
+      "path_params": [],
+      "response_model": "ReportTypeListResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/system-reports/{report_type}": {
+      "path_params": [
+        "report_type"
+      ],
+      "response_model": "ReportResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/system-reports/{report_type}/export": {
+      "path_params": [
+        "report_type"
+      ],
+      "response_model": "",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/users": {
+      "path_params": [],
+      "response_model": "AdminUserListResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/admin/users/{user_id}": {
+      "path_params": [
+        "user_id"
+      ],
+      "response_model": "AdminUserDetailResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "GET /api/v1/alarms/": {
+      "path_params": [],
+      "response_model": "AlarmListResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/challenge/analysis": {
+      "path_params": [],
+      "response_model": "ChallengeAnalysisResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/challenge/history": {
+      "path_params": [],
+      "response_model": "ChallengeHistoryResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/challenge/learning-profile": {
+      "path_params": [],
+      "response_model": "LearningProfileResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/challenge/log-health": {
+      "path_params": [],
+      "response_model": "ChallengeLogHealthResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/challenge/stats": {
+      "path_params": [],
+      "response_model": "ChallengeStatsResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/snooze-history": {
+      "path_params": [],
+      "response_model": "SnoozeHistoryResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/upcoming": {
+      "path_params": [],
+      "response_model": "list",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/wake-confirmations": {
+      "path_params": [],
+      "response_model": "WakeConfirmationListResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/wakefulness": {
+      "path_params": [],
+      "response_model": "WakefulnessResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/{alarm_id}": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "AlarmResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/{alarm_id}/challenge": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "ChallengeResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/{alarm_id}/challenge/history": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "ChallengeHistoryResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/alarms/{alarm_id}/snooze-info": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "SnoozeInfoResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral": {
+      "path_params": [],
+      "response_model": "BehavioralAnalyticsOverview",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/habits": {
+      "path_params": [],
+      "response_model": "HabitTrendsResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/productivity-correlation": {
+      "path_params": [],
+      "response_model": "ProductivityCorrelationResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/sleep-adherence": {
+      "path_params": [],
+      "response_model": "SleepAdherenceResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/sleep-patterns": {
+      "path_params": [],
+      "response_model": "SleepPatternsResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/snooze": {
+      "path_params": [],
+      "response_model": "SnoozePatternResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/trends/monthly": {
+      "path_params": [],
+      "response_model": "PeriodTrendsResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/trends/weekly": {
+      "path_params": [],
+      "response_model": "PeriodTrendsResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/verification-accuracy": {
+      "path_params": [],
+      "response_model": "VerificationAccuracyResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/behavioral/wake-consistency": {
+      "path_params": [],
+      "response_model": "WakeConsistencyResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/events": {
+      "path_params": [],
+      "response_model": "AnalyticsEventListResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/analytics/summary": {
+      "path_params": [],
+      "response_model": "AnalyticsSummaryResponse",
+      "status_code": null,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "GET /api/v1/auth/me": {
+      "path_params": [],
+      "response_model": "UserResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "GET /api/v1/auth/oauth/google": {
+      "path_params": [],
+      "response_model": "",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "GET /api/v1/auth/oauth/google/callback": {
+      "path_params": [],
+      "response_model": "",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "GET /api/v1/coach/clients": {
+      "path_params": [],
+      "response_model": "CoachClientListResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "CoachClientDetailResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}/behavioral": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "CoachClientAnalyticsResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}/challenge-performance": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "CoachClientAnalyticsResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}/habit-score": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "CoachClientAnalyticsResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}/productivity": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "CoachClientAnalyticsResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}/recommendations": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "RecommendationResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}/sleep-trends": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "CoachClientAnalyticsResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/clients/{client_id}/wake-consistency": {
+      "path_params": [
+        "client_id"
+      ],
+      "response_model": "CoachClientAnalyticsResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/coach/overview": {
+      "path_params": [],
+      "response_model": "CoachOverviewResponse",
+      "status_code": null,
+      "tags": [
+        "Wellness Coach"
+      ]
+    },
+    "GET /api/v1/dashboard/alarm-history": {
+      "path_params": [],
+      "response_model": "AlarmHistoryResponse",
+      "status_code": null,
+      "tags": [
+        "Dashboard"
+      ]
+    },
+    "GET /api/v1/dashboard/challenge-performance": {
+      "path_params": [],
+      "response_model": "ChallengePerformanceResponse",
+      "status_code": null,
+      "tags": [
+        "Dashboard"
+      ]
+    },
+    "GET /api/v1/dashboard/productivity": {
+      "path_params": [],
+      "response_model": "ProductivityInsightsResponse",
+      "status_code": null,
+      "tags": [
+        "Dashboard"
+      ]
+    },
+    "GET /api/v1/dashboard/summary": {
+      "path_params": [],
+      "response_model": "DashboardSummaryResponse",
+      "status_code": null,
+      "tags": [
+        "Dashboard"
+      ]
+    },
+    "GET /api/v1/dashboard/wake-stats": {
+      "path_params": [],
+      "response_model": "WakeStatsResponse",
+      "status_code": null,
+      "tags": [
+        "Dashboard"
+      ]
+    },
+    "GET /api/v1/notifications/": {
+      "path_params": [],
+      "response_model": "NotificationListResponse",
+      "status_code": null,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "GET /api/v1/notifications/pending": {
+      "path_params": [],
+      "response_model": "NotificationListResponse",
+      "status_code": null,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "GET /api/v1/notifications/preferences": {
+      "path_params": [],
+      "response_model": "NotificationPreferenceResponse",
+      "status_code": null,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "GET /api/v1/notifications/unread-count": {
+      "path_params": [],
+      "response_model": "UnreadCountResponse",
+      "status_code": null,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "GET /api/v1/profiles/me": {
+      "path_params": [],
+      "response_model": "ProfileResponse",
+      "status_code": null,
+      "tags": [
+        "User Profiles"
+      ]
+    },
+    "GET /api/v1/profiles/me/habit-score": {
+      "path_params": [],
+      "response_model": "HabitScoreResponse",
+      "status_code": null,
+      "tags": [
+        "User Profiles"
+      ]
+    },
+    "GET /api/v1/recommendations": {
+      "path_params": [],
+      "response_model": "RecommendationResponse",
+      "status_code": null,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "GET /api/v1/recommendations/daily": {
+      "path_params": [],
+      "response_model": "RecommendationResponse",
+      "status_code": null,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "GET /api/v1/recommendations/productivity": {
+      "path_params": [],
+      "response_model": "CategoryRecommendationResponse",
+      "status_code": null,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "GET /api/v1/recommendations/relevance": {
+      "path_params": [],
+      "response_model": "RecommendationRelevanceResponse",
+      "status_code": null,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "GET /api/v1/recommendations/sleep": {
+      "path_params": [],
+      "response_model": "CategoryRecommendationResponse",
+      "status_code": null,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "GET /api/v1/recommendations/wake": {
+      "path_params": [],
+      "response_model": "CategoryRecommendationResponse",
+      "status_code": null,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "GET /api/v1/reports": {
+      "path_params": [],
+      "response_model": "ReportTypeListResponse",
+      "status_code": null,
+      "tags": [
+        "Reports"
+      ]
+    },
+    "GET /api/v1/reports/{report_type}": {
+      "path_params": [
+        "report_type"
+      ],
+      "response_model": "ReportResponse",
+      "status_code": null,
+      "tags": [
+        "Reports"
+      ]
+    },
+    "GET /api/v1/reports/{report_type}/export": {
+      "path_params": [
+        "report_type"
+      ],
+      "response_model": "",
+      "status_code": null,
+      "tags": [
+        "Reports"
+      ]
+    },
+    "GET /api/v1/system/alerts": {
+      "path_params": [],
+      "response_model": "MetricsAlertsResponse",
+      "status_code": null,
+      "tags": [
+        "System"
+      ]
+    },
+    "GET /api/v1/system/logging": {
+      "path_params": [],
+      "response_model": "LoggingStatusResponse",
+      "status_code": null,
+      "tags": [
+        "System"
+      ]
+    },
+    "GET /api/v1/system/metrics": {
+      "path_params": [],
+      "response_model": "ApiMetricsResponse",
+      "status_code": null,
+      "tags": [
+        "System"
+      ]
+    },
+    "GET /api/v1/system/metrics/prometheus": {
+      "path_params": [],
+      "response_model": "",
+      "status_code": null,
+      "tags": [
+        "System"
+      ]
+    },
+    "GET /api/v1/system/status": {
+      "path_params": [],
+      "response_model": "SystemStatusResponse",
+      "status_code": null,
+      "tags": [
+        "System"
+      ]
+    },
+    "GET /api/v1/users/": {
+      "path_params": [],
+      "response_model": "list",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "GET /api/v1/users/profile": {
+      "path_params": [],
+      "response_model": "UserProfileBundleResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "GET /api/v1/users/profile/preferences": {
+      "path_params": [],
+      "response_model": "UserPreferencesResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "GET /api/v1/users/profile/stats": {
+      "path_params": [],
+      "response_model": "UserStatsResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "GET /api/v1/users/{user_id}": {
+      "path_params": [
+        "user_id"
+      ],
+      "response_model": "UserResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "GET /health": {
+      "path_params": [],
+      "response_model": "HealthResponse",
+      "status_code": null,
+      "tags": [
+        "Health"
+      ]
+    },
+    "PATCH /api/v1/alarms/{alarm_id}/toggle": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "AlarmResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "PATCH /api/v1/profiles/me/goals": {
+      "path_params": [],
+      "response_model": "ProfileResponse",
+      "status_code": null,
+      "tags": [
+        "User Profiles"
+      ]
+    },
+    "PATCH /api/v1/profiles/me/habits": {
+      "path_params": [],
+      "response_model": "ProfileResponse",
+      "status_code": null,
+      "tags": [
+        "User Profiles"
+      ]
+    },
+    "PATCH /api/v1/profiles/me/sleep-schedule": {
+      "path_params": [],
+      "response_model": "ProfileResponse",
+      "status_code": null,
+      "tags": [
+        "User Profiles"
+      ]
+    },
+    "POST /api/v1/admin/announcements/broadcast": {
+      "path_params": [],
+      "response_model": "BroadcastAnnouncementResponse",
+      "status_code": 201,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "POST /api/v1/admin/coach-assignments": {
+      "path_params": [],
+      "response_model": "CoachAssignmentResponse",
+      "status_code": 201,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "POST /api/v1/alarms/": {
+      "path_params": [],
+      "response_model": "AlarmResponse",
+      "status_code": 201,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/alarms/challenge/practice": {
+      "path_params": [],
+      "response_model": "ChallengeResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/alarms/challenge/practice/verify": {
+      "path_params": [],
+      "response_model": "PracticeVerifyResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/alarms/{alarm_id}/dismiss": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "AlarmResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/alarms/{alarm_id}/fail-wake": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "FailWakeResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/alarms/{alarm_id}/snooze": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "AlarmResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/alarms/{alarm_id}/verify": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "ChallengeVerifyResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/analytics/events": {
+      "path_params": [],
+      "response_model": "AnalyticsIngestResponse",
+      "status_code": 201,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "POST /api/v1/analytics/events/batch": {
+      "path_params": [],
+      "response_model": "AnalyticsIngestResponse",
+      "status_code": 201,
+      "tags": [
+        "Analytics"
+      ]
+    },
+    "POST /api/v1/auth/forgot-password": {
+      "path_params": [],
+      "response_model": "MessageResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/login": {
+      "path_params": [],
+      "response_model": "LoginResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/logout": {
+      "path_params": [],
+      "response_model": "SessionRevokedResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/logout-all": {
+      "path_params": [],
+      "response_model": "SessionRevokedResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/refresh": {
+      "path_params": [],
+      "response_model": "Token",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/register": {
+      "path_params": [],
+      "response_model": "UserResponse",
+      "status_code": 201,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/resend-verification": {
+      "path_params": [],
+      "response_model": "MessageResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/reset-password": {
+      "path_params": [],
+      "response_model": "MessageResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/token": {
+      "path_params": [],
+      "response_model": "Token",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/auth/verify-email": {
+      "path_params": [],
+      "response_model": "MessageResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "POST /api/v1/notifications/device-token": {
+      "path_params": [],
+      "response_model": "DeviceTokenResponse",
+      "status_code": 201,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "POST /api/v1/notifications/mark-read": {
+      "path_params": [],
+      "response_model": "MarkAllReadResponse",
+      "status_code": 200,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "POST /api/v1/notifications/test": {
+      "path_params": [],
+      "response_model": "TestNotificationResponse",
+      "status_code": 200,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "POST /api/v1/system/client-errors": {
+      "path_params": [],
+      "response_model": "ClientErrorAck",
+      "status_code": 202,
+      "tags": [
+        "System"
+      ]
+    },
+    "POST /api/v1/users/{user_id}/activate": {
+      "path_params": [
+        "user_id"
+      ],
+      "response_model": "UserResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "POST /api/v1/users/{user_id}/deactivate": {
+      "path_params": [
+        "user_id"
+      ],
+      "response_model": "UserResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "PUT /api/v1/admin/notification-settings": {
+      "path_params": [],
+      "response_model": "SystemNotificationSettingsResponse",
+      "status_code": null,
+      "tags": [
+        "Admin"
+      ]
+    },
+    "PUT /api/v1/alarms/{alarm_id}": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "AlarmResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "PUT /api/v1/auth/me": {
+      "path_params": [],
+      "response_model": "UserResponse",
+      "status_code": null,
+      "tags": [
+        "Authentication"
+      ]
+    },
+    "PUT /api/v1/notifications/preferences": {
+      "path_params": [],
+      "response_model": "NotificationPreferenceResponse",
+      "status_code": null,
+      "tags": [
+        "Notifications"
+      ]
+    },
+    "PUT /api/v1/profiles/me": {
+      "path_params": [],
+      "response_model": "ProfileResponse",
+      "status_code": null,
+      "tags": [
+        "User Profiles"
+      ]
+    },
+    "PUT /api/v1/recommendations/{recommendation_id}/feedback": {
+      "path_params": [
+        "recommendation_id"
+      ],
+      "response_model": "RecommendationFeedbackResponse",
+      "status_code": null,
+      "tags": [
+        "Recommendations"
+      ]
+    },
+    "PUT /api/v1/users/profile": {
+      "path_params": [],
+      "response_model": "UserProfileBundleResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "PUT /api/v1/users/profile/goals": {
+      "path_params": [],
+      "response_model": "UserProfileBundleResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "PUT /api/v1/users/profile/preferences": {
+      "path_params": [],
+      "response_model": "UserProfileBundleResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "PUT /api/v1/users/profile/sleep-schedule": {
+      "path_params": [],
+      "response_model": "UserProfileBundleResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    },
+    "PUT /api/v1/users/{user_id}": {
+      "path_params": [
+        "user_id"
+      ],
+      "response_model": "UserResponse",
+      "status_code": null,
+      "tags": [
+        "Users"
+      ]
+    }
+  }
+}

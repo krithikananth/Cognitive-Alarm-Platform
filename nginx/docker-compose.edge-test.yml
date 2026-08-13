@@ -1,0 +1,53 @@
+# Runtime verification harness for the edge proxy.
+#
+# Builds the REAL nginx image from nginx/Dockerfile and serves the REAL
+# nginx/nginx.conf, so TLS, HSTS, CSP, the HTTP->HTTPS redirect and the schema
+# 404s are exercised by an actual nginx process rather than asserted against
+# the text of the config file.
+#
+# The application containers are replaced by trivial stubs: nginx resolves its
+# upstreams at startup and would refuse to boot without them, but nothing about
+# transport security depends on what those upstreams return. This keeps the
+# check fast and hermetic (no database, no secrets, no application build).
+#
+#   docker compose -p icap-edge-test -f docker-compose.edge-test.yml up -d --build
+#   docker compose -p icap-edge-test -f docker-compose.edge-test.yml down -v
+#
+# Driven automatically by backend/tests/test_tls_runtime.py.
+
+name: icap-edge-test
+
+services:
+  backend:
+    image: python:3.11-alpine
+    command: ["python", "-m", "http.server", "8000"]
+    networks: [edge]
+
+  frontend:
+    image: python:3.11-alpine
+    command: ["python", "-m", "http.server", "8080"]
+    networks: [edge]
+
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      TLS_COMMON_NAME: localhost
+    ports:
+      # High ports so the harness never collides with a real deployment.
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18443:8443"
+    depends_on: [backend, frontend]
+    read_only: true
+    volumes:
+      - edge_tls:/etc/nginx/tls
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    networks: [edge]
+
+networks:
+  edge:
+
+volumes:
+  edge_tls:

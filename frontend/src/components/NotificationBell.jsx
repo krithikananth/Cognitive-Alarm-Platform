@@ -8,7 +8,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { HiOutlineBell, HiOutlineCheck, HiOutlineBeaker } from 'react-icons/hi2';
-import { notificationAPI } from '../services/api';
+import { notificationAPI, hasActiveSession } from '../services/api';
 import {
   requestNotificationPermission,
   getNotificationPermission,
@@ -19,17 +19,19 @@ import toast from 'react-hot-toast';
 /** Map notification_type → emoji + label */
 const TYPE_META = {
   bedtime_reminder: { emoji: '🌙', label: 'Bedtime' },
-  wake_reminder:    { emoji: '⏰', label: 'Wake' },
-  habit_alert:      { emoji: '📉', label: 'Habit' },
-  motivational:     { emoji: '💪', label: 'Motivation' },
-  announcement:     { emoji: '📢', label: 'Announcement' },
+  wake_reminder: { emoji: '⏰', label: 'Wake' },
+  habit_alert: { emoji: '📉', label: 'Habit' },
+  challenge_reminder: { emoji: '🧩', label: 'Challenge' },
+  progress_update: { emoji: '📊', label: 'Progress' },
+  motivational: { emoji: '💪', label: 'Motivation' },
+  announcement: { emoji: '📢', label: 'Announcement' },
 };
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
   const d = new Date(dateStr);
   const diffS = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (diffS < 60)   return 'just now';
+  if (diffS < 60) return 'just now';
   if (diffS < 3600) return `${Math.floor(diffS / 60)}m ago`;
   if (diffS < 86400) return `${Math.floor(diffS / 3600)}h ago`;
   return `${Math.floor(diffS / 86400)}d ago`;
@@ -85,10 +87,10 @@ export default function NotificationBell() {
     };
   }, [open]);
 
-  // Poll unread count every 30s — only when a JWT is present (avoids
+  // Poll unread count every 30s — only when a session exists (avoids
   // startup 401s if Layout mounts briefly without a usable session).
   const fetchUnread = useCallback(async () => {
-    if (!localStorage.getItem('access_token')) return;
+    if (!hasActiveSession()) return;
     try {
       const { data } = await notificationAPI.getUnreadCount();
       setUnreadCount(data.unread_count || 0);
@@ -115,7 +117,7 @@ export default function NotificationBell() {
         setNotifications(data.notifications || []);
         setUnreadCount(data.unread_count || 0);
       })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setLoading(false));
   }, [open]);
 
@@ -274,9 +276,8 @@ export default function NotificationBell() {
               return (
                 <div
                   key={notif.id}
-                  className={`flex items-start gap-3 px-4 py-3 border-b border-surface-700/30 transition hover:bg-surface-700/20 ${
-                    isUnread ? 'bg-primary-500/5' : ''
-                  }`}
+                  className={`flex items-start gap-3 px-4 py-3 border-b border-surface-700/30 transition hover:bg-surface-700/20 ${isUnread ? 'bg-primary-500/5' : ''
+                    }`}
                 >
                   {/* Type Icon */}
                   <div className="w-9 h-9 rounded-xl bg-surface-700/50 flex items-center justify-center text-lg flex-shrink-0 mt-0.5">

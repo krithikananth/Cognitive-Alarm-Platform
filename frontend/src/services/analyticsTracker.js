@@ -1,8 +1,14 @@
 /**
  * Fire-and-forget client analytics for alarm / challenge lifecycle events.
  *
- * Uses existing POST /analytics/events only. Failures are logged and never
- * thrown to callers so user actions are never blocked.
+ * Events emitted close together (a wake cycle fires challenge.completed,
+ * wake.verified and alarm.dismissed within the same moment) are coalesced into
+ * a single POST /analytics/events/batch instead of one request each. A window
+ * that produced exactly one event still uses POST /analytics/events, so the
+ * common case is unchanged.
+ *
+ * Failures are logged and never thrown to callers so user actions are never
+ * blocked.
  */
 import { analyticsAPI } from './api';
 
@@ -56,8 +62,81 @@ function buildDedupeKey(eventType, dedupeKey) {
   return `${eventType}::${dedupeKey ?? 'once'}`;
 }
 
+/** How long to collect events before shipping them as one request. */
+export const BATCH_WINDOW_MS = 250;
+
+/** Backend cap on POST /analytics/events/batch. */
+const MAX_BATCH_SIZE = 100;
+
+/** Events waiting for the current window to close: { key, payload, resolve }. */
+let pending = [];
+let flushTimer = null;
+
+function queueEvent(key, payload) {
+  return new Promise((resolve) => {
+    pending.push({ key, payload, resolve });
+    if (pending.length >= MAX_BATCH_SIZE) {
+      flushAnalyticsQueue();
+      return;
+    }
+    if (flushTimer === null) {
+      flushTimer = setTimeout(flushAnalyticsQueue, BATCH_WINDOW_MS);
+    }
+  });
+}
+
 /**
- * Post one analytics event. Never throws; returns whether a request was sent.
+ * Ship whatever is queued. One event goes to the single-event endpoint, more
+ * than one goes to the batch endpoint. Never throws.
+ *
+ * @returns {Promise<boolean>} whether the queued events were accepted
+ */
+export async function flushAnalyticsQueue() {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  const batch = pending;
+  pending = [];
+  if (batch.length === 0) return true;
+
+  try {
+    if (batch.length === 1) {
+      await analyticsAPI.postEvent(batch[0].payload);
+    } else {
+      await analyticsAPI.postEventsBatch(batch.map((e) => e.payload));
+    }
+    batch.forEach((e) => {
+      _persistSentKey(e.key);
+      inFlightKeys.delete(e.key);
+      e.resolve(true);
+    });
+    return true;
+  } catch (err) {
+    // Swallow — analytics must never affect UX
+    const detail = err?.response?.data?.detail || err?.message || 'unknown error';
+    console.warn(
+      `[analytics] Failed to post ${batch.length} event(s):`,
+      detail
+    );
+    batch.forEach((e) => {
+      inFlightKeys.delete(e.key);
+      e.resolve(false);
+    });
+    return false;
+  }
+}
+
+// A tab closing inside the batch window would otherwise drop everything queued.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => {
+    flushAnalyticsQueue();
+  });
+}
+
+/**
+ * Queue one analytics event. Never throws; resolves to whether the request
+ * that carried it succeeded.
  *
  * @param {object} options
  * @param {string} options.eventType
@@ -98,25 +177,14 @@ export async function trackAnalyticsEvent({
       occurredAt instanceof Date ? occurredAt.toISOString() : String(occurredAt);
   }
 
-  try {
-    await analyticsAPI.postEvent(payload);
-    _persistSentKey(key);
-    return true;
-  } catch (err) {
-    // Swallow — analytics must never affect UX
-    const detail = err?.response?.data?.detail || err?.message || 'unknown error';
-    console.warn(`[analytics] Failed to post ${eventType}:`, detail);
-    return false;
-  } finally {
-    inFlightKeys.delete(key);
-  }
+  return queueEvent(key, payload);
 }
 
 /** Fire-and-forget wrapper: schedules track without awaiting. */
 export function trackAnalyticsEventFireAndForget(options) {
   Promise.resolve()
     .then(() => trackAnalyticsEvent(options))
-    .catch(() => {});
+    .catch(() => { });
 }
 
 // ─── Domain helpers ───────────────────────────────────────────────

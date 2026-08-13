@@ -88,7 +88,7 @@ Legend: **ALLOW** = 200 / page renders · **DENY** = 403 / Access Denied ·
 | 3.2.7 | `GET /api/v1/admin/reports` | 403 |
 | 3.2.8 | `GET /api/v1/admin/recommendations` | 403 |
 | 3.2.9 | `GET /api/v1/admin/system-reports` | 403 |
-| 3.2.10 | `GET /api/v1/admin/system-reports/user_growth/export` | 403 — no CSV bytes returned |
+| 3.2.10 | `GET /api/v1/admin/system-reports/user/export?format=pdf` | 403 — no report bytes returned |
 | 3.2.11 | `GET` and `PUT /api/v1/admin/notification-settings` | 403 |
 | 3.2.12 | `GET`, `POST`, `DELETE /api/v1/admin/coach-assignments` | 403 |
 | 3.2.13 | `POST /api/v1/admin/announcements/broadcast` | 403 — no notification is delivered |
@@ -153,7 +153,7 @@ Legend: **ALLOW** = 200 / page renders · **DENY** = 403 / Access Denied ·
 | # | Step | Expected |
 | --- | --- | --- |
 | 5.1 | Log in as `admin` | Lands on `/admin` |
-| 5.2 | `GET` each of the 10 read-only admin routes | 200 with populated payloads |
+| 5.2 | `GET` each of the 13 read-only admin routes | 200 with populated payloads |
 | 5.3 | `GET /api/v1/users/` | 200, list of all users |
 | 5.4 | `PUT /api/v1/users/{user_a_id}` with `{"role":"wellness_coach"}` | 200, role updated |
 | 5.5 | `PUT /api/v1/users/{user_a_id}` with `{"role":"superuser"}` | 422 — invalid enum rejected |
@@ -197,7 +197,8 @@ Legend: **ALLOW** = 200 / page renders · **DENY** = 403 / Access Denied ·
 | --- | --- | --- |
 | 8.1 | Log in as `admin`, open `/admin`, log out, press Back | `/login` — admin content is not restored |
 | 8.2 | Log in as `user`, open `/dashboard`, log out, press Back | `/login` |
-| 8.3 | After 8.1, confirm `access_token`, `refresh_token`, `user` are gone from `localStorage` | All three keys removed |
+| 8.3 | After 8.1, confirm no JWT is present in `localStorage` and the `icap_access_token` / `icap_refresh_token` cookies are gone | Only the non-sensitive `user` object is ever stored; both auth cookies are cleared |
+| 8.7 | After 8.1, replay the pre-logout access token with `Authorization: Bearer` | 401 `Token has been revoked` — logout records the token id in `revoked_tokens` |
 | 8.4 | After 8.1, press Back repeatedly through the whole history | Never re-renders a protected page |
 | 8.5 | After 8.1, open DevTools → Network and press Back | No authenticated API request is issued |
 | 8.6 | Log out as `admin`, log in as `user` in the same tab, press Back | Admin page not restored from bfcache |
@@ -268,8 +269,19 @@ Legend: **ALLOW** = 200 / page renders · **DENY** = 403 / Access Denied ·
 
 ## 13. Deployment note
 
-`SECRET_KEY` in [backend/app/core/config.py](../backend/app/core/config.py) falls back to
-`secrets.token_urlsafe(64)`, generated per process. Set it explicitly via `.env`
-or the environment in any deployment: without it, a multi-worker rollout gives
-each worker a different signing key, so tokens issued by one worker are rejected
-by another, and every restart silently invalidates all live sessions.
+`SECRET_KEY` has no generated default. Outside production a constant, clearly
+insecure development key is used (so restarts do not silently invalidate
+sessions); in production `ENVIRONMENT=production` makes the app refuse to start
+unless `SECRET_KEY` is present, at least 32 characters, and not a known
+placeholder — see [backend/app/core/config.py](../backend/app/core/config.py).
+Production also forces `Secure` auth cookies.
+
+Sessions are carried in `HttpOnly` + `SameSite=lax` cookies
+([backend/app/core/cookies.py](../backend/app/core/cookies.py)); the SPA never
+reads or stores a JWT. Logout revokes the presented token ids
+([backend/app/services/token_service.py](../backend/app/services/token_service.py)),
+and login / password-reset endpoints are rate limited
+([backend/app/core/rate_limit.py](../backend/app/core/rate_limit.py)).
+The limiter keeps its counters in process memory, so a multi-worker rollout
+enforces the caps per worker — put a shared limiter at the edge (or run a single
+auth worker) if you need a global cap.

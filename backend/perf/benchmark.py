@@ -286,6 +286,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--only", nargs="*", help="Restrict to specific scenario keys.")
     parser.add_argument("--label", default="baseline", help="Label recorded in the results file.")
     parser.add_argument("--output", default=None, help="Path for the JSON results file.")
+    parser.add_argument(
+        "--fail-on-budget",
+        action="store_true",
+        help="Exit non-zero when any scenario's p95 exceeds its budget (CI guard).",
+    )
     args = parser.parse_args(argv)
 
     os.environ.setdefault("SECRET_KEY", "perf-benchmark-secret-key-not-for-production")
@@ -387,6 +392,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         for r in failures:
             print(f"  {r.key} -> {r.status_code}", file=sys.stderr)
         return 1
+
+    if args.fail_on_budget:
+        over = [r for r in results if r.over_budget]
+        if over:
+            print(f"\n{len(over)} scenario(s) over budget:", file=sys.stderr)
+            for r in over:
+                print(f"  {r.key}: p95 {r.p95_ms}ms > {r.budget_ms}ms", file=sys.stderr)
+            return 1
     return 0
 
 

@@ -13,15 +13,17 @@ import {
   HiOutlineUserGroup, HiOutlineCheckCircle, HiOutlineCalendarDays,
   HiOutlineArrowPath, HiOutlineArrowDownTray, HiOutlineFire,
   HiOutlineGlobeAlt, HiOutlineCog6Tooth, HiOutlineMegaphone,
-  HiOutlineWrenchScrewdriver,
+  HiOutlineWrenchScrewdriver, HiOutlineBolt,
 } from 'react-icons/hi2';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts';
 import toast from 'react-hot-toast';
-import { adminAPI, readErrorDetail } from '../services/api';
+import { adminAPI, systemAPI, readErrorDetail } from '../services/api';
 import { formatHabitScore } from '../utils/habitScore';
 import AdminUserManagement from '../components/AdminUserManagement';
+import AdminCoachAssignments from '../components/AdminCoachAssignments';
+import AdminObservability from '../components/AdminObservability';
 
 const fadeUp = {
   initial: { opacity: 0, y: 20 },
@@ -35,6 +37,12 @@ const PRESETS = [
 ];
 
 const AUTO_REFRESH_MS = 60_000;
+
+/** Slowest routes shown in the API performance panel. */
+const METRICS_TOP_ROUTES = 8;
+
+/** Project latency target the measured p95 is judged against. */
+const LATENCY_TARGET_MS = 400;
 
 const SYSTEM_REPORT_ICONS = {
   user: HiOutlineUsers,
@@ -166,9 +174,8 @@ function SectionCard({ icon: Icon, title, subtitle, children, delay = 0.2 }) {
 function AdminToggleRow({ label, description, checked, onChange, disabled = false }) {
   return (
     <label
-      className={`flex items-start justify-between gap-4 py-2 ${
-        disabled ? 'opacity-50' : 'cursor-pointer'
-      }`}
+      className={`flex items-start justify-between gap-4 py-2 ${disabled ? 'opacity-50' : 'cursor-pointer'
+        }`}
     >
       <div className="min-w-0">
         <p className="text-sm font-medium text-slate-200">{label}</p>
@@ -182,14 +189,12 @@ function AdminToggleRow({ label, description, checked, onChange, disabled = fals
         aria-checked={checked}
         disabled={disabled}
         onClick={() => !disabled && onChange(!checked)}
-        className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${
-          checked ? 'bg-primary-500' : 'bg-surface-600'
-        } disabled:cursor-not-allowed`}
+        className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${checked ? 'bg-primary-500' : 'bg-surface-600'
+          } disabled:cursor-not-allowed`}
       >
         <span
-          className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-            checked ? 'translate-x-5' : 'translate-x-0'
-          }`}
+          className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'
+            }`}
         />
       </button>
     </label>
@@ -511,6 +516,166 @@ function ChartPanel({ chartKey, data, dataKey, xKey, fill, emptyLabel, height = 
   );
 }
 
+/**
+ * Measured API latency from GET /system/metrics.
+ *
+ * These are wall-clock durations the worker recorded while serving real
+ * traffic, keyed by route template — not estimates and not the offline
+ * benchmark. The reservoir is per-process and resets when the worker
+ * restarts, which the panel says out loud so an empty table is not read as
+ * "no traffic ever".
+ */
+function ApiPerformancePanel() {
+  const [metrics, setMetrics] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { data } = await systemAPI.getMetrics(METRICS_TOP_ROUTES);
+      setMetrics(data);
+      setError(null);
+    } catch (err) {
+      setMetrics(null);
+      setError(
+        (await readErrorDetail(err, '')) || 'Runtime metrics could not be loaded.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const requests = metrics?.requests;
+  const generation = metrics?.challenge_generation;
+  const overall = requests?.overall;
+  const routes = requests?.routes || [];
+  const errorRate =
+    requests?.total_requests
+      ? (requests.total_errors / requests.total_requests) * 100
+      : 0;
+
+  return (
+    <SectionCard
+      icon={HiOutlineBolt}
+      title="API Performance"
+      subtitle="Response times measured by this worker while serving live traffic"
+      delay={0.29}
+    >
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <p className="text-xs text-slate-500">
+          Per-process reservoir of the last {requests?.sample_size ?? 0} calls per route.
+          Counters reset when the worker restarts.
+        </p>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-surface-600 text-slate-300 hover:text-white hover:border-surface-500 disabled:opacity-50"
+        >
+          <HiOutlineArrowPath className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+
+      {error && !metrics ? (
+        <p className="text-sm text-red-300" role="alert">{error}</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            <Metric label="Requests" value={requests?.total_requests ?? 0} />
+            <Metric label="Routes Tracked" value={requests?.routes_tracked ?? 0} />
+            <Metric
+              label="p50"
+              value={`${num(overall?.p50_ms, 1)} ms`}
+            />
+            <Metric
+              label="p95"
+              value={`${num(overall?.p95_ms, 1)} ms`}
+              hint={`Target ${LATENCY_TARGET_MS} ms`}
+            />
+            <Metric label="p99" value={`${num(overall?.p99_ms, 1)} ms`} />
+            <Metric
+              label="5xx Rate"
+              value={pct(errorRate)}
+              hint={`${requests?.total_errors ?? 0} server errors`}
+            />
+          </div>
+
+          <div className="mt-5">
+            <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">
+              Slowest routes by p95
+            </p>
+            {routes.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                No requests sampled yet on this worker.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-surface-700/50">
+                      <th className="pb-2 pr-3">Route</th>
+                      <th className="pb-2 pr-3">Calls</th>
+                      <th className="pb-2 pr-3">p50</th>
+                      <th className="pb-2 pr-3">p95</th>
+                      <th className="pb-2 pr-3">p99</th>
+                      <th className="pb-2">Max</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routes.map((row) => (
+                      <tr key={row.route} className="border-b border-surface-800/60">
+                        <td className="py-2 pr-3 font-mono text-xs text-slate-300">
+                          {row.route}
+                        </td>
+                        <td className="py-2 pr-3 text-slate-400">{row.requests}</td>
+                        <td className="py-2 pr-3 text-slate-400">{num(row.p50_ms, 1)}</td>
+                        <td
+                          className={`py-2 pr-3 font-medium ${row.p95_ms > LATENCY_TARGET_MS ? 'text-orange-400' : 'text-emerald-400'
+                            }`}
+                        >
+                          {num(row.p95_ms, 1)}
+                        </td>
+                        <td className="py-2 pr-3 text-slate-400">{num(row.p99_ms, 1)}</td>
+                        <td className="py-2 text-slate-400">{num(row.max_ms, 1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-5">
+            <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">
+              Challenge generation
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <Metric label="Generations" value={generation?.total_generations ?? 0} />
+              <Metric label="Failures" value={generation?.total_failures ?? 0} />
+              <Metric
+                label="p95"
+                value={`${num(generation?.overall?.p95_ms, 1)} ms`}
+                hint={
+                  generation?.budget_ms != null
+                    ? `Budget ${generation.budget_ms} ms`
+                    : undefined
+                }
+              />
+              <Metric label="Keys Tracked" value={generation?.keys_tracked ?? 0} />
+            </div>
+          </div>
+        </>
+      )}
+    </SectionCard>
+  );
+}
+
 export default function AdminDashboard() {
   const [data, setData] = useState(null);
   const [statistics, setStatistics] = useState(null);
@@ -710,6 +875,8 @@ export default function AdminDashboard() {
     );
   }
 
+  // `users` is a bounded preview from the dashboard aggregate, so every
+  // headline count comes from the whole-population fields beside it.
   const users = data?.users || [];
   const totalUsers = data?.total_users ?? users.length;
   const totalAlarms = data?.total_alarms ?? 0;
@@ -787,11 +954,10 @@ export default function AdminDashboard() {
                 setUseCustomRange(false);
                 setDays(p.days);
               }}
-              className={`px-3 py-1.5 rounded-lg text-sm border transition ${
-                !useCustomRange && days === p.days
-                  ? 'bg-primary-600/20 border-primary-500/40 text-primary-200'
-                  : 'border-surface-600 text-slate-400 hover:text-white'
-              }`}
+              className={`px-3 py-1.5 rounded-lg text-sm border transition ${!useCustomRange && days === p.days
+                ? 'bg-primary-600/20 border-primary-500/40 text-primary-200'
+                : 'border-surface-600 text-slate-400 hover:text-white'
+                }`}
             >
               {p.label}
             </button>
@@ -799,11 +965,10 @@ export default function AdminDashboard() {
           <button
             type="button"
             onClick={() => setUseCustomRange(true)}
-            className={`px-3 py-1.5 rounded-lg text-sm border transition ${
-              useCustomRange
-                ? 'bg-primary-600/20 border-primary-500/40 text-primary-200'
-                : 'border-surface-600 text-slate-400 hover:text-white'
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-sm border transition ${useCustomRange
+              ? 'bg-primary-600/20 border-primary-500/40 text-primary-200'
+              : 'border-surface-600 text-slate-400 hover:text-white'
+              }`}
           >
             Custom range
           </button>
@@ -857,13 +1022,13 @@ export default function AdminDashboard() {
         <StatCard
           icon={HiOutlineShieldCheck}
           label="Admin Users"
-          value={users.filter((u) => u.role === 'admin').length}
+          value={data?.role_distribution?.admin ?? 0}
           color="from-emerald-500 to-teal-600"
         />
         <StatCard
           icon={HiOutlineUsers}
           label="Active Users"
-          value={data?.active_users ?? users.filter((u) => u.is_active !== false).length}
+          value={data?.active_users ?? 0}
           color="from-orange-500 to-red-600"
         />
       </motion.div>
@@ -1079,9 +1244,8 @@ export default function AdminDashboard() {
       >
         <div className="flex items-center gap-2 mb-4">
           <HiOutlineCheckCircle
-            className={`w-5 h-5 ${
-              (integrity.issues_found || 0) === 0 ? 'text-emerald-400' : 'text-orange-400'
-            }`}
+            className={`w-5 h-5 ${(integrity.issues_found || 0) === 0 ? 'text-emerald-400' : 'text-orange-400'
+              }`}
           />
           <span className="text-sm text-white font-medium capitalize">
             {system.status || 'unknown'}
@@ -1110,6 +1274,9 @@ export default function AdminDashboard() {
           <Metric label="Challenges (24h)" value={last24h.challenge_attempts ?? 0} />
         </div>
       </SectionCard>
+
+      {/* ─── API Performance (measured runtime latency) ─── */}
+      <ApiPerformancePanel />
 
       {/* ─── System Reports ─── */}
       <motion.div {...fadeUp} transition={{ delay: 0.3 }} className="card space-y-5">
@@ -1154,11 +1321,10 @@ export default function AdminDashboard() {
                 key={rt.type}
                 type="button"
                 onClick={() => setSystemReportType(rt.type)}
-                className={`text-left rounded-xl border px-4 py-3 transition ${
-                  selected
-                    ? 'border-primary-500/50 bg-primary-600/15'
-                    : 'border-surface-700/40 bg-surface-900/40 hover:border-surface-600'
-                }`}
+                className={`text-left rounded-xl border px-4 py-3 transition ${selected
+                  ? 'border-primary-500/50 bg-primary-600/15'
+                  : 'border-surface-700/40 bg-surface-900/40 hover:border-surface-600'
+                  }`}
               >
                 <div className="flex items-center gap-2 mb-1">
                   <Icon className={`w-4 h-4 ${selected ? 'text-primary-300' : 'text-slate-400'}`} />
@@ -1251,6 +1417,12 @@ export default function AdminDashboard() {
 
       {/* ─── User Management ─── */}
       <AdminUserManagement onUsersChanged={() => loadDashboard({ silent: true })} />
+
+      {/* ─── Coach/client assignments ─── */}
+      <AdminCoachAssignments />
+
+      {/* ─── Alerts and logging configuration ─── */}
+      <AdminObservability />
     </div>
   );
 }

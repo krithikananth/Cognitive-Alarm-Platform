@@ -6,7 +6,8 @@ Runs periodic background jobs for:
 - Processing the pending notification queue (configurable interval)
 - Retrying pushes that failed transiently (configurable interval)
 - Scheduling bedtime + wake reminders for all relevant users (every 30 min)
-- Scheduling daily motivational + habit alerts (once daily at ~05:30 UTC)
+- Scheduling daily motivational + habit alerts + challenge practice nudges +
+  weekly progress recaps (once daily at ~05:30 UTC)
 - Purging device tokens retired long ago (once daily at ~05:30 UTC)
 
 Also exposes ``refresh_user_notifications`` for immediate re-scheduling
@@ -108,9 +109,22 @@ def start_notification_scheduler() -> None:
         _daily_scheduling_job,
         trigger=CronTrigger(hour=5, minute=30),
         id="notification_daily_scheduling",
-        name="Daily motivational & habit alert scheduling",
+        name="Daily engagement notification scheduling",
         replace_existing=True,
     )
+
+    # Job 4: Compare the recorded /system/metrics readings against their
+    # thresholds and raise/clear alerts. Read-only over the metric reservoirs.
+    if settings.METRICS_ALERTS_ENABLED:
+        scheduler.add_job(
+            _metrics_alert_job,
+            trigger=IntervalTrigger(
+                seconds=max(15, int(settings.METRICS_ALERT_INTERVAL_SECONDS or 60))
+            ),
+            id="metrics_alert_evaluation",
+            name="Evaluate runtime metric alert thresholds",
+            replace_existing=True,
+        )
 
     scheduler.start()
     logger.info(
@@ -159,6 +173,16 @@ def refresh_user_notifications(user_id: int) -> None:
 
 
 # ── Internal job functions ───────────────────────────────────────
+
+def _metrics_alert_job() -> None:
+    """APScheduler job: evaluate metric thresholds and deliver alerts."""
+    from app.services.metrics_alert_service import evaluate_metrics_alerts
+
+    try:
+        evaluate_metrics_alerts(notify=True)
+    except Exception as exc:
+        logger.error("Metrics alert evaluation failed: %s", exc, exc_info=True)
+
 
 def _alarm_dispatch_job() -> None:
     """APScheduler job: ring due alarms without needing an open browser tab."""
@@ -264,7 +288,12 @@ def _refresh_reminders_job() -> None:
 
 
 def _daily_scheduling_job() -> None:
-    """APScheduler job: daily motivational + habit alerts, then token purge."""
+    """APScheduler job: daily engagement notifications, then token purge.
+
+    Covers motivational messages, habit alerts, challenge practice nudges and
+    the weekly progress recap. Each scheduler enforces its own cadence, so a
+    daily sweep never over-sends.
+    """
     from app.db.session import SessionLocal
     from app.models.user import User
     from app.services.fcm_service import FCMService
@@ -280,9 +309,13 @@ def _daily_scheduling_job() -> None:
         scheduled = 0
         for (uid,) in user_ids:
             try:
-                m = NotificationService.schedule_motivational(db, uid)
-                h = NotificationService.schedule_habit_alert(db, uid)
-                if m or h:
+                created = [
+                    NotificationService.schedule_motivational(db, uid),
+                    NotificationService.schedule_habit_alert(db, uid),
+                    NotificationService.schedule_challenge_reminder(db, uid),
+                    NotificationService.schedule_progress_update(db, uid),
+                ]
+                if any(created):
                     scheduled += 1
             except Exception as exc:
                 logger.warning(

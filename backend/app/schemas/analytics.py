@@ -112,6 +112,28 @@ class WeekdayCount(BaseModel):
     count: int
 
 
+class SnoozeReductionResponse(BaseModel):
+    """Snoozes per wake in the current period vs the period before it."""
+
+    period_days: int
+    current_period_start: Optional[str] = None
+    current_period_end: Optional[str] = None
+    previous_period_start: Optional[str] = None
+    previous_period_end: Optional[str] = None
+    current_snoozes: int
+    previous_snoozes: int
+    current_wakes: int
+    previous_wakes: int
+    current_snoozes_per_wake: Optional[float] = None
+    previous_snoozes_per_wake: Optional[float] = None
+    absolute_change_per_wake: Optional[float] = None
+    # Positive = snoozing went down. None when there is no usable baseline.
+    reduction_rate: Optional[float] = None
+    direction: str
+    status: str
+    min_wakes_required: int
+
+
 class SnoozePatternResponse(BaseModel):
     total_snoozes: int
     avg_snoozes_per_wake: float
@@ -125,6 +147,7 @@ class SnoozePatternResponse(BaseModel):
     trend: str
     recent_7d_count: int
     previous_7d_count: int
+    reduction: SnoozeReductionResponse
 
 
 class WakeConsistencyResponse(BaseModel):
@@ -141,6 +164,31 @@ class WakeConsistencyResponse(BaseModel):
     trend: str
 
 
+class VerificationAccuracyResponse(BaseModel):
+    """Accuracy of the wake-up verification gate's own decisions.
+
+    ``accuracy_rate`` replays each finished cycle against the contract
+    ``verified <=> consecutive_correct >= challenges_required``. It is neither
+    the dismissal success rate nor challenge accuracy.
+    """
+
+    decisions: int
+    verified: int
+    rejected: int
+    correct_decisions: int
+    accuracy_rate: Optional[float] = None
+    false_verifications: int
+    missed_verifications: int
+    first_pass_verifications: int
+    first_pass_rate: Optional[float] = None
+    answers_recorded: int
+    avg_answers_per_verification: Optional[float] = None
+    avg_wrong_answers_per_verification: Optional[float] = None
+    min_decisions_required: int
+    status: str
+    integrity: str
+
+
 class SleepAdherenceResponse(BaseModel):
     preferred_wake_time: Optional[str] = None
     target_sleep_hours: float
@@ -153,6 +201,103 @@ class SleepAdherenceResponse(BaseModel):
     profile_adherence_score: float
     tolerance_minutes: int
     trend: str
+
+
+class SleepSegmentSummary(BaseModel):
+    nights: int
+    avg_duration_hours: Optional[float] = None
+    avg_wake_time: Optional[str] = None
+    avg_bedtime: Optional[str] = None
+
+
+class SleepNightPoint(BaseModel):
+    """One night. ``source`` says whether the start was logged or inferred."""
+
+    date: str
+    weekday: str
+    is_weekend: bool
+    source: str
+    sleep_end_source: str
+    wake_time: Optional[str] = None
+    wake_minutes: Optional[float] = None
+    bedtime: Optional[str] = None
+    bedtime_minutes: Optional[float] = None
+    sleep_duration_hours: Optional[float] = None
+    mid_sleep_minutes: Optional[float] = None
+    wake_latency_seconds: Optional[int] = None
+
+
+class SleepPatternsResponse(BaseModel):
+    nights_observed: int
+    nights_with_duration: int
+    nights_recorded: int
+    nights_estimated: int
+    has_recorded_sleep: bool
+    duration_source: str
+    avg_recorded_duration_hours: Optional[float] = None
+    avg_estimated_duration_hours: Optional[float] = None
+    avg_sleep_duration_hours: Optional[float] = None
+    std_sleep_duration_hours: Optional[float] = None
+    min_sleep_duration_hours: Optional[float] = None
+    max_sleep_duration_hours: Optional[float] = None
+    avg_bedtime: Optional[str] = None
+    bedtime_std_minutes: Optional[float] = None
+    avg_wake_time: Optional[str] = None
+    wake_time_std_minutes: Optional[float] = None
+    avg_mid_sleep: Optional[str] = None
+    social_jetlag_minutes: Optional[float] = None
+    schedule_regularity_score: float
+    duration_consistency_score: float
+    target_sleep_hours: float
+    avg_sleep_debt_hours: Optional[float] = None
+    short_sleep_nights: int
+    long_sleep_nights: int
+    avg_wake_latency_seconds: Optional[float] = None
+    weekday: SleepSegmentSummary
+    weekend: SleepSegmentSummary
+    recent_7d_avg_duration_hours: Optional[float] = None
+    previous_7d_avg_duration_hours: Optional[float] = None
+    trend: str
+    bedtime_coverage_rate: float
+    has_open_session: bool = False
+    nights: List[SleepNightPoint] = Field(default_factory=list)
+
+
+class CorrelationMethod(BaseModel):
+    coefficients: List[str]
+    significance_test: str
+    alpha: float
+    min_pairs: int
+
+
+class CorrelationPair(BaseModel):
+    id: str
+    behavior: str
+    behavior_label: str
+    outcome: str
+    outcome_label: str
+    expected_direction: str
+    status: str
+    n: int
+    min_pairs: int
+    pearson_r: Optional[float] = None
+    spearman_rho: Optional[float] = None
+    p_value: Optional[float] = None
+    significant: bool
+    strength: str
+    direction: str
+    interpretation: str
+
+
+class ProductivityCorrelationResponse(BaseModel):
+    status: str
+    method: CorrelationMethod
+    window_days: int
+    days_analyzed: int
+    pairs: List[CorrelationPair] = Field(default_factory=list)
+    significant_findings: List[str] = Field(default_factory=list)
+    strongest: Optional[CorrelationPair] = None
+    insights: List[str] = Field(default_factory=list)
 
 
 class TrendDayPoint(BaseModel):
@@ -217,7 +362,10 @@ class BehavioralAnalyticsOverview(BaseModel):
     window_end: str
     snooze_pattern: SnoozePatternResponse
     wake_up_consistency: WakeConsistencyResponse
+    verification_accuracy: VerificationAccuracyResponse
     sleep_schedule_adherence: SleepAdherenceResponse
+    sleep_patterns: SleepPatternsResponse
+    productivity_correlation: ProductivityCorrelationResponse
     weekly_trends: PeriodTrendsResponse
     monthly_trends: PeriodTrendsResponse
     habit_trends: HabitTrendsResponse

@@ -15,7 +15,144 @@ from sqlalchemy.orm import Session
 from app.models.alarm import AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
 from app.models.profile import UserProfile
+from app.services.challenge_delivery_service import ChallengeDeliveryService
 from app.services.habit_score import calculate_habit_score_for_user
+
+# ── Productivity improvement ────────────────────────────────────────────
+# Improvement is measured on the project's own productivity scores rather
+# than on clean-wake rate alone: cognitive readiness leads, with the morning
+# routine score and its inputs reported beside it so the headline is never the
+# only thing on show.
+
+#: Verified wakes required in each half before the comparison is reported.
+PRODUCTIVITY_MIN_WAKES = 2
+#: Challenge attempts required in each half — readiness is 60% accuracy.
+PRODUCTIVITY_MIN_ATTEMPTS = 3
+#: Relative movement smaller than this is noise, not an improvement.
+PRODUCTIVITY_TOLERANCE_PCT = 5.0
+#: Metric the headline rate is taken from.
+PRODUCTIVITY_PRIMARY_METRIC = "cognitive_readiness_score"
+#: Scores compared across the two halves.
+PRODUCTIVITY_TRACKED_METRICS = (
+    "cognitive_readiness_score",
+    "morning_routine_score",
+    "challenge_accuracy",
+    "avg_wakefulness",
+)
+
+
+def _productivity_snapshot(wakes: list, logs: list) -> dict:
+    """The project's productivity scores over one slice of history.
+
+    Missing inputs yield ``None`` rather than the neutral defaults the
+    whole-window summary uses, so an empty half can never be compared as if it
+    had been measured.
+    """
+    routine = (
+        round(sum(1 for e in wakes if e.snooze_count_at_dismiss == 0) / len(wakes) * 100, 1)
+        if wakes
+        else None
+    )
+    accuracy = (
+        round(sum(1 for l in logs if l.is_correct) / len(logs) * 100, 1)
+        if logs
+        else None
+    )
+    scores = [e.wakefulness_score for e in wakes if e.wakefulness_score is not None]
+    wakefulness = round(sum(scores) / len(scores), 1) if scores else None
+    readiness = (
+        round(accuracy * 0.6 + wakefulness * 0.4, 1)
+        if accuracy is not None and wakefulness is not None
+        else None
+    )
+    return {
+        "verified_wakes": len(wakes),
+        "challenge_attempts": len(logs),
+        "morning_routine_score": routine,
+        "challenge_accuracy": accuracy,
+        "avg_wakefulness": wakefulness,
+        "cognitive_readiness_score": readiness,
+    }
+
+
+def _metric_delta(previous: Optional[float], current: Optional[float]) -> dict:
+    if previous is None or current is None:
+        return {"previous": previous, "current": current, "change": None, "change_pct": None}
+    change = round(current - previous, 1)
+    return {
+        "previous": previous,
+        "current": current,
+        "change": change,
+        # Undefined against a zero baseline; the absolute change still stands.
+        "change_pct": round((change / previous) * 100, 1) if previous else None,
+    }
+
+
+def _productivity_improvement(
+    previous_snapshot: dict,
+    current_snapshot: dict,
+    *,
+    period_days: int,
+    previous_start: datetime,
+    boundary: datetime,
+    current_end: datetime,
+) -> dict:
+    """Period-over-period movement in the real productivity scores."""
+    metrics = {
+        key: _metric_delta(previous_snapshot[key], current_snapshot[key])
+        for key in PRODUCTIVITY_TRACKED_METRICS
+    }
+    primary = metrics[PRODUCTIVITY_PRIMARY_METRIC]
+
+    result = {
+        "period_days": period_days,
+        "current_period_start": boundary.isoformat(),
+        "current_period_end": current_end.isoformat(),
+        "previous_period_start": previous_start.isoformat(),
+        "previous_period_end": boundary.isoformat(),
+        "primary_metric": PRODUCTIVITY_PRIMARY_METRIC,
+        "min_wakes": PRODUCTIVITY_MIN_WAKES,
+        "min_attempts": PRODUCTIVITY_MIN_ATTEMPTS,
+        "previous": previous_snapshot,
+        "current": current_snapshot,
+        "metrics": metrics,
+        "change": None,
+        "improvement_rate": None,
+        "direction": "insufficient_data",
+        "status": "insufficient_data",
+    }
+
+    measurable = all(
+        (
+            snapshot["verified_wakes"] >= PRODUCTIVITY_MIN_WAKES
+            and snapshot["challenge_attempts"] >= PRODUCTIVITY_MIN_ATTEMPTS
+            and snapshot[PRODUCTIVITY_PRIMARY_METRIC] is not None
+        )
+        for snapshot in (previous_snapshot, current_snapshot)
+    )
+    if not measurable:
+        return result
+
+    change = primary["change"]
+    rate = primary["change_pct"]
+    # Fall back to points when the baseline was zero and a ratio is undefined.
+    movement = rate if rate is not None else change
+    if movement > PRODUCTIVITY_TOLERANCE_PCT:
+        direction = "improving"
+    elif movement < -PRODUCTIVITY_TOLERANCE_PCT:
+        direction = "declining"
+    else:
+        direction = "stable"
+
+    result.update(
+        {
+            "change": change,
+            "improvement_rate": rate,
+            "direction": direction,
+            "status": "ok",
+        }
+    )
+    return result
 
 
 def utc_isoformat(dt: Optional[datetime]) -> Optional[str]:
@@ -249,6 +386,12 @@ def compute_challenge_performance(
 
     logs = query.order_by(AlarmChallengeLog.created_at.desc()).all()
 
+    # Served-vs-finished lives in challenge_deliveries, not in the attempt log:
+    # an unanswered challenge never produces an attempt row.
+    completion = ChallengeDeliveryService.compute_completion_stats(
+        db, user_id, days, cutoff=cutoff, window_end=window_end
+    )
+
     if not logs:
         return {
             "days": days,
@@ -257,6 +400,7 @@ def compute_challenge_performance(
             "accuracy": 0.0,
             "avg_response_time": 0.0,
             "total_points_earned": 0,
+            "completion": completion,
             "trend": {
                 "direction": "insufficient_data",
                 "recent_accuracy": 0.0,
@@ -374,6 +518,7 @@ def compute_challenge_performance(
         "accuracy": accuracy,
         "avg_response_time": avg_time,
         "total_points_earned": total_points,
+        "completion": completion,
         "trend": {
             "direction": direction,
             "recent_accuracy": recent_accuracy,
@@ -395,6 +540,7 @@ def compute_productivity_insights(
     *,
     cutoff: Optional[datetime] = None,
     window_end: Optional[datetime] = None,
+    include_correlations: bool = True,
 ) -> dict:
     """Productivity insights derived from wake behavior and challenges."""
     now = window_end or datetime.now(timezone.utc)
@@ -470,6 +616,21 @@ def compute_productivity_insights(
     else:
         goals_list = []
 
+    sleep_patterns = None
+    correlations = None
+    if include_correlations:
+        # Imported here: behavioral analytics imports habit_score, which this
+        # module also feeds, so a top-level import would be circular.
+        from app.services.behavioral_analytics_service import (
+            BehavioralAnalyticsService,
+        )
+
+        sleep_patterns, correlations = (
+            BehavioralAnalyticsService.sleep_and_correlation_snapshot(
+                db, user_id, days, window_end=window_end
+            )
+        )
+
     half = max(1, days // 2)
     mid_cutoff = now - timedelta(days=half)
     mid_naive = mid_cutoff.replace(tzinfo=None) if mid_cutoff.tzinfo else mid_cutoff
@@ -512,6 +673,23 @@ def compute_productivity_insights(
     else:
         trend_direction = "stable"
 
+    # Same split applied to the attempt log, so both halves are scored on the
+    # rows already loaded above — no extra queries.
+    recent_logs = [
+        l for l in challenge_logs if l.created_at and l.created_at >= mid_naive
+    ]
+    previous_logs = [
+        l for l in challenge_logs if l.created_at and l.created_at < mid_naive
+    ]
+    productivity_improvement = _productivity_improvement(
+        _productivity_snapshot(previous_wakes, previous_logs),
+        _productivity_snapshot(recent_wakes, recent_logs),
+        period_days=half,
+        previous_start=cutoff,
+        boundary=mid_cutoff,
+        current_end=now,
+    )
+
     dismiss_times = [
         e.time_to_dismiss_seconds for e in wake_events
         if e.time_to_dismiss_seconds is not None
@@ -537,6 +715,7 @@ def compute_productivity_insights(
         "challenge_accuracy": challenge_accuracy,
         "avg_wakefulness": avg_wakefulness,
         "avg_time_to_productive_seconds": avg_time_to_productive,
+        "productivity_improvement": productivity_improvement,
         "trend": {
             "direction": trend_direction,
             "recent_clean_wake_rate": recent_rate,
@@ -545,4 +724,6 @@ def compute_productivity_insights(
         },
         "goals": goals_list,
         "goals_count": len(goals_list),
+        "sleep_patterns": sleep_patterns,
+        "correlations": correlations,
     }

@@ -1,6 +1,7 @@
 /**
- * Completes Google OAuth by storing JWTs from the backend redirect
- * and loading the current user into the auth store.
+ * Completes Google OAuth. The backend has already set HttpOnly session
+ * cookies, so no tokens travel through the URL — this page only loads the
+ * current user into the auth store.
  */
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -19,19 +20,13 @@ export default function OAuthCallback() {
     let cancelled = false;
 
     const finish = async () => {
-      const accessToken = searchParams.get('access_token');
-      const refreshToken = searchParams.get('refresh_token');
-
-      if (!accessToken || !refreshToken) {
+      if (searchParams.get('error')) {
         toast.error('Google sign-in failed. Please try again.');
         navigate('/login', { replace: true });
         return;
       }
 
-      const result = await completeOAuthLogin({
-        access_token: accessToken,
-        refresh_token: refreshToken,
-      });
+      const result = await completeOAuthLogin();
 
       if (cancelled) return;
 

@@ -5,6 +5,7 @@ Creates and configures the main application instance with CORS middleware,
 API routing, and database initialization on startup.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -13,19 +14,35 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
+from app.core.logging_config import configure_logging, logging_status
+from app.core.request_metrics import RequestTimingMiddleware, configure_registry
+from app.core.challenge_metrics import (
+    configure_registry as configure_challenge_registry,
+)
+from app.middleware.request_context import RequestContextMiddleware
+from app.schemas.common import HealthResponse, RootResponse
 from app.api.v1.router import api_router
 from app.db.base import Base
 from app.db.session import engine
 
+# Installed before anything else so import-time and startup records are
+# captured. Without it the root logger has no handler and every logger.info()
+# call in the codebase is discarded.
+configure_logging()
+logger = logging.getLogger(__name__)
+
 # Import all models so they are registered with Base.metadata
 from app.models import user, profile, alarm  # noqa: F401
 from app.models import challenge_session  # noqa: F401
+from app.models import challenge_delivery  # noqa: F401
+from app.models import recommendation_feedback  # noqa: F401
 from app.models import alarm_wake_event  # noqa: F401
 from app.models import alarm_snooze_event  # noqa: F401
 from app.models import analytics_event  # noqa: F401
 from app.models import notification  # noqa: F401
 from app.models import system_settings  # noqa: F401
 from app.models import coach_assignment  # noqa: F401
+from app.models import revoked_token  # noqa: F401
 
 
 def _ensure_sqlite_columns() -> None:
@@ -33,6 +50,7 @@ def _ensure_sqlite_columns() -> None:
     if not str(settings.DATABASE_URL).startswith("sqlite"):
         return
     statements = [
+        "ALTER TABLE users ADD COLUMN tokens_valid_after DATETIME",
         "ALTER TABLE alarm_challenge_logs ADD COLUMN difficulty VARCHAR(50)",
         "ALTER TABLE alarm_challenge_logs ADD COLUMN challenge_prompt TEXT",
         "ALTER TABLE alarm_challenge_logs ADD COLUMN is_correct BOOLEAN DEFAULT 0",
@@ -86,6 +104,11 @@ def _ensure_sqlite_columns() -> None:
         "VARCHAR(32) DEFAULT 'default'",
         "ALTER TABLE notification_preferences ADD COLUMN notification_frequency "
         "VARCHAR(32) DEFAULT 'all'",
+        # Challenge practice reminders + weekly progress recaps
+        "ALTER TABLE notification_preferences ADD COLUMN "
+        "challenge_reminders_enabled BOOLEAN NOT NULL DEFAULT 1",
+        "ALTER TABLE notification_preferences ADD COLUMN "
+        "progress_updates_enabled BOOLEAN NOT NULL DEFAULT 1",
         # Notification delivery tracking / retry bookkeeping
         "ALTER TABLE notifications ADD COLUMN delivered_at DATETIME",
         "ALTER TABLE notifications ADD COLUMN push_attempts INTEGER DEFAULT 0",
@@ -107,6 +130,8 @@ def _ensure_sqlite_columns() -> None:
         "ALTER TABLE alarms ADD COLUMN last_notified_trigger_at DATETIME",
         "CREATE INDEX IF NOT EXISTS ix_alarms_active_next_trigger "
         "ON alarms (is_active, next_trigger_at)",
+        # One-time alarms keep their calendar date across edits / re-enables
+        "ALTER TABLE alarms ADD COLUMN one_time_date DATE",
     ]
     with engine.begin() as conn:
         for sql in statements:
@@ -153,10 +178,17 @@ def _repair_attempt_logs_on_startup() -> None:
         result = AttemptLogService.repair_logs(db, commit=True)
         repaired = result.get("repaired_rows", 0)
         if repaired:
-            print(f"✅ Attempt logs repaired: {repaired} row(s)")
+            logger.info(
+                "Attempt logs repaired",
+                extra={"event": "startup.attempt_log_repair", "rows": repaired},
+            )
     except Exception as e:
         db.rollback()
-        print(f"⚠️ Attempt-log repair skipped: {e}")
+        logger.warning(
+            "Attempt-log repair skipped: %s",
+            e,
+            extra={"event": "startup.attempt_log_repair_failed"},
+        )
     finally:
         db.close()
 
@@ -215,6 +247,15 @@ def _run_startup() -> None:
     _ensure_sqlite_columns()
     _repair_attempt_logs_on_startup()
 
+    logger.info(
+        "Application starting",
+        extra={
+            "event": "startup.begin",
+            "project": settings.PROJECT_NAME,
+            **logging_status(),
+        },
+    )
+
     # Warm system-settings / maintenance cache
     try:
         from app.db.session import SessionLocal
@@ -226,7 +267,11 @@ def _run_startup() -> None:
         finally:
             _settings_db.close()
     except Exception as e:
-        print(f"⚠️ System settings warm-up skipped: {e}")
+        logger.warning(
+            "System settings warm-up skipped: %s",
+            e,
+            extra={"event": "startup.system_settings_failed"},
+        )
 
     # Validate push credentials up front so a broken Firebase setup is
     # visible at boot instead of at the first reminder.
@@ -234,14 +279,21 @@ def _run_startup() -> None:
         from app.services.fcm_service import FCMService
 
         if FCMService.initialize_at_startup():
-            print("✅ Firebase Cloud Messaging ready")
+            logger.info(
+                "Firebase Cloud Messaging ready", extra={"event": "startup.fcm_ready"}
+            )
         else:
-            print(
-                "⚠️ Push notifications unavailable: "
-                f"{FCMService.unavailable_detail()}"
+            logger.warning(
+                "Push notifications unavailable: %s",
+                FCMService.unavailable_detail(),
+                extra={"event": "startup.fcm_unavailable"},
             )
     except Exception as e:
-        print(f"⚠️ Firebase Cloud Messaging check failed: {e}")
+        logger.warning(
+            "Firebase Cloud Messaging check failed: %s",
+            e,
+            extra={"event": "startup.fcm_failed"},
+        )
 
     # Start the APScheduler notification scheduler
     try:
@@ -250,7 +302,11 @@ def _run_startup() -> None:
         )
         start_notification_scheduler()
     except Exception as e:
-        print(f"⚠️ Notification scheduler startup skipped: {e}")
+        logger.warning(
+            "Notification scheduler startup skipped: %s",
+            e,
+            extra={"event": "startup.scheduler_failed"},
+        )
 
     # Seed an explicitly configured first-run administrator.
     if settings.INITIAL_ADMIN_EMAIL and settings.INITIAL_ADMIN_PASSWORD:
@@ -289,10 +345,20 @@ def _run_startup() -> None:
                 )
                 db.add(admin_profile)
                 db.commit()
-                print(f"Admin user seeded: {settings.INITIAL_ADMIN_EMAIL}")
+                logger.info(
+                    "Admin user seeded",
+                    extra={
+                        "event": "startup.admin_seeded",
+                        "email": settings.INITIAL_ADMIN_EMAIL,
+                    },
+                )
         except Exception as e:
             db.rollback()
-            print(f"Admin seeding skipped: {e}")
+            logger.warning(
+                "Admin seeding skipped: %s",
+                e,
+                extra={"event": "startup.admin_seed_failed"},
+            )
         finally:
             db.close()
 
@@ -318,6 +384,10 @@ async def lifespan(_app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    # The OpenAPI schema maps every route, parameter and model. That is a
+    # reconnaissance aid, so it is not served in production unless explicitly
+    # re-enabled; the routes are never registered rather than merely blocked.
+    docs_enabled = settings.api_docs_enabled
     application = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
@@ -326,8 +396,9 @@ def create_app() -> FastAPI:
             "develop consistent wake-up habits through personalized cognitive "
             "challenges including puzzles, riddles, math, and logic problems."
         ),
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
         lifespan=lifespan,
     )
 
@@ -343,21 +414,45 @@ def create_app() -> FastAPI:
 
     application.add_middleware(MaintenanceModeMiddleware)
 
+    # Registered last so it is the outermost layer and therefore times the
+    # whole stack, CORS and maintenance handling included.
+    configure_registry(settings.REQUEST_METRICS_SAMPLE_SIZE)
+    application.add_middleware(
+        RequestTimingMiddleware, enabled=settings.REQUEST_METRICS_ENABLED
+    )
+    configure_challenge_registry(settings.CHALLENGE_METRICS_SAMPLE_SIZE)
+
+    # Outermost of all: the correlation id must be bound before any other
+    # middleware can log, and the access line must observe the true total.
+    application.add_middleware(
+        RequestContextMiddleware,
+        header_name=settings.REQUEST_ID_HEADER,
+        access_log=settings.LOG_ACCESS_ENABLED,
+    )
+
     # Include API v1 routes
     application.include_router(api_router)
 
-    @application.get("/", tags=["Root"])
+    @application.get(
+        "/",
+        tags=["Root"],
+        response_model=RootResponse,
+        # The doc links are absent in production, not null.
+        response_model_exclude_none=True,
+    )
     def root():
         """Root endpoint with API information."""
-        return {
+        info = {
             "name": settings.PROJECT_NAME,
             "version": settings.VERSION,
             "description": "Intelligent Cognitive Alarm Platform API",
-            "docs": "/docs",
-            "redoc": "/redoc",
         }
+        if docs_enabled:
+            info["docs"] = "/docs"
+            info["redoc"] = "/redoc"
+        return info
 
-    @application.get("/health", tags=["Health"])
+    @application.get("/health", tags=["Health"], response_model=HealthResponse)
     def health_check():
         """Health check endpoint."""
         return {"status": "healthy", "version": settings.VERSION}

@@ -1,0 +1,18 @@
+# Bandit static analysis configuration.
+#
+# Scanned: backend/app (the application). Tests and the performance harness are
+# excluded because they legitimately contain hardcoded credentials, assertions
+# and deliberately hostile payloads that are not production code paths.
+exclude_dirs:
+  - "/tests"
+  - "/venv"
+  - "/perf"
+  - "/alembic/versions"
+  - "/__pycache__"
+
+# B101 assert_used            — asserts are not used for control flow in app/
+# B104 hardcoded_bind_all     — the bind address is supplied by the container
+#                               runtime, not by application code
+skips:
+  - B101
+  - B104

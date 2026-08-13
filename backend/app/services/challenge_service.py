@@ -9,6 +9,9 @@ Active challenge sessions are stored server-side so verification does not
 trust a client-supplied expected answer or wall-clock measurement.
 """
 
+import ast
+import logging
+import operator
 import random
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, TYPE_CHECKING
@@ -18,6 +21,9 @@ from app.models.alarm import ChallengeType
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Difficulty level ordering (lowest → highest) ──────────────────────
@@ -68,6 +74,14 @@ RECENT_TYPE_WINDOW = 7
 # Max attempts when generation fails or yields a duplicate prompt
 MAX_GENERATION_ATTEMPTS = 8
 
+# How many of those attempts may call the AI provider before the run falls
+# back to procedural generation (bounds worst-case latency for a ringing alarm)
+AI_GENERATION_ATTEMPTS = 2
+
+# ``source`` values attached to every generated challenge
+SOURCE_AI = "ai"
+SOURCE_PROCEDURAL = "procedural"
+
 
 def _clamp_difficulty(level: str) -> str:
     """Ensure the difficulty string is a valid level, defaulting to medium."""
@@ -81,6 +95,43 @@ def _difficulty_index(level: str) -> int:
         return DIFFICULTY_LEVELS.index(_clamp_difficulty(level))
     except ValueError:
         return 2  # medium
+
+
+#: The only operators an arithmetic prompt may contain.
+_ARITHMETIC_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def solve_arithmetic(expression: str) -> int:
+    """Evaluate a generated arithmetic prompt without ``eval``.
+
+    The prompts are assembled from ``random.randint`` values and a fixed
+    operator set, so ``eval`` was not exploitable — but it left a live code
+    execution primitive one refactor away from a user-supplied string. Walking
+    a parsed AST and rejecting every node except integer literals and the four
+    arithmetic operators removes that primitive for good, with identical
+    results.
+    """
+
+    def evaluate(node: ast.AST) -> int:
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in _ARITHMETIC_OPERATORS:
+            return _ARITHMETIC_OPERATORS[type(node.op)](
+                evaluate(node.left), evaluate(node.right)
+            )
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _ARITHMETIC_OPERATORS:
+            return _ARITHMETIC_OPERATORS[type(node.op)](evaluate(node.operand))
+        raise ValueError(f"unsupported expression element: {type(node).__name__}")
+
+    return evaluate(ast.parse(expression, mode="eval"))
 
 
 def _preference_value(profile: Any) -> Optional[str]:
@@ -378,6 +429,9 @@ class ChallengeService:
         requested: ChallengeType,
         preferred_types: Optional[list] = None,
         recent_logs: Optional[list] = None,
+        *,
+        novelty_boost: float = 0.0,
+        underused_types: Optional[list] = None,
     ) -> ChallengeType:
         """
         Resolve which concrete challenge type to serve.
@@ -386,6 +440,8 @@ class ChallengeService:
         - RANDOM picks fairly from the preferred pool (or all supported types),
           with a light penalty for types shown in the most recent attempts so
           the same few categories are not favored repeatedly.
+        - ``novelty_boost`` (engagement optimization) additionally up-weights
+          ``underused_types``; at 0.0 selection is identical to before.
         """
         requested = ChallengeService._normalize_type(requested)
         if requested != ChallengeType.RANDOM:
@@ -405,13 +461,29 @@ class ChallengeService:
                 # More recent appearances count more toward the penalty
                 recent_hits[ct] += RECENT_TYPE_WINDOW - position
 
+        boost = max(0.0, min(1.0, float(novelty_boost or 0.0)))
+        starved = {str(name).strip().lower() for name in (underused_types or [])}
+
         weights = []
         for ct in pool:
             # Base weight 1.0 for every type → fair coverage of the full pool
             penalty = recent_hits.get(ct.value, 0)
-            weights.append(max(0.35, 1.0 - (0.12 * penalty)))
+            weight = max(0.35, 1.0 - (0.12 * penalty))
+            if boost and ct.value in starved:
+                weight *= 1.0 + (boost * 2.0)
+            weights.append(weight)
 
         return random.choices(pool, weights=weights, k=1)[0]
+
+    @staticmethod
+    def apply_engagement_bias(base_difficulty: str, bias: int) -> str:
+        """Shift difficulty by a bounded engagement bias (-1, 0, or +1)."""
+        step = max(-1, min(1, int(bias or 0)))
+        if step == 0:
+            return _clamp_difficulty(base_difficulty)
+        idx = _difficulty_index(base_difficulty) + step
+        idx = max(0, min(len(DIFFICULTY_LEVELS) - 1, idx))
+        return DIFFICULTY_LEVELS[idx]
 
     @staticmethod
     def resolve_baseline_difficulty(
@@ -571,7 +643,27 @@ class ChallengeService:
         }
 
     @staticmethod
-    def generate_challenge(
+    def generate_challenge(*args, **kwargs) -> Dict[str, Any]:
+        """Timed entry point for :meth:`_generate_challenge`.
+
+        Generation sits on the critical path of a ringing alarm, so every call
+        is measured and filed by resolved type / difficulty / source. See
+        ``_generate_challenge`` for the arguments and the returned payload.
+        """
+        from app.core.challenge_metrics import measure_generation
+        from app.core.config import settings
+
+        with measure_generation(
+            enabled=bool(getattr(settings, "CHALLENGE_METRICS_ENABLED", True))
+        ) as timer:
+            result = ChallengeService._generate_challenge(*args, **kwargs)
+            timer.describe(
+                result.get("type"), result.get("difficulty"), result.get("source")
+            )
+            return result
+
+    @staticmethod
+    def _generate_challenge(
         challenge_type: ChallengeType,
         difficulty: str = "medium",
         current_hour: Optional[int] = None,
@@ -583,6 +675,10 @@ class ChallengeService:
         failure_streak: Optional[int] = None,
         last_adapted_success_streak: int = 0,
         last_adapted_failure_streak: int = 0,
+        allow_ai: bool = True,
+        engagement_bias: int = 0,
+        novelty_boost: float = 0.0,
+        underused_types: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Generate a cognitive puzzle personalized by preferences, performance,
@@ -604,10 +700,19 @@ class ChallengeService:
             failure_streak: Stored consecutive failure counter (preferred).
             last_adapted_success_streak: Watermark for the last success adapt.
             last_adapted_failure_streak: Watermark for the last failure adapt.
+            allow_ai: When True (and an AI provider is configured), try AI
+                generation first and fall back to procedural generation.
+            engagement_bias: Bounded -1/0/+1 nudge from the engagement engine,
+                applied after streak adaptation.
+            novelty_boost: 0.0-1.0 up-weighting of ``underused_types`` during
+                RANDOM type selection.
+            underused_types: Challenge types the engagement engine wants
+                served more often.
 
         Returns:
             A dictionary with the challenge prompt, type, correct answer,
-            the effective difficulty applied, and a time_limit_seconds hint.
+            the effective difficulty applied, a time_limit_seconds hint, and a
+            ``source`` of ``"ai"`` or ``"procedural"``.
         """
         # 2) Strict consecutive-streak adaptive difficulty
         adaptation = {"adjustment": 0, "reason": "Adaptive difficulty disabled."}
@@ -622,6 +727,15 @@ class ChallengeService:
                 last_adapted_failure_streak=last_adapted_failure_streak,
             )
             working_difficulty = adaptation["difficulty"]
+
+        # 2b) Engagement optimization — bounded ±1 nudge from the engagement
+        # engine. Runs after streak adaptation so it modulates, not replaces,
+        # the adaptive baseline; callers that already applied it pass 0.
+        applied_bias = max(-1, min(1, int(engagement_bias or 0)))
+        if applied_bias:
+            working_difficulty = ChallengeService.apply_engagement_bias(
+                working_difficulty, applied_bias
+            )
 
         # 3) Time-of-day softening
         effective = _adjust_for_time(working_difficulty, current_hour)
@@ -655,25 +769,46 @@ class ChallengeService:
             try:
                 # 1) Fair type selection (RANDOM → all preferred / supported types)
                 resolved_type = ChallengeService.select_challenge_type(
-                    challenge_type, preferred_types, recent_logs
+                    challenge_type,
+                    preferred_types,
+                    recent_logs,
+                    novelty_boost=novelty_boost,
+                    underused_types=underused_types,
                 )
 
-                generator = generators.get(resolved_type)
-                if generator in (
-                    ChallengeService._generate_logic,
-                    ChallengeService._generate_riddle,
-                    ChallengeService._generate_quiz,
-                    ChallengeService._generate_word_game,
-                ):
-                    result = generator(
-                        effective, exclude_prompts=recent_prompt_keys
+                # 4) AI generation first when a provider is configured
+                result = None
+                source = SOURCE_PROCEDURAL
+                generator_name = "procedural"
+                if allow_ai and attempt < AI_GENERATION_ATTEMPTS:
+                    ai_result = ChallengeService._try_ai_challenge(
+                        resolved_type, effective, recent_prompt_keys
                     )
-                elif generator:
-                    result = generator(effective)
-                else:
-                    result = ChallengeService._generate_ai_challenge(
-                        resolved_type, effective
-                    )
+                    if ai_result is not None:
+                        result, source = ai_result, SOURCE_AI
+                        generator_name = str(
+                            ai_result.pop("_generator", "ai")
+                        )
+
+                if result is None:
+                    generator = generators.get(resolved_type)
+                    if generator in (
+                        ChallengeService._generate_logic,
+                        ChallengeService._generate_riddle,
+                        ChallengeService._generate_quiz,
+                        ChallengeService._generate_word_game,
+                    ):
+                        result = generator(
+                            effective, exclude_prompts=recent_prompt_keys
+                        )
+                    elif generator:
+                        result = generator(effective)
+                    else:
+                        result = ChallengeService._generate_ai_challenge(
+                            resolved_type, effective
+                        )
+                        source = str(result.pop("source", SOURCE_PROCEDURAL))
+                        generator_name = str(result.pop("_generator", generator_name))
 
                 result = ChallengeService._validate_generated_challenge(result)
 
@@ -694,6 +829,10 @@ class ChallengeService:
                 result["requested_type"] = challenge_type.value
                 result["selection_reason"] = selection_reason
                 result["adaptive_difficulty"] = adaptation
+                result["engagement_bias"] = applied_bias
+                result["source"] = source
+                result["ai_generated"] = source == SOURCE_AI
+                result["generator"] = generator_name
                 return result
             except Exception as exc:  # noqa: BLE001 — regenerate gracefully
                 last_error = exc
@@ -718,6 +857,10 @@ class ChallengeService:
         result["requested_type"] = challenge_type.value
         result["selection_reason"] = selection_reason
         result["adaptive_difficulty"] = adaptation
+        result["engagement_bias"] = applied_bias
+        result["source"] = SOURCE_PROCEDURAL
+        result["ai_generated"] = False
+        result["generator"] = "procedural"
         if last_error is not None:
             result["generation_note"] = (
                 f"Regenerated after failure: {type(last_error).__name__}"
@@ -725,10 +868,16 @@ class ChallengeService:
         return result
 
     @staticmethod
-    def analyze_completion(logs: list) -> Dict[str, Any]:
+    def analyze_completion(
+        logs: list, completion: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Produce deep challenge-completion analysis and actionable recommendations.
+
+        ``completion`` carries served-vs-finished counts from
+        ``ChallengeDeliveryService``. It cannot be derived from ``logs``: a
+        challenge the user never answered writes no attempt row.
         """
-        Produce deep challenge-completion analysis and actionable recommendations.
-        """
+        completion_rate = (completion or {}).get("completion_rate")
         if not logs:
             return {
                 "summary": {
@@ -737,7 +886,8 @@ class ChallengeService:
                     "accuracy_percentage": 0.0,
                     "avg_response_time": 0.0,
                     "total_points_earned": 0,
-                    "completion_rate": 0.0,
+                    "completion_rate": completion_rate if completion_rate is not None else 0.0,
+                    "completion": completion,
                     "trend": "insufficient_data",
                     "trend_label": "Not enough data yet",
                 },
@@ -768,7 +918,8 @@ class ChallengeService:
             sum(l.time_taken_seconds or 0 for l in logs) / total, 1
         )
         total_points = sum(l.points_earned or 0 for l in logs)
-        completion_rate = accuracy  # correct attempts = successful completions
+        if completion_rate is None:
+            completion_rate = 0.0
 
         # ── Per-type breakdown ──
         by_type: Dict[str, Dict[str, Any]] = {}
@@ -961,6 +1112,7 @@ class ChallengeService:
                 "avg_response_time": avg_time,
                 "total_points_earned": total_points,
                 "completion_rate": completion_rate,
+                "completion": completion,
                 "trend": trend,
                 "trend_label": trend_label,
             },
@@ -990,78 +1142,91 @@ class ChallengeService:
     # ── AI-powered generation ────────────────────────────────────────
 
     @staticmethod
+    def _try_ai_challenge(
+        challenge_type: ChallengeType,
+        difficulty: str,
+        exclude_prompts: Optional[set] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Ask the configured AI provider for a challenge.
+
+        Returns ``None`` (never raises) when no provider is configured, the
+        type is not AI-eligible, or the model produced unusable content — the
+        caller then uses the deterministic procedural generators.
+        """
+        from app.services.ai_challenge_provider import (
+            AI_ELIGIBLE_TYPES,
+            AIProviderError,
+            get_challenge_provider,
+            note_provider_failure,
+        )
+
+        resolved = ChallengeService._normalize_type(challenge_type)
+        if resolved not in AI_ELIGIBLE_TYPES:
+            return None
+
+        provider = get_challenge_provider()
+        if provider is None:
+            return None
+
+        try:
+            raw = provider.generate(
+                resolved, difficulty, exclude_prompts=exclude_prompts
+            )
+        except AIProviderError as exc:
+            note_provider_failure()
+            logger.warning(
+                "AI challenge generation unavailable (%s); using procedural "
+                "fallback: %s",
+                provider.name,
+                exc,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 — never break the alarm flow
+            note_provider_failure()
+            logger.warning(
+                "AI challenge provider %s raised unexpectedly: %s",
+                provider.name,
+                exc,
+            )
+            return None
+
+        try:
+            # Shuffle + enforce the same single-answer rules as curated banks.
+            finalized = ChallengeService._finalize_mcq(
+                resolved.value.upper(),
+                str(raw.get("prompt", "")),
+                str(raw.get("answer", "")),
+                list(raw.get("options") or []),
+            )
+            validated = ChallengeService._validate_generated_challenge(finalized)
+        except (ValueError, TypeError) as exc:
+            logger.info(
+                "Discarded AI challenge from %s (failed validation): %s",
+                provider.name,
+                exc,
+            )
+            return None
+
+        validated["_generator"] = provider.model_name or provider.name
+        return validated
+
+    @staticmethod
     def _generate_ai_challenge(
         challenge_type: ChallengeType, difficulty: str = "medium"
     ) -> Dict[str, Any]:
-        """Generate a challenge via Google Gemini AI, with fallback."""
-        from app.core.config import settings
-        import json
+        """Generate a challenge via the AI provider, falling back procedurally.
 
-        if not settings.GEMINI_API_KEY:
-            return ChallengeService._fallback_challenge(challenge_type, difficulty)
+        The returned payload carries ``source`` so callers can tell an
+        AI-generated puzzle apart from the deterministic fallback.
+        """
+        ai_result = ChallengeService._try_ai_challenge(challenge_type, difficulty)
+        if ai_result is not None:
+            ai_result["source"] = SOURCE_AI
+            return ai_result
 
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-
-            model = genai.GenerativeModel("gemini-1.5-flash")
-
-            prompt = f"""
-            Generate a completely original cognitive puzzle of type: {challenge_type.value}.
-            Difficulty level: {difficulty}.
-            {"Make it very simple and straightforward." if difficulty in ("beginner", "easy") else ""}
-            {"Make it moderately challenging." if difficulty == "medium" else ""}
-            {"Make it quite difficult and require deeper thinking." if difficulty == "hard" else ""}
-            {"Make it extremely challenging, suitable for experts." if difficulty == "expert" else ""}
-            The puzzle must be solvable but challenging enough to wake someone up.
-
-            Critical quality rules:
-            - Exactly ONE objectively correct answer; no subjective or multi-answer riddles.
-            - Wording must be unambiguous; the correct option must match the question exactly.
-            - The other 3 options must be plausible distractors that are definitively incorrect.
-            - Do not include duplicate, synonymous, partially correct, or conflicting options.
-            - Keep the prompt short (under 200 characters) and suitable for a general audience.
-            - No offensive, violent, sexual, discriminatory, or inappropriate content.
-            - All facts, numbers, dates, units, and calculations must be correct.
-
-            You must return a raw JSON object with NO markdown formatting, NO backticks, and NO extra text.
-            The JSON object must have exactly these keys:
-            - "prompt": The question or puzzle text.
-            - "answer": The correct answer (string).
-            - "options": A list of exactly 4 strings. One must be the exact correct answer, and 3 must be plausible but incorrect.
-
-            Example format:
-            {{"prompt": "What has keys but no locks?", "answer": "Piano", "options": ["Piano", "Door", "Map", "Computer"]}}
-            """
-
-            response = model.generate_content(prompt)
-            text = response.text.strip()
-
-            # Clean up markdown fences
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-
-            data = json.loads(text.strip())
-
-            if "prompt" not in data or "answer" not in data or "options" not in data:
-                raise ValueError("Missing required keys in AI response")
-
-            finalized = ChallengeService._finalize_mcq(
-                challenge_type.value.upper(),
-                str(data["prompt"]),
-                str(data["answer"]),
-                list(data["options"]),
-            )
-            # Discard invalid AI content before presenting to the user
-            return ChallengeService._validate_generated_challenge(finalized)
-
-        except Exception as e:
-            print(f"⚠️ AI Generation Failed: {e}. Falling back to procedural puzzle.")
-            return ChallengeService._fallback_challenge(challenge_type, difficulty)
+        fallback = ChallengeService._fallback_challenge(challenge_type, difficulty)
+        fallback["source"] = SOURCE_PROCEDURAL
+        return fallback
 
     @staticmethod
     def _fallback_challenge(
@@ -1104,7 +1269,7 @@ class ChallengeService:
             if op == "-" and b > a:
                 a, b = b, a
             equation = f"{a} {op} {b}"
-            answer = str(eval(equation))
+            answer = str(solve_arithmetic(equation))
 
         elif difficulty == "easy":
             # Two-digit ± or single-digit ×
@@ -1119,7 +1284,7 @@ class ChallengeService:
             if op == "-" and b > a:
                 a, b = b, a
             equation = f"{a} {op} {b}"
-            answer = str(eval(equation))
+            answer = str(solve_arithmetic(equation))
 
         elif difficulty == "medium":
             # 3-operand arithmetic
@@ -1130,7 +1295,7 @@ class ChallengeService:
             op1 = random.choice(ops)
             op2 = random.choice(ops)
             equation = f"{a} {op1} {b} {op2} {c}"
-            answer = str(eval(equation))
+            answer = str(solve_arithmetic(equation))
             if int(answer) < 0:
                 return ChallengeService._generate_math(difficulty)
 

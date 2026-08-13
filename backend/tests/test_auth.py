@@ -310,8 +310,12 @@ class TestGoogleOAuth:
         assert location.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
         assert "client_id=test-client-id" in location
         assert "openid" in location and "email" in location and "profile" in location
+        assert "state=" in location
+        assert settings.OAUTH_STATE_COOKIE_NAME in response.cookies
 
-    def test_google_oauth_callback_creates_user(self, client, db_session, monkeypatch):
+    def test_google_oauth_callback_creates_user(
+        self, client, db_session, monkeypatch, start_google_oauth
+    ):
         """Successful Google callback creates a verified user and redirects with JWTs."""
         from unittest.mock import MagicMock, patch
 
@@ -340,18 +344,24 @@ class TestGoogleOAuth:
         mock_client.post.return_value = token_resp
         mock_client.get.return_value = userinfo_resp
 
+        state = start_google_oauth()
+
         with patch("app.api.v1.endpoints.auth.httpx.Client", return_value=mock_client):
             response = client.get(
                 "/api/v1/auth/oauth/google/callback",
-                params={"code": "auth-code"},
+                params={"code": "auth-code", "state": state},
                 follow_redirects=False,
             )
 
         assert response.status_code == 302
         location = response.headers["location"]
         assert location.startswith("http://localhost:3000/oauth/callback?")
-        assert "access_token=" in location
-        assert "refresh_token=" in location
+        # Tokens must never travel in the redirect URL — they are set as
+        # HttpOnly cookies instead.
+        assert "access_token=" not in location
+        assert "refresh_token=" not in location
+        assert settings.ACCESS_COOKIE_NAME in response.cookies
+        assert settings.REFRESH_COOKIE_NAME in response.cookies
 
         user = (
             db_session.query(User)
@@ -366,7 +376,7 @@ class TestGoogleOAuth:
         assert user.profile is not None
 
     def test_google_oauth_callback_links_existing_email(
-        self, client, db_session, test_user, monkeypatch
+        self, client, db_session, test_user, monkeypatch, start_google_oauth
     ):
         """Existing email/password accounts are linked when signing in with Google."""
         from unittest.mock import MagicMock, patch
@@ -395,10 +405,12 @@ class TestGoogleOAuth:
         mock_client.post.return_value = token_resp
         mock_client.get.return_value = userinfo_resp
 
+        state = start_google_oauth()
+
         with patch("app.api.v1.endpoints.auth.httpx.Client", return_value=mock_client):
             response = client.get(
                 "/api/v1/auth/oauth/google/callback",
-                params={"code": "auth-code"},
+                params={"code": "auth-code", "state": state},
                 follow_redirects=False,
             )
 

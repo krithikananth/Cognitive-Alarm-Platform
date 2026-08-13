@@ -250,6 +250,18 @@ const useActiveAlarmStore = create((set, get) => ({
         `${alarmId}:challenge_ok:${challengeStep}:${attemptNonce}`
       );
 
+      // Verification can succeed while the dismissal itself does not land.
+      // The token from this session is the only way to close the cycle
+      // without making the user solve another challenge.
+      if (!data.is_dismissed && data.wake_confirmed && data.verification_token) {
+        try {
+          await alarmAPI.dismiss(alarmId, {
+            verification_token: data.verification_token,
+          });
+          data.is_dismissed = true;
+        } catch (e) { /* fall through to the normal progress path */ }
+      }
+
       if (data.is_dismissed) {
         get()._stopTimer();
         const wakePayload = {

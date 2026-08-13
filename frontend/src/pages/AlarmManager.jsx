@@ -7,12 +7,12 @@ import { useForm } from 'react-hook-form';
 import {
   HiOutlineClock, HiOutlinePlus, HiOutlineTrash,
   HiOutlinePencilSquare, HiOutlineXMark, HiOutlineBell,
-  HiOutlinePuzzlePiece, HiOutlineCalendarDays,
+  HiOutlinePuzzlePiece, HiOutlineCalendarDays, HiOutlineClipboardDocumentList,
 } from 'react-icons/hi2';
 import toast from 'react-hot-toast';
 import useAlarmStore from '../store/alarmStore';
 import useActiveAlarmStore from '../store/activeAlarmStore';
-import { userAPI } from '../services/api';
+import { alarmAPI, userAPI, readErrorDetail } from '../services/api';
 
 const ALARM_TYPES = [
   { value: 'daily', label: 'Daily', desc: 'Every day' },
@@ -43,6 +43,15 @@ const DIFFICULTY_LEVELS = [
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+// Weekdays each recurrence pattern may ring on — mirrors `_allowed_weekdays`
+// on the backend. One-time alarms fire on a date, so they have no day picker.
+const BASE_DAYS_BY_TYPE = {
+  daily: [0, 1, 2, 3, 4, 5, 6],
+  weekday: [0, 1, 2, 3, 4],
+  weekend: [5, 6],
+  smart_adaptive: [0, 1, 2, 3, 4, 5, 6],
+};
+
 const parseTimeTo12Hour = (value) => {
   const [hours = 7, minutes = 0] = (value || '07:00').split(':').map(Number);
   const normalizedHours = ((hours % 24) + 24) % 24;
@@ -71,6 +80,7 @@ export default function AlarmManager() {
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [defaultDifficulty, setDefaultDifficulty] = useState('medium');
+  const [historyAlarm, setHistoryAlarm] = useState(null);
 
   useEffect(() => {
     fetchAlarms();
@@ -195,6 +205,9 @@ export default function AlarmManager() {
                           {alarm.challenge_difficulty}
                         </span>
                       </div>
+                      {alarm.description && (
+                        <p className="text-xs text-slate-400 mt-1 max-w-xs">{alarm.description}</p>
+                      )}
                     </div>
                   </div>
 
@@ -213,11 +226,10 @@ export default function AlarmManager() {
                     {DAYS.map((day, i) => (
                       <span
                         key={i}
-                        className={`w-8 h-8 rounded-lg flex items-center justify-center text-[10px] font-medium ${
-                          alarm.days_of_week?.includes(i)
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center text-[10px] font-medium ${alarm.days_of_week?.includes(i)
                             ? 'bg-primary-500/20 text-primary-300 border border-primary-500/30'
                             : 'bg-surface-800/50 text-slate-600'
-                        }`}
+                          }`}
                       >
                         {day}
                       </span>
@@ -226,7 +238,7 @@ export default function AlarmManager() {
                 )}
 
                 {/* Details */}
-                <div className="flex items-center gap-4 mt-3 text-xs text-slate-400">
+                <div className="flex items-center flex-wrap gap-4 mt-3 text-xs text-slate-400">
                   <span className="flex items-center gap-1">
                     <HiOutlineBell className="w-3.5 h-3.5" />
                     {alarm.snooze_limit === 0
@@ -238,6 +250,14 @@ export default function AlarmManager() {
                     {alarm.challenge_type || 'Any'}
                     {alarm.challenge_count > 1 ? ` ×${alarm.challenge_count}` : ''}
                   </span>
+                  {alarm.one_time_date && (
+                    <span className="flex items-center gap-1">
+                      <HiOutlineCalendarDays className="w-3.5 h-3.5" />
+                      {alarm.one_time_date}
+                    </span>
+                  )}
+                  <span>Vol {alarm.volume ?? 80}%</span>
+                  <span>{alarm.vibrate ? 'Vibrate on' : 'Vibrate off'}</span>
                 </div>
 
                 {/* Actions */}
@@ -249,6 +269,15 @@ export default function AlarmManager() {
                     data-alarm-id={alarm.id}
                   >
                     <HiOutlineBell className="w-4 h-4 text-slate-400 hover:text-amber-400" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryAlarm(alarm)}
+                    className="p-2 rounded-lg hover:bg-surface-700 transition"
+                    title="Challenge history"
+                    aria-label={`Challenge history for ${alarm.label || 'Alarm'}`}
+                  >
+                    <HiOutlineClipboardDocumentList className="w-4 h-4 text-slate-400 hover:text-sky-400" />
                   </button>
                   <button onClick={() => handleEdit(alarm)} className="p-2 rounded-lg hover:bg-surface-700 transition" title="Edit">
                     <HiOutlinePencilSquare className="w-4 h-4 text-slate-400 hover:text-primary-400" />
@@ -282,6 +311,16 @@ export default function AlarmManager() {
             onClose={() => setShowModal(false)}
             onCreate={createAlarm}
             onUpdate={updateAlarm}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Per-alarm challenge history */}
+      <AnimatePresence>
+        {historyAlarm && (
+          <AlarmChallengeHistoryModal
+            alarm={historyAlarm}
+            onClose={() => setHistoryAlarm(null)}
           />
         )}
       </AnimatePresence>
@@ -335,6 +374,161 @@ export default function AlarmManager() {
 
 
 // ═══════════════════════════════════════════
+// Per-alarm challenge attempt history
+// ═══════════════════════════════════════════
+
+const HISTORY_PER_PAGE = 10;
+
+function AlarmChallengeHistoryModal({ alarm, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    alarmAPI.getAlarmChallengeHistory(alarm.id, { page, per_page: HISTORY_PER_PAGE })
+      .then(({ data }) => {
+        if (cancelled) return;
+        setRows(data?.history || []);
+        setTotal(data?.total || 0);
+        setError(null);
+      })
+      .catch(async (err) => {
+        if (cancelled) return;
+        setRows([]);
+        // A blank server `detail` must still read as a failure, not as "empty".
+        setError(
+          (await readErrorDetail(err, '')) || 'Could not load this alarm’s history.'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [alarm.id, page]);
+
+  const lastPage = Math.max(1, Math.ceil(total / HISTORY_PER_PAGE));
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+    >
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <motion.div
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.95, opacity: 0 }}
+        className="relative w-full max-w-2xl glass rounded-2xl p-6 z-10 max-h-[85vh] overflow-y-auto"
+      >
+        <div className="flex items-start justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-bold text-white">Challenge History</h2>
+            <p className="text-sm text-slate-400">
+              {alarm.label || 'Alarm'} · {total} attempt{total === 1 ? '' : 's'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-2 rounded-lg hover:bg-surface-700 transition"
+            aria-label="Close challenge history"
+          >
+            <HiOutlineXMark className="w-5 h-5 text-slate-400" />
+          </button>
+        </div>
+
+        {loading ? (
+          <p className="text-sm text-slate-400 py-8 text-center" role="status">
+            Loading attempts…
+          </p>
+        ) : error ? (
+          <p className="text-sm text-red-300 py-8 text-center" role="alert">
+            {error}
+          </p>
+        ) : rows.length === 0 ? (
+          <p className="text-sm text-slate-500 py-8 text-center">
+            No challenge attempts recorded for this alarm yet.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-surface-700/50">
+                  <th className="pb-2 pr-3">When</th>
+                  <th className="pb-2 pr-3">Type</th>
+                  <th className="pb-2 pr-3">Difficulty</th>
+                  <th className="pb-2 pr-3">Result</th>
+                  <th className="pb-2 pr-3">Time</th>
+                  <th className="pb-2">Points</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.id} className="border-b border-surface-800/60">
+                    <td className="py-2 pr-3 text-slate-400">
+                      {row.created_at ? new Date(row.created_at).toLocaleString() : '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-slate-300 capitalize">
+                      {(row.challenge_type || '').replace(/_/g, ' ') || '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-slate-400 capitalize">
+                      {row.difficulty || '—'}
+                    </td>
+                    <td
+                      className={`py-2 pr-3 font-medium ${row.is_correct ? 'text-emerald-400' : 'text-red-400'
+                        }`}
+                    >
+                      {row.is_correct ? 'Correct' : 'Wrong'}
+                    </td>
+                    <td className="py-2 pr-3 text-slate-400">
+                      {row.time_taken_seconds != null ? `${row.time_taken_seconds}s` : '—'}
+                    </td>
+                    <td className="py-2 text-slate-300">{row.points_earned ?? 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {lastPage > 1 && (
+          <div className="flex items-center justify-between mt-4">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1 || loading}
+              className="btn-secondary text-sm disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <span className="text-xs text-slate-500">
+              Page {page} of {lastPage}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(lastPage, p + 1))}
+              disabled={page >= lastPage || loading}
+              className="btn-secondary text-sm disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        )}
+      </motion.div>
+    </motion.div>
+  );
+}
+
+
+// ═══════════════════════════════════════════
 // Alarm Create/Edit Modal
 // ═══════════════════════════════════════════
 
@@ -345,6 +539,7 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
   const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm({
     defaultValues: alarm ? {
       label: alarm.label || '',
+      description: alarm.description || '',
       alarm_time: alarm.alarm_time?.slice(0, 5) || '07:00',
       alarm_type: alarm.alarm_type || 'daily',
       challenge_type: alarm.challenge_type || 'random',
@@ -353,8 +548,11 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
       snooze_limit: alarm.snooze_limit ?? 3,
       snooze_interval_minutes: alarm.snooze_interval_minutes ?? 5,
       one_time_date: alarm.one_time_date || '',
+      volume: alarm.volume ?? 80,
+      vibrate: alarm.vibrate ?? true,
     } : {
       label: '',
+      description: '',
       alarm_time: '07:00',
       alarm_type: 'daily',
       challenge_type: 'random',
@@ -363,10 +561,28 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
       snooze_limit: 3,
       snooze_interval_minutes: 5,
       one_time_date: '',
+      volume: 80,
+      vibrate: true,
     },
   });
 
   const selectedType = watch('alarm_type');
+  const allowedDays = BASE_DAYS_BY_TYPE[selectedType] || null;
+  const [selectedDays, setSelectedDays] = useState(() => alarm?.days_of_week || []);
+
+  // Drop selections the new pattern cannot ring on, so the picker never shows
+  // a day the backend would ignore.
+  useEffect(() => {
+    const allowed = BASE_DAYS_BY_TYPE[selectedType];
+    if (!allowed) return;
+    setSelectedDays((prev) => prev.filter((d) => allowed.includes(d)));
+  }, [selectedType]);
+
+  const toggleDay = (day) => {
+    setSelectedDays((prev) =>
+      prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day].sort((a, b) => a - b)
+    );
+  };
 
   const updateTimeSelection = (changes) => {
     const nextSelection = { ...timeSelection, ...changes };
@@ -382,17 +598,24 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
   }, [alarm, setValue]);
 
   const onSubmit = async (data) => {
+    const isOneTime = data.alarm_type === 'one_time';
     const payload = {
       title: data.label || 'Alarm',
       label: data.label || 'Alarm',
+      description: data.description?.trim() ? data.description.trim() : null,
       alarm_time: data.alarm_time,
       alarm_type: data.alarm_type,
+      // A one-time alarm fires on a date; an empty selection means "the
+      // pattern's default days", both of which the backend reads as null.
+      days_of_week: isOneTime || selectedDays.length === 0 ? null : selectedDays,
       challenge_type: data.challenge_type === 'word' ? 'word_game' : data.challenge_type,
       challenge_difficulty: data.challenge_difficulty || 'medium',
       challenge_count: parseInt(data.challenge_count, 10) || 1,
       snooze_limit: parseInt(data.snooze_limit, 10),
       snooze_interval_minutes: parseInt(data.snooze_interval_minutes, 10),
-      one_time_date: data.alarm_type === 'one_time' ? data.one_time_date : null,
+      one_time_date: isOneTime ? data.one_time_date : null,
+      volume: parseInt(data.volume, 10),
+      vibrate: !!data.vibrate,
     };
 
     let result;
@@ -449,6 +672,18 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
             />
           </div>
 
+          {/* Description */}
+          <div>
+            <label className="label">Description</label>
+            <textarea
+              rows={2}
+              placeholder="Why this alarm matters (optional)"
+              className="input resize-none"
+              id="alarm-description"
+              {...register('description', { maxLength: 500 })}
+            />
+          </div>
+
           {/* Time */}
           <div>
             <label className="label">Alarm Time</label>
@@ -502,11 +737,10 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
               {ALARM_TYPES.map((type) => (
                 <label
                   key={type.value}
-                  className={`flex flex-col items-center p-3 rounded-xl cursor-pointer border transition-all ${
-                    watch('alarm_type') === type.value
+                  className={`flex flex-col items-center p-3 rounded-xl cursor-pointer border transition-all ${watch('alarm_type') === type.value
                       ? 'border-primary-500 bg-primary-500/10'
                       : 'border-surface-700/50 hover:border-surface-600'
-                  }`}
+                    }`}
                 >
                   <input
                     type="radio"
@@ -529,6 +763,42 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
             </div>
           )}
 
+          {/* Repeat days */}
+          {allowedDays && (
+            <div>
+              <label className="label">Repeat On</label>
+              <div className="flex gap-1.5">
+                {DAYS.map((day, i) => {
+                  const selectable = allowedDays.includes(i);
+                  const active = selectedDays.includes(i);
+                  return (
+                    <button
+                      key={day}
+                      type="button"
+                      disabled={!selectable}
+                      onClick={() => toggleDay(i)}
+                      aria-pressed={active}
+                      id={`alarm-day-${i}`}
+                      className={`flex-1 h-9 rounded-lg text-[11px] font-medium border transition ${!selectable
+                          ? 'border-surface-800 bg-surface-800/40 text-slate-600 cursor-not-allowed'
+                          : active
+                            ? 'border-primary-500 bg-primary-500/15 text-primary-300'
+                            : 'border-surface-700/50 text-slate-400 hover:border-surface-600'
+                        }`}
+                    >
+                      {day}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                {selectedDays.length === 0
+                  ? `No selection — rings on all ${selectedType === 'weekday' ? 'weekdays' : selectedType === 'weekend' ? 'weekend days' : 'days'}.`
+                  : 'Rings only on the selected days.'}
+              </p>
+            </div>
+          )}
+
           {/* Challenge Type */}
           <div>
             <label className="label">Challenge Type</label>
@@ -536,11 +806,10 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
               {CHALLENGE_TYPES.map((ct) => (
                 <label
                   key={ct.value}
-                  className={`flex items-center justify-center p-2.5 rounded-xl cursor-pointer border text-sm transition-all ${
-                    watch('challenge_type') === ct.value
+                  className={`flex items-center justify-center p-2.5 rounded-xl cursor-pointer border text-sm transition-all ${watch('challenge_type') === ct.value
                       ? 'border-accent-500 bg-accent-500/10'
                       : 'border-surface-700/50 hover:border-surface-600'
-                  }`}
+                    }`}
                 >
                   <input type="radio" value={ct.value} className="hidden" {...register('challenge_type')} />
                   <span>{ct.label}</span>
@@ -556,11 +825,10 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
               {DIFFICULTY_LEVELS.map((d) => (
                 <label
                   key={d.value}
-                  className={`flex-1 text-center p-2 rounded-xl cursor-pointer border text-xs font-medium transition-all ${
-                    watch('challenge_difficulty') === d.value
+                  className={`flex-1 text-center p-2 rounded-xl cursor-pointer border text-xs font-medium transition-all ${watch('challenge_difficulty') === d.value
                       ? 'border-primary-500 bg-primary-500/10 text-white'
                       : 'border-surface-700/50 text-slate-400 hover:border-surface-600'
-                  }`}
+                    }`}
                 >
                   <input type="radio" value={d.value} className="hidden" {...register('challenge_difficulty')} />
                   {d.label}
@@ -599,6 +867,36 @@ function AlarmModal({ alarm, defaultDifficulty = 'medium', onClose, onCreate, on
               <p className="text-[11px] text-slate-500 mt-1">
                 Delay before the alarm re-rings after a snooze.
               </p>
+            </div>
+          </div>
+
+          {/* Sound & haptics */}
+          <div className="grid grid-cols-2 gap-4 items-start">
+            <div>
+              <label className="label">Volume — {watch('volume')}%</label>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                className="w-full accent-primary-500"
+                id="alarm-volume"
+                {...register('volume')}
+              />
+            </div>
+            <div>
+              <label className="label">Vibration</label>
+              <label className="flex items-center gap-3 cursor-pointer h-9">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 accent-primary-500"
+                  id="alarm-vibrate"
+                  {...register('vibrate')}
+                />
+                <span className="text-sm text-slate-300">
+                  {watch('vibrate') ? 'Enabled' : 'Disabled'}
+                </span>
+              </label>
             </div>
           </div>
 

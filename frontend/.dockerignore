@@ -10,3 +10,10 @@ coverage
 npm-debug.log*
 Dockerfile
 .dockerignore
+
+# Browser end-to-end tooling. `.playwright-browsers` alone is several hundred
+# megabytes and none of it is used by `npm run build`.
+e2e
+playwright.config.js
+.playwright-browsers
+test-results

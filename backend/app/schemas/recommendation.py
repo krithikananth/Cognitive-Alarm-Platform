@@ -27,6 +27,14 @@ class RecommendationPriority(str, Enum):
     LOW = "low"
 
 
+class RecommendationRating(str, Enum):
+    """What the user said about a recommendation."""
+
+    HELPFUL = "helpful"
+    NOT_HELPFUL = "not_helpful"
+    DISMISSED = "dismissed"
+
+
 class RecommendationItem(BaseModel):
     """A single personalized coaching recommendation."""
 
@@ -50,6 +58,9 @@ class RecommendationItem(BaseModel):
     metrics: Dict[str, Any] = Field(
         default_factory=dict,
         description="Supporting metrics that produced this recommendation",
+    )
+    feedback: Optional[RecommendationRating] = Field(
+        None, description="This user's stored verdict, if they rated it"
     )
 
 
@@ -102,3 +113,45 @@ class CategoryRecommendationResponse(BaseModel):
     insights: List[str] = Field(default_factory=list)
     recommendations: List[RecommendationItem] = Field(default_factory=list)
     daily_plan: Optional[DailyPlan] = None
+
+
+class RecommendationFeedbackRequest(BaseModel):
+    """A user's verdict on one recommendation."""
+
+    rating: RecommendationRating
+
+
+class RecommendationFeedbackResponse(BaseModel):
+    """The stored verdict."""
+
+    recommendation_id: str
+    rating: RecommendationRating
+    category: RecommendationCategory
+    priority: RecommendationPriority
+    stated_confidence: Optional[float] = None
+    updated_at: datetime
+
+
+class RelevanceBucket(BaseModel):
+    """Counts and rates over one slice of feedback."""
+
+    responses: int
+    rated: int
+    helpful: int
+    not_helpful: int
+    dismissed: int
+    relevance_rate: float
+    avg_stated_confidence: Optional[float] = None
+    # Positive = users rated the advice more useful than the engine claimed.
+    confidence_gap: Optional[float] = None
+
+
+class RecommendationRelevanceResponse(RelevanceBucket):
+    """Measured relevance across a user's recommendation feedback."""
+
+    days: Optional[int] = None
+    status: str
+    min_responses: int
+    by_category: Dict[str, RelevanceBucket] = Field(default_factory=dict)
+    by_priority: Dict[str, RelevanceBucket] = Field(default_factory=dict)
+    last_feedback_at: Optional[str] = None

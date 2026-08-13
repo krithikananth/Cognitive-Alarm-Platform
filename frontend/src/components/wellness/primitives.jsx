@@ -44,10 +44,12 @@ export function MetricBlock({ title, description, trend, TrendIcon, rows }) {
     <div className="rounded-xl border border-surface-700/50 bg-surface-900/30 p-4">
       <div className="flex items-center justify-between gap-2 mb-1">
         <p className="text-sm font-medium text-white">{title}</p>
-        <span className={`inline-flex items-center gap-1 text-[11px] flex-shrink-0 ${trend.color}`}>
-          <TrendIcon className="w-3.5 h-3.5" />
-          {trend.label}
-        </span>
+        {trend ? (
+          <span className={`inline-flex items-center gap-1 text-[11px] flex-shrink-0 ${trend.color}`}>
+            {TrendIcon ? <TrendIcon className="w-3.5 h-3.5" /> : null}
+            {trend.label}
+          </span>
+        ) : null}
       </div>
       {description ? (
         <p className="text-xs text-slate-500 leading-relaxed mb-3">{description}</p>
@@ -78,18 +80,6 @@ export function ProfileField({ label, value, hint }) {
   );
 }
 
-export function PlanChip({ label, value, icon: Icon }) {
-  return (
-    <div className="rounded-xl border border-surface-700/40 bg-surface-900/50 px-3 py-2.5">
-      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-500 mb-1">
-        <Icon className="w-3.5 h-3.5" />
-        {label}
-      </div>
-      <p className="text-sm font-medium text-white truncate">{value}</p>
-    </div>
-  );
-}
-
 export function PriorityBadge({ priority }) {
   const styles = {
     high: 'bg-red-500/15 text-red-400',
@@ -106,17 +96,15 @@ export function PriorityBadge({ priority }) {
 export function RecCard({ rec, emphasize = false }) {
   return (
     <div
-      className={`rounded-xl border p-4 ${
-        emphasize || rec.category === 'productivity'
-          ? 'border-sky-500/30 bg-sky-500/5'
-          : 'border-surface-700/50 bg-surface-900/40'
-      }`}
+      className={`rounded-xl border p-4 ${emphasize || rec.category === 'productivity'
+        ? 'border-sky-500/30 bg-sky-500/5'
+        : 'border-surface-700/50 bg-surface-900/40'
+        }`}
     >
       <div className="flex flex-wrap items-center gap-2 mb-1.5">
         <span
-          className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${
-            CATEGORY_STYLES[rec.category] || CATEGORY_STYLES.habit
-          }`}
+          className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${CATEGORY_STYLES[rec.category] || CATEGORY_STYLES.habit
+            }`}
         >
           {rec.category}
         </span>

@@ -3,7 +3,7 @@ Pydantic schemas for password reset and email verification flows.
 """
 
 import re
-from typing import List
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -54,3 +54,23 @@ class ResendVerificationRequest(BaseModel):
     """Request another email-verification message."""
 
     email: EmailStr = Field(..., description="Account email address")
+
+
+class LoginResponse(BaseModel):
+    """Token pair plus the signed-in account summary.
+
+    The SPA authenticates by HttpOnly cookie; the tokens are also returned in
+    the body for API and native clients.
+    """
+
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    user: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionRevokedResponse(BaseModel):
+    """Acknowledgement for logout and logout-all."""
+
+    message: str
+    user_id: int

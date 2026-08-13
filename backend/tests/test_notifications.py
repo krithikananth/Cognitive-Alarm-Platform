@@ -27,7 +27,8 @@ from app.db.session import SessionLocal, engine
 from app.db.base import Base
 from app.models.user import User
 from app.models.profile import UserProfile, DifficultyPreference
-from app.models.alarm import Alarm, AlarmType, ChallengeType
+from app.models.alarm import Alarm, AlarmChallengeLog, AlarmType, ChallengeType
+from app.models.alarm_wake_event import AlarmWakeEvent
 from app.models.notification import (
     Notification,
     NotificationChannel,
@@ -1433,6 +1434,404 @@ class TestReminderDeliveryEndToEnd:
         _clear_notifications(db, test_user.id, NotificationType.HABIT_ALERT)
 
 
+# ── Challenge Reminders & Progress Updates ───────────────────────
+
+def _add_challenge_log(db, user_id, alarm_id, created_at, *, correct=True):
+    row = AlarmChallengeLog(
+        user_id=user_id,
+        alarm_id=alarm_id,
+        challenge_type="math",
+        difficulty="medium",
+        challenge_prompt="2+2?",
+        is_correct=correct,
+        time_taken_seconds=9,
+        failed_attempts=0,
+        points_earned=10 if correct else 0,
+        created_at=created_at,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _add_wake_event(db, user_id, alarm_id, dismissed_at, *, verified=True):
+    row = AlarmWakeEvent(
+        user_id=user_id,
+        alarm_id=alarm_id,
+        triggered_at=dismissed_at - timedelta(minutes=5),
+        dismissed_at=dismissed_at,
+        dismiss_method="challenge",
+        snooze_count_at_dismiss=0,
+        time_to_dismiss_seconds=300,
+        verified=verified,
+        wakefulness_score=80.0,
+        wakefulness_level="alert",
+        failed_attempts=0,
+        challenges_required=1,
+        challenges_completed=1,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _clear_activity(db, user_id):
+    db.query(AlarmChallengeLog).filter(
+        AlarmChallengeLog.user_id == user_id
+    ).delete()
+    db.query(AlarmWakeEvent).filter(
+        AlarmWakeEvent.user_id == user_id
+    ).delete()
+    db.commit()
+
+
+def _force_prefs(db, user_id):
+    """Set permissive preferences without triggering any scheduling.
+
+    ``update_preferences`` re-schedules on re-enable, which would create the
+    very row these tests are trying to assert about.
+    """
+    prefs = NotificationService.get_preferences(db, user_id)
+    prefs.notifications_enabled = True
+    prefs.notification_frequency = "all"
+    prefs.notification_sound = "default"
+    prefs.push_enabled = True
+    prefs.challenge_reminders_enabled = True
+    prefs.progress_updates_enabled = True
+    prefs.quiet_hours_start = None
+    prefs.quiet_hours_end = None
+    db.commit()
+    return prefs
+
+
+class TestChallengeReminders:
+    """Practice nudges for users who stopped attempting challenges."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, db, test_user, test_alarm):
+        _force_prefs(db, test_user.id)
+        _clear_notifications(
+            db, test_user.id, NotificationType.CHALLENGE_REMINDER
+        )
+        _clear_activity(db, test_user.id)
+        db.query(Alarm).filter(Alarm.user_id == test_user.id).update(
+            {"is_active": True}
+        )
+        db.commit()
+        yield
+        _clear_notifications(
+            db, test_user.id, NotificationType.CHALLENGE_REMINDER
+        )
+        _clear_activity(db, test_user.id)
+
+    def test_recent_practice_suppresses_the_nudge(self, db, test_user, test_alarm):
+        """A user who practised today does not need a reminder."""
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(hours=3)
+        )
+        assert (
+            NotificationService.schedule_challenge_reminder(db, test_user.id)
+            is None
+        )
+
+    def test_idle_user_is_reminded_with_measured_idle_days(
+        self, db, test_user, test_alarm
+    ):
+        """The nudge reports the real gap since the last attempt."""
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(days=5)
+        )
+
+        notif = NotificationService.schedule_challenge_reminder(db, test_user.id)
+        assert notif is not None
+        assert notif.notification_type == NotificationType.CHALLENGE_REMINDER
+        assert notif.status == NotificationStatus.PENDING
+        assert notif.data["days_since_last_attempt"] == 5
+        assert notif.data["url"] == "/practice"
+        assert "5 days" in notif.body
+        # Delivered at the user's local evening — never in the past.
+        assert notif.scheduled_at > _naive_utc_now()
+
+    def test_cooldown_reuses_the_pending_row(self, db, test_user, test_alarm):
+        """A second sweep on the same day must not queue a duplicate."""
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(days=5)
+        )
+        first = NotificationService.schedule_challenge_reminder(db, test_user.id)
+        second = NotificationService.schedule_challenge_reminder(db, test_user.id)
+
+        assert first is not None and second is not None
+        assert second.id == first.id
+        assert (
+            db.query(Notification)
+            .filter(
+                Notification.user_id == test_user.id,
+                Notification.notification_type
+                == NotificationType.CHALLENGE_REMINDER,
+            )
+            .count()
+            == 1
+        )
+
+    def test_first_challenge_nudge_requires_an_active_alarm(
+        self, db, test_user, test_alarm
+    ):
+        """Users with no alarms and no history are not cold-nudged."""
+        db.query(Alarm).filter(Alarm.user_id == test_user.id).update(
+            {"is_active": False}
+        )
+        db.commit()
+        assert (
+            NotificationService.schedule_challenge_reminder(db, test_user.id)
+            is None
+        )
+
+        db.query(Alarm).filter(Alarm.user_id == test_user.id).update(
+            {"is_active": True}
+        )
+        db.commit()
+        notif = NotificationService.schedule_challenge_reminder(db, test_user.id)
+        assert notif is not None
+        assert "First Challenge" in notif.title
+        assert "days_since_last_attempt" not in notif.data
+
+    def test_disabled_preference_cancels_and_blocks(
+        self, db, test_user, test_alarm
+    ):
+        """Turning the toggle off cancels the pending nudge and stops new ones."""
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(days=5)
+        )
+        pending = NotificationService.schedule_challenge_reminder(
+            db, test_user.id
+        )
+        assert pending is not None
+
+        NotificationService.update_preferences(
+            db, test_user.id, {"challenge_reminders_enabled": False}
+        )
+        db.refresh(pending)
+        assert pending.status == NotificationStatus.FAILED
+        assert (
+            NotificationService.schedule_challenge_reminder(db, test_user.id)
+            is None
+        )
+
+    def test_essential_frequency_blocks_challenge_reminders(
+        self, db, test_user, test_alarm
+    ):
+        """Practice nudges are not essential traffic."""
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(days=5)
+        )
+        NotificationService.update_preferences(
+            db, test_user.id, {"notification_frequency": "essential"}
+        )
+        try:
+            assert (
+                NotificationService.schedule_challenge_reminder(db, test_user.id)
+                is None
+            )
+        finally:
+            NotificationService.update_preferences(
+                db, test_user.id, {"notification_frequency": "all"}
+            )
+
+    def test_reminder_dispatches_through_the_queue(
+        self, db, test_user, test_alarm, monkeypatch
+    ):
+        """The nudge reaches dispatch like any other scheduled notification."""
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(days=5)
+        )
+        notif = NotificationService.schedule_challenge_reminder(db, test_user.id)
+        assert notif is not None
+
+        notif.scheduled_at = _naive_utc_now() - timedelta(minutes=1)
+        db.commit()
+
+        monkeypatch.setattr(
+            FCMService, "send_detailed", staticmethod(_fake_send(successes=1))
+        )
+        NotificationService.process_pending_notifications(
+            db, only_types=[NotificationType.CHALLENGE_REMINDER]
+        )
+        db.refresh(notif)
+        assert notif.status in (
+            NotificationStatus.SENT,
+            NotificationStatus.DELIVERED,
+        )
+        assert notif.sent_at is not None
+
+
+class TestProgressUpdates:
+    """Weekly recap built from real wake-up and challenge activity."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, db, test_user, test_alarm):
+        _force_prefs(db, test_user.id)
+        _clear_notifications(db, test_user.id, NotificationType.PROGRESS_UPDATE)
+        _clear_activity(db, test_user.id)
+        yield
+        _clear_notifications(db, test_user.id, NotificationType.PROGRESS_UPDATE)
+        _clear_activity(db, test_user.id)
+
+    def test_no_recap_without_activity(self, db, test_user):
+        """An empty week is not progress — nothing is sent."""
+        assert (
+            NotificationService.schedule_progress_update(db, test_user.id)
+            is None
+        )
+
+    def test_recap_reports_measured_activity(self, db, test_user, test_alarm):
+        """Counts and accuracy come from stored events, not from copy."""
+        now = _naive_utc_now()
+        _add_wake_event(db, test_user.id, test_alarm.id, now - timedelta(days=1))
+        _add_wake_event(db, test_user.id, test_alarm.id, now - timedelta(days=2))
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, now - timedelta(days=1)
+        )
+        _add_challenge_log(
+            db, test_user.id, test_alarm.id, now - timedelta(days=2), correct=False
+        )
+
+        notif = NotificationService.schedule_progress_update(db, test_user.id)
+        assert notif is not None
+        assert notif.notification_type == NotificationType.PROGRESS_UPDATE
+        assert notif.status == NotificationStatus.PENDING
+        assert notif.data["period_days"] == 7
+        assert notif.data["verified_wakes"] == 2
+        assert notif.data["challenge_attempts"] == 2
+        assert notif.data["challenge_accuracy"] == 50.0
+        assert notif.data["url"] == "/analytics"
+        assert "2 verified wake-ups" in notif.body
+        assert "50% accuracy" in notif.body
+        assert notif.scheduled_at > _naive_utc_now()
+
+    def test_activity_outside_the_window_is_ignored(
+        self, db, test_user, test_alarm
+    ):
+        """Events older than the recap period cannot manufacture progress."""
+        old = _naive_utc_now() - timedelta(days=30)
+        _add_wake_event(db, test_user.id, test_alarm.id, old)
+        _add_challenge_log(db, test_user.id, test_alarm.id, old)
+
+        assert (
+            NotificationService.schedule_progress_update(db, test_user.id)
+            is None
+        )
+
+    def test_streak_milestone_headlines_the_recap(
+        self, db, test_user, test_alarm
+    ):
+        """A milestone streak is called out instead of the generic title."""
+        _add_wake_event(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(hours=6)
+        )
+        profile = (
+            db.query(UserProfile)
+            .filter(UserProfile.user_id == test_user.id)
+            .first()
+        )
+        previous = (
+            profile.streak_days,
+            profile.best_streak,
+            profile.last_successful_wake_date,
+        )
+        profile.streak_days = 7
+        profile.best_streak = 7
+        # Today's local date, so missed-day decay does not reset the streak.
+        profile.last_successful_wake_date = datetime.now(
+            ZoneInfo(profile.timezone or "UTC")
+        ).date()
+        db.commit()
+
+        try:
+            notif = NotificationService.schedule_progress_update(
+                db, test_user.id
+            )
+            assert notif is not None
+            assert notif.title.startswith("7-Day Streak")
+            assert notif.data["milestone"] == 7
+            assert notif.data["streak_days"] == 7
+        finally:
+            (
+                profile.streak_days,
+                profile.best_streak,
+                profile.last_successful_wake_date,
+            ) = previous
+            db.commit()
+
+    def test_weekly_cooldown_reuses_the_pending_row(
+        self, db, test_user, test_alarm
+    ):
+        """A daily sweep produces at most one recap per week."""
+        _add_wake_event(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(hours=6)
+        )
+        first = NotificationService.schedule_progress_update(db, test_user.id)
+        second = NotificationService.schedule_progress_update(db, test_user.id)
+
+        assert first is not None and second is not None
+        assert second.id == first.id
+        assert (
+            db.query(Notification)
+            .filter(
+                Notification.user_id == test_user.id,
+                Notification.notification_type
+                == NotificationType.PROGRESS_UPDATE,
+            )
+            .count()
+            == 1
+        )
+
+    def test_disabled_preference_cancels_and_blocks(
+        self, db, test_user, test_alarm
+    ):
+        """Turning the toggle off cancels the pending recap and stops new ones."""
+        _add_wake_event(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(hours=6)
+        )
+        pending = NotificationService.schedule_progress_update(db, test_user.id)
+        assert pending is not None
+
+        NotificationService.update_preferences(
+            db, test_user.id, {"progress_updates_enabled": False}
+        )
+        db.refresh(pending)
+        assert pending.status == NotificationStatus.FAILED
+        assert (
+            NotificationService.schedule_progress_update(db, test_user.id)
+            is None
+        )
+
+    def test_recap_dispatches_through_the_queue(
+        self, db, test_user, test_alarm, monkeypatch
+    ):
+        """The recap reaches dispatch like any other scheduled notification."""
+        _add_wake_event(
+            db, test_user.id, test_alarm.id, _naive_utc_now() - timedelta(hours=6)
+        )
+        notif = NotificationService.schedule_progress_update(db, test_user.id)
+        assert notif is not None
+
+        notif.scheduled_at = _naive_utc_now() - timedelta(minutes=1)
+        db.commit()
+
+        monkeypatch.setattr(
+            FCMService, "send_detailed", staticmethod(_fake_send(successes=1))
+        )
+        NotificationService.process_pending_notifications(
+            db, only_types=[NotificationType.PROGRESS_UPDATE]
+        )
+        db.refresh(notif)
+        assert notif.status in (
+            NotificationStatus.SENT,
+            NotificationStatus.DELIVERED,
+        )
+        assert notif.sent_at is not None
+
+
 # ── API Endpoint Tests ───────────────────────────────────────────
 
 class TestNotificationAPI:
@@ -1449,6 +1848,36 @@ class TestNotificationAPI:
         data = resp.json()
         assert "bedtime_reminder_enabled" in data
         assert "wake_reminder_enabled" in data
+        assert "challenge_reminders_enabled" in data
+        assert "progress_updates_enabled" in data
+
+    def test_update_engagement_toggles(self, auth_headers):
+        """PUT /notifications/preferences persists the new type toggles."""
+        client = TestClient(app)
+        resp = client.put(
+            "/api/v1/notifications/preferences",
+            headers=auth_headers,
+            json={
+                "challenge_reminders_enabled": False,
+                "progress_updates_enabled": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["challenge_reminders_enabled"] is False
+        assert data["progress_updates_enabled"] is False
+
+        resp = client.put(
+            "/api/v1/notifications/preferences",
+            headers=auth_headers,
+            json={
+                "challenge_reminders_enabled": True,
+                "progress_updates_enabled": True,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["challenge_reminders_enabled"] is True
+        assert resp.json()["progress_updates_enabled"] is True
 
     def test_update_preferences(self, auth_headers):
         """PUT /notifications/preferences updates fields."""

@@ -25,6 +25,7 @@ jest.mock('../services/api', () => ({
     updateUser: () => Promise.resolve({ data: {} }),
     updateSleepSchedule: () => Promise.resolve({ data: {} }),
     updatePreferences: () => Promise.resolve({ data: {} }),
+    updateGoals: () => Promise.resolve({ data: {} }),
     deleteAccount: () => Promise.resolve({ data: {} }),
   },
   notificationAPI: {

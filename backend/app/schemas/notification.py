@@ -31,7 +31,8 @@ class NotificationSound(str, Enum):
 class NotificationFrequency(str, Enum):
     """How broadly scheduled notifications are allowed to fire.
 
-    - ``all``: every enabled type (bedtime, wake, habit, motivational)
+    - ``all``: every enabled type (bedtime, wake, habit, challenge,
+      progress, motivational)
     - ``essential``: bedtime + wake only
     - ``minimal``: wake reminders only
     """
@@ -90,6 +91,8 @@ class NotificationPreferenceUpdate(BaseModel):
         description="Minutes before alarm trigger (5–60)",
     )
     habit_alerts_enabled: Optional[bool] = None
+    challenge_reminders_enabled: Optional[bool] = None
+    progress_updates_enabled: Optional[bool] = None
     motivational_enabled: Optional[bool] = None
     motivational_time: Optional[time] = Field(
         None,
@@ -114,6 +117,8 @@ class NotificationPreferenceResponse(BaseModel):
     wake_reminder_enabled: bool
     wake_reminder_minutes_before: int
     habit_alerts_enabled: bool
+    challenge_reminders_enabled: bool = True
+    progress_updates_enabled: bool = True
     motivational_enabled: bool
     motivational_time: Optional[time] = None
     quiet_hours_start: Optional[time] = None
@@ -198,3 +203,26 @@ class UnreadCountResponse(BaseModel):
     """Badge count for the notification bell."""
 
     unread_count: int
+
+
+class DeviceTokenRemovedResponse(BaseModel):
+    """Acknowledgement for DELETE /notifications/device-token."""
+
+    message: str
+
+
+class MarkAllReadResponse(BaseModel):
+    """Number of notifications flipped to read."""
+
+    marked_read: int
+
+
+class TestNotificationResponse(BaseModel):
+    """Outcome of a manually triggered test push."""
+
+    message: str
+    push_result: Optional[Dict[str, Any]] = None
+    push_delivered: bool
+    notification_id: int
+    fcm_available: bool
+    fcm_unavailable_reason: Optional[str] = None

@@ -38,6 +38,8 @@ class User(Base):
         is_verified: Whether the user's email has been verified.
         oauth_provider: Name of the OAuth provider (e.g. 'google').
         oauth_id: External user ID from the OAuth provider.
+        tokens_valid_after: Cut-off instant for token issuance; anything older
+            is rejected (used by password reset and revoke-all-sessions).
         created_at: Timestamp of record creation (UTC).
         updated_at: Timestamp of last update (UTC).
         profile: One-to-one relationship with ``UserProfile``.
@@ -60,6 +62,8 @@ class User(Base):
     is_verified = Column(Boolean, default=False, nullable=False)
     oauth_provider = Column(String(50), nullable=True)
     oauth_id = Column(String(255), nullable=True)
+    # Tokens issued before this instant are rejected (password reset, logout-all).
+    tokens_valid_after = Column(DateTime, nullable=True)
     created_at = Column(
         DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )

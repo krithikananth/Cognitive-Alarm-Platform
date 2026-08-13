@@ -1,7 +1,7 @@
 """Week-2 attempt log solidity: indexes, backfill, snooze events.
 
 Revision ID: 20260716_attempt_log_audit
-Revises:
+Revises: 20260101_baseline
 Create Date: 2026-07-16
 
 Additive-only migration:
@@ -21,7 +21,7 @@ from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision: str = "20260716_attempt_log_audit"
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = "20260101_baseline"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -1,8 +1,17 @@
 /**
  * Zustand auth store — manages authentication state.
+ *
+ * Sessions live in HttpOnly cookies set by the backend; this store only keeps
+ * the non-sensitive user object and a session marker.
  */
 import { create } from 'zustand';
-import { authAPI, userAPI } from '../services/api';
+import {
+  authAPI,
+  userAPI,
+  markSessionActive,
+  hasActiveSession,
+  clearSessionFlag,
+} from '../services/api';
 
 // Best-effort sync of the browser's detected IANA timezone to the user's
 // profile. Runs after every login so accounts created without a timezone
@@ -31,7 +40,7 @@ const useAuthStore = create((set, get) => ({
     }
   })(),
   profile: null,
-  isAuthenticated: !!localStorage.getItem('access_token'),
+  isAuthenticated: hasActiveSession(),
   isLoading: false,
   error: null,
 
@@ -62,9 +71,8 @@ const useAuthStore = create((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const res = await authAPI.login(data);
-      const { access_token, refresh_token, user } = res.data;
-      localStorage.setItem('access_token', access_token);
-      localStorage.setItem('refresh_token', refresh_token);
+      const { user } = res.data;
+      markSessionActive();
       localStorage.setItem('user', JSON.stringify(user));
       set({ user, isAuthenticated: true, isLoading: false });
       // Sync IANA timezone to profile, then refresh auth user so Profile/UI
@@ -93,15 +101,13 @@ const useAuthStore = create((set, get) => ({
     }
   },
 
-  // ─── OAuth callback (tokens already issued by backend redirect) ───
-  completeOAuthLogin: async ({ access_token, refresh_token }) => {
+  // ─── OAuth callback (session cookies already set by the backend redirect) ───
+  completeOAuthLogin: async () => {
     set({ isLoading: true, error: null });
     try {
-      localStorage.setItem('access_token', access_token);
-      localStorage.setItem('refresh_token', refresh_token);
-
       const res = await authAPI.me();
       const user = res.data;
+      markSessionActive();
       localStorage.setItem('user', JSON.stringify(user));
       set({ user, isAuthenticated: true, isLoading: false });
       try {
@@ -116,8 +122,7 @@ const useAuthStore = create((set, get) => ({
       }
       return { success: true, user: get().user || user };
     } catch (err) {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
+      clearSessionFlag();
       localStorage.removeItem('user');
       const message =
         (typeof err.response?.data?.detail === 'string' && err.response.data.detail) ||
@@ -140,10 +145,33 @@ const useAuthStore = create((set, get) => ({
     } catch (e) {
       // Ignore errors on logout
     }
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
+    clearSessionFlag();
     localStorage.removeItem('user');
     set({ user: null, profile: null, isAuthenticated: false });
+  },
+
+  // ─── Logout everywhere ───
+  // Revokes every issued token for the account server-side, so sessions on
+  // other devices die immediately instead of living until their token expires.
+  logoutAll: async () => {
+    try {
+      const { unregisterNotifications } = await import('../services/notificationService');
+      await unregisterNotifications();
+    } catch (e) {
+      // Ignore notification cleanup errors
+    }
+    let revoked = true;
+    try {
+      await authAPI.logoutAll();
+    } catch (e) {
+      // The local session is still cleared below, but say so honestly: the
+      // other devices may still be signed in.
+      revoked = false;
+    }
+    clearSessionFlag();
+    localStorage.removeItem('user');
+    set({ user: null, profile: null, isAuthenticated: false });
+    return { success: revoked };
   },
 
   // ─── Fetch Profile ───

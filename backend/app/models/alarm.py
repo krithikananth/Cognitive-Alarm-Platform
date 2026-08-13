@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -61,7 +62,9 @@ class Alarm(Base):
         description: Optional extended description.
         alarm_time: Time of day the alarm should fire.
         alarm_type: Recurrence pattern (daily, weekday, etc.).
-        days_of_week: JSON list of integers 0-6 (Mon-Sun).
+        days_of_week: JSON list of integers 0-6 (Mon-Sun) narrowing the
+            recurrence pattern to specific weekdays.
+        one_time_date: Local calendar date a one-time alarm fires on.
         is_active: Whether the alarm is currently armed.
         snooze_limit: Maximum number of snoozes allowed.
         snooze_interval_minutes: Duration of each snooze in minutes.
@@ -102,6 +105,7 @@ class Alarm(Base):
         Enum(AlarmType), default=AlarmType.DAILY, nullable=False
     )
     days_of_week = Column(JSON, nullable=True)
+    one_time_date = Column(Date, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     snooze_limit = Column(Integer, default=3, nullable=False)
     snooze_interval_minutes = Column(Integer, default=5, nullable=False)

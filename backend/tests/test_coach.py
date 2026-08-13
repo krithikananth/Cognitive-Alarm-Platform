@@ -698,6 +698,42 @@ class TestRealDataAggregation:
         assert "morning_routine_score" in productivity.json()["data"]
         assert productivity.json()["data"]["verified_wakes"] == 5
 
+    def test_behavioral_payload_carries_measured_sleep_patterns(
+        self, client, coach_headers, roster
+    ):
+        """The coach Sleep Trends panel reads `sleep_patterns` off this payload."""
+        response = client.get(
+            f"/api/v1/coach/clients/{roster['assigned_a'].id}/behavioral",
+            headers=coach_headers,
+        )
+
+        assert response.status_code == 200
+        patterns = response.json()["data"]["sleep_patterns"]
+        for key in (
+            "nights_observed",
+            "nights_with_duration",
+            "nights_recorded",
+            "nights_estimated",
+            "has_recorded_sleep",
+            "duration_source",
+            "avg_sleep_duration_hours",
+            "avg_bedtime",
+            "schedule_regularity_score",
+            "social_jetlag_minutes",
+            "target_sleep_hours",
+        ):
+            assert key in patterns, key
+        # Provenance must be explicit, never implied
+        assert patterns["duration_source"] in {
+            "recorded",
+            "estimated",
+            "mixed",
+            "none",
+        }
+        assert isinstance(patterns["has_recorded_sleep"], bool)
+        for night in patterns["nights"]:
+            assert night["source"] in {"recorded", "estimated"}
+
     def test_recommendations_are_generated_for_the_client(
         self, client, coach_headers, roster
     ):

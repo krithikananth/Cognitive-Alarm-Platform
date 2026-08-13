@@ -72,3 +72,81 @@ describe('ChallengePerformance category ranking', () => {
     expect(screen.queryByText('Only category with data')).not.toBeInTheDocument();
   });
 });
+
+describe('ChallengePerformance completion rate', () => {
+  const completionWith = (overrides) => ({
+    days: 30,
+    served: 8,
+    completed: 6,
+    timed_out: 1,
+    abandoned: 1,
+    in_flight: 0,
+    completion_rate: 75,
+    timeout_rate: 12.5,
+    abandonment_rate: 12.5,
+    status: 'ok',
+    ...overrides,
+  });
+
+  test('completion is reported separately from accuracy', () => {
+    render(
+      <ChallengePerformance
+        challenge={challengeWith({ completion: completionWith() })}
+        clientRow={clientRow}
+      />
+    );
+
+    expect(screen.getByText('Challenge completion')).toBeInTheDocument();
+    expect(screen.getByText('75%')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Finished 6 of 8 challenges served/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/1 timed out/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 left unanswered/i)).toBeInTheDocument();
+  });
+
+  test('challenges served but never answered still report a completion rate', () => {
+    render(
+      <ChallengePerformance
+        challenge={challengeWith({
+          total_attempts: 0,
+          by_type: {},
+          completion: completionWith({
+            served: 3,
+            completed: 0,
+            timed_out: 1,
+            abandoned: 2,
+            completion_rate: 0,
+          }),
+        })}
+        clientRow={clientRow}
+      />
+    );
+
+    expect(screen.getByText('Challenge completion')).toBeInTheDocument();
+    expect(screen.getByText('0%')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Finished 0 of 3 challenges served/i)
+    ).toBeInTheDocument();
+  });
+
+  test('nothing served yet hides the block instead of showing 0%', () => {
+    render(
+      <ChallengePerformance
+        challenge={challengeWith({
+          completion: completionWith({
+            served: 0,
+            completed: 0,
+            timed_out: 0,
+            abandoned: 0,
+            completion_rate: 0,
+            status: 'no_data',
+          }),
+        })}
+        clientRow={clientRow}
+      />
+    );
+
+    expect(screen.queryByText('Challenge completion')).not.toBeInTheDocument();
+  });
+});

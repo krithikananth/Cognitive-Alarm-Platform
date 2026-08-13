@@ -29,6 +29,7 @@ import {
 import toast from 'react-hot-toast';
 import { alarmAPI } from '../services/api';
 import useAuthStore from '../store/authStore';
+import ActivityHealthPanel from '../components/analytics/ActivityHealthPanel';
 
 const fadeUp = {
   initial: { opacity: 0, y: 20 },
@@ -51,10 +52,72 @@ function formatType(type) {
   return TYPE_LABELS[key] || (type || 'Unknown').replace(/_/g, ' ');
 }
 
+const LEARNING_STATE_META = {
+  improving: { label: 'Improving', tone: 'text-emerald-400' },
+  plateaued: { label: 'Plateaued', tone: 'text-amber-400' },
+  declining: { label: 'Declining', tone: 'text-red-400' },
+  volatile: { label: 'Volatile', tone: 'text-orange-400' },
+  struggling: { label: 'Struggling', tone: 'text-red-400' },
+  steady: { label: 'Steady', tone: 'text-sky-400' },
+  insufficient_data: { label: 'Warming up', tone: 'text-slate-400' },
+};
+
+const ENGAGEMENT_META = {
+  thriving: { label: 'Thriving', tone: 'text-emerald-400' },
+  engaged: { label: 'Engaged', tone: 'text-teal-400' },
+  steady: { label: 'Steady', tone: 'text-sky-400' },
+  at_risk: { label: 'At risk', tone: 'text-amber-400' },
+  disengaged: { label: 'Disengaged', tone: 'text-red-400' },
+  insufficient_data: { label: 'Warming up', tone: 'text-slate-400' },
+};
+
+const MASTERY_TONE = {
+  mastered: 'text-emerald-400',
+  proficient: 'text-teal-400',
+  developing: 'text-amber-400',
+  novice: 'text-red-400',
+  unrated: 'text-slate-500',
+};
+
+const ADAPTATION_META = {
+  effective: { label: 'Working', tone: 'text-emerald-400' },
+  neutral: { label: 'No clear effect', tone: 'text-slate-400' },
+  ineffective: { label: 'Not helping', tone: 'text-amber-400' },
+  insufficient_data: { label: 'Warming up', tone: 'text-slate-400' },
+};
+
+const ENGAGEMENT_TREND_META = {
+  improving: { label: 'Improving', tone: 'text-emerald-400' },
+  stable: { label: 'Holding steady', tone: 'text-sky-400' },
+  declining: { label: 'Declining', tone: 'text-amber-400' },
+  insufficient_data: { label: 'Warming up', tone: 'text-slate-400' },
+};
+
+function formatHour(hour) {
+  const value = Number(hour);
+  if (Number.isNaN(value)) return '—';
+  const suffix = value >= 12 ? 'PM' : 'AM';
+  const display = value % 12 === 0 ? 12 : value % 12;
+  return `${display}${suffix}`;
+}
+
+function formatBias(bias) {
+  if (bias > 0) return 'Raising difficulty by one level';
+  if (bias < 0) return 'Easing difficulty by one level';
+  return 'No difficulty change';
+}
+
+function formatTrend(value, unit) {
+  const number = Number(value || 0);
+  const sign = number > 0 ? '+' : '';
+  return `${sign}${number}${unit}`;
+}
+
 export default function Analytics() {
   const { user } = useAuthStore();
   const [stats, setStats] = useState(null);
   const [analysis, setAnalysis] = useState(null);
+  const [learningProfile, setLearningProfile] = useState(null);
   const [history, setHistory] = useState([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -65,14 +128,16 @@ export default function Analytics() {
     (async () => {
       setLoading(true);
       try {
-        const [statsRes, analysisRes, historyRes] = await Promise.all([
+        const [statsRes, analysisRes, historyRes, learningRes] = await Promise.all([
           alarmAPI.getChallengeStats(),
           alarmAPI.getChallengeAnalysis(),
           alarmAPI.getChallengeHistory({ page, per_page: 15 }),
+          alarmAPI.getLearningProfile(),
         ]);
         if (cancelled) return;
         setStats(statsRes.data);
         setAnalysis(analysisRes.data);
+        setLearningProfile(learningRes.data);
         setHistory(historyRes.data.history || []);
         setHistoryTotal(historyRes.data.total || 0);
       } catch (err) {
@@ -94,6 +159,33 @@ export default function Analytics() {
       attempts: s.total ?? 0,
     }));
   }, [analysis, stats]);
+
+  // The dedicated learning-profile route is what the challenge engine reads at
+  // ring time; the analysis payload stays as a fallback.
+  const patterns =
+    learningProfile?.learning_patterns || analysis?.personalization?.learning_patterns;
+  const engagement =
+    learningProfile?.engagement || analysis?.personalization?.engagement;
+  const learningMeta =
+    LEARNING_STATE_META[patterns?.learning_state] ||
+    LEARNING_STATE_META.insufficient_data;
+  const adaptation = patterns?.adaptation_effectiveness;
+  const adaptationMeta =
+    ADAPTATION_META[adaptation?.verdict] || ADAPTATION_META.insufficient_data;
+  const engagementMeta =
+    ENGAGEMENT_META[engagement?.state] || ENGAGEMENT_META.insufficient_data;
+  const engagementTrend = engagement?.improvement;
+  const engagementTrendMeta =
+    ENGAGEMENT_TREND_META[engagementTrend?.direction] ||
+    ENGAGEMENT_TREND_META.insufficient_data;
+
+  const masteryRows = useMemo(
+    () =>
+      Object.values(patterns?.by_type || {})
+        .filter((t) => t.mastery && t.mastery !== 'unrated')
+        .sort((a, b) => (b.accuracy ?? 0) - (a.accuracy ?? 0)),
+    [patterns]
+  );
 
   const summary = analysis?.summary || {};
   const trendIcon =
@@ -356,6 +448,209 @@ export default function Analytics() {
           </div>
 
           <div className="card">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-white">Learning Patterns</h2>
+              <span className={`text-xs font-medium ${learningMeta.tone}`}>
+                {learningMeta.label}
+              </span>
+            </div>
+
+            {!patterns?.has_enough_data ? (
+              <p className="text-sm text-slate-300">
+                {patterns?.learning_state_label ||
+                  'Learning analysis unlocks after your first few challenges.'}
+              </p>
+            ) : (
+              <>
+                <p className="text-sm text-slate-300 mb-4">
+                  {patterns.learning_state_label}
+                </p>
+
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <div className="rounded-xl bg-surface-800/60 p-3">
+                    <p className="text-[11px] text-slate-400 uppercase tracking-wider">
+                      Accuracy trend
+                    </p>
+                    <p className="text-sm text-white font-medium mt-1">
+                      {formatTrend(patterns.accuracy_trend_pp_per_10, ' pts')}
+                    </p>
+                    <p className="text-[11px] text-slate-500">per 10 attempts</p>
+                  </div>
+                  <div className="rounded-xl bg-surface-800/60 p-3">
+                    <p className="text-[11px] text-slate-400 uppercase tracking-wider">
+                      Speed trend
+                    </p>
+                    <p className="text-sm text-white font-medium mt-1">
+                      {formatTrend(patterns.speed_trend_seconds_per_10, 's')}
+                    </p>
+                    <p className="text-[11px] text-slate-500">per 10 attempts</p>
+                  </div>
+                  <div className="rounded-xl bg-surface-800/60 p-3">
+                    <p className="text-[11px] text-slate-400 uppercase tracking-wider">
+                      Consistency
+                    </p>
+                    <p className="text-sm text-white font-medium mt-1">
+                      {patterns.consistency == null ? '—' : `${patterns.consistency}`}
+                    </p>
+                    <p className="text-[11px] text-slate-500">50 – 100 scale</p>
+                  </div>
+                  <div className="rounded-xl bg-surface-800/60 p-3">
+                    <p className="text-[11px] text-slate-400 uppercase tracking-wider">
+                      Best-fit level
+                    </p>
+                    <p className="text-sm text-accent-400 font-medium capitalize mt-1">
+                      {patterns.optimal_difficulty || '—'}
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      {patterns.sample_size} attempts analysed
+                    </p>
+                  </div>
+                </div>
+
+                {adaptation && (
+                  <div
+                    className="rounded-xl border border-surface-700/50 bg-surface-900/40 p-3 mb-4"
+                    title={`Each time the served difficulty changed, accuracy over the ${adaptation.window} attempts before is compared with the ${adaptation.window} after. An adaptation counts as effective when it moved you closer to the ${adaptation.target_band.low}–${adaptation.target_band.high}% target band — not simply when accuracy rose, since a harder level is meant to bring accuracy down.`}
+                  >
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <p className="text-[11px] text-slate-400 uppercase tracking-wider">
+                        Difficulty adaptation effectiveness
+                      </p>
+                      <p className={`text-sm font-medium ${adaptationMeta.tone}`}>
+                        {adaptationMeta.label}
+                      </p>
+                    </div>
+                    {adaptation.verdict === 'insufficient_data' ? (
+                      <p className="text-xs text-slate-500 mt-1">
+                        {adaptation.adaptations_detected} difficulty change
+                        {adaptation.adaptations_detected === 1 ? '' : 's'} so far —
+                        needs {adaptation.min_events} with at least{' '}
+                        {adaptation.min_side_sample} attempts on each side.
+                      </p>
+                    ) : (
+                      <>
+                        <p className="text-sm text-white font-medium mt-1">
+                          {adaptation.effectiveness_rate}% of {adaptation.adaptations_judged}{' '}
+                          adaptations moved you toward the target band
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-1">
+                          Accuracy {adaptation.avg_accuracy_before}% →{' '}
+                          {adaptation.avg_accuracy_after}% · distance from band{' '}
+                          {adaptation.avg_band_distance_before} →{' '}
+                          {adaptation.avg_band_distance_after} pts
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {masteryRows.length > 0 && (
+                  <>
+                    <p className="text-xs text-slate-400 mb-2 uppercase tracking-wider">
+                      Mastery by type
+                    </p>
+                    <div className="space-y-2 mb-4">
+                      {masteryRows.map((row) => (
+                        <div
+                          key={row.type}
+                          className="flex items-center justify-between text-sm"
+                        >
+                          <span className="text-slate-300">{formatType(row.type)}</span>
+                          <span className="flex items-center gap-2">
+                            <span className="text-slate-400 text-xs">
+                              {row.accuracy}% · {formatTrend(row.trend_pp_per_10, '')}
+                            </span>
+                            <span
+                              className={`text-xs capitalize ${MASTERY_TONE[row.mastery] || 'text-slate-400'
+                                }`}
+                            >
+                              {row.mastery}
+                            </span>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {(patterns.time_of_day?.peak_hours?.length > 0 ||
+                  patterns.time_of_day?.low_hours?.length > 0) && (
+                    <>
+                      <p className="text-xs text-slate-400 mb-2 uppercase tracking-wider">
+                        Time of day
+                      </p>
+                      <div className="space-y-1 mb-4 text-sm">
+                        {patterns.time_of_day.peak_hours?.length > 0 && (
+                          <p className="text-slate-300">
+                            Sharpest around{' '}
+                            <span className="text-emerald-400">
+                              {patterns.time_of_day.peak_hours.map(formatHour).join(', ')}
+                            </span>
+                          </p>
+                        )}
+                        {patterns.time_of_day.low_hours?.length > 0 && (
+                          <p className="text-slate-300">
+                            Weakest around{' '}
+                            <span className="text-amber-400">
+                              {patterns.time_of_day.low_hours.map(formatHour).join(', ')}
+                            </span>
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  )}
+              </>
+            )}
+
+            <p className="text-xs text-slate-400 mb-2 uppercase tracking-wider">
+              Engagement
+            </p>
+            <div className="flex items-center justify-between text-sm mb-2">
+              <span className="text-slate-400">State</span>
+              <span className={`font-medium ${engagementMeta.tone}`}>
+                {engagementMeta.label}
+                {engagement?.state !== 'insufficient_data' &&
+                  ` · ${engagement?.engagement_score ?? 0}`}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-sm mb-2">
+              <span className="text-slate-400">Engine action</span>
+              <span className="text-white">
+                {formatBias(engagement?.directives?.difficulty_bias ?? 0)}
+              </span>
+            </div>
+            <div
+              className="flex items-center justify-between text-sm mb-2"
+              title={`Your engagement score now against the same score recomputed as it stood ${engagementTrend?.period_days ?? 14
+                } days ago, so the difference is a real change in how you have been using the app.`}
+            >
+              <span className="text-slate-400">vs {engagementTrend?.period_days ?? 14}d ago</span>
+              <span className={`font-medium ${engagementTrendMeta.tone}`}>
+                {engagementTrend?.status === 'ok'
+                  ? `${engagementTrendMeta.label} · ${engagementTrend.change > 0 ? '+' : ''
+                  }${engagementTrend.change}`
+                  : engagementTrendMeta.label}
+              </span>
+            </div>
+            {engagementTrend?.status === 'ok' && (
+              <p className="text-xs text-slate-500 mb-2">
+                {engagementTrend.previous_score} → {engagementTrend.current_score}
+                {engagementTrend.improvement_rate == null
+                  ? ''
+                  : ` (${engagementTrend.improvement_rate > 0 ? '+' : ''}${engagementTrend.improvement_rate
+                  }%)`}
+                {' · '}
+                {engagementTrend.previous_attempts} → {engagementTrend.current_attempts}{' '}
+                attempts
+              </p>
+            )}
+            <p className="text-xs text-slate-400">
+              {engagement?.directives?.reason ||
+                'Engagement tuning starts once you have a few wake-ups logged.'}
+            </p>
+          </div>
+
+          <div className="card">
             <h2 className="text-lg font-semibold text-white mb-3">By Difficulty</h2>
             <div className="space-y-3">
               {Object.entries(analysis?.by_difficulty || stats?.by_difficulty || {}).length === 0 ? (
@@ -424,11 +719,10 @@ export default function Analytics() {
                     <td className="py-3 pr-3 capitalize">{row.difficulty || '—'}</td>
                     <td className="py-3 pr-3">
                       <span
-                        className={`text-xs px-2 py-0.5 rounded-full ${
-                          row.is_correct
-                            ? 'bg-emerald-500/15 text-emerald-400'
-                            : 'bg-red-500/15 text-red-400'
-                        }`}
+                        className={`text-xs px-2 py-0.5 rounded-full ${row.is_correct
+                          ? 'bg-emerald-500/15 text-emerald-400'
+                          : 'bg-red-500/15 text-red-400'
+                          }`}
                       >
                         {row.is_correct ? 'Correct' : 'Incorrect'}
                       </span>
@@ -467,6 +761,8 @@ export default function Analytics() {
           </div>
         )}
       </motion.div>
+
+      <ActivityHealthPanel />
     </div>
   );
 }

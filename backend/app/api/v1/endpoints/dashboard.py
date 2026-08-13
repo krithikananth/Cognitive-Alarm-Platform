@@ -22,6 +22,13 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.schemas.dashboard import (
+    AlarmHistoryResponse,
+    ChallengePerformanceResponse,
+    DashboardSummaryResponse,
+    ProductivityInsightsResponse,
+    WakeStatsResponse,
+)
 from app.models.alarm import Alarm, AlarmChallengeLog
 from app.models.alarm_snooze_event import AlarmSnoozeEvent
 from app.models.alarm_wake_event import AlarmWakeEvent
@@ -78,6 +85,7 @@ def _weekly_tracker(db: Session, user_id: int) -> list:
 
 @router.get(
     "/summary",
+    response_model=DashboardSummaryResponse,
     summary="Unified dashboard summary",
 )
 def get_dashboard_summary(
@@ -264,6 +272,7 @@ def get_dashboard_summary(
 
 @router.get(
     "/alarm-history",
+    response_model=AlarmHistoryResponse,
     summary="Paginated alarm activity timeline",
 )
 def get_alarm_history(
@@ -359,6 +368,7 @@ def get_alarm_history(
 
 @router.get(
     "/wake-stats",
+    response_model=WakeStatsResponse,
     summary="Wake-up statistics aggregation",
 )
 def get_wake_stats(
@@ -380,6 +390,7 @@ def get_wake_stats(
 
 @router.get(
     "/challenge-performance",
+    response_model=ChallengePerformanceResponse,
     summary="Challenge performance dashboard summary",
 )
 def get_challenge_performance(
@@ -401,6 +412,7 @@ def get_challenge_performance(
 
 @router.get(
     "/productivity",
+    response_model=ProductivityInsightsResponse,
     summary="Productivity insights from wake behavior",
 )
 def get_productivity_insights(

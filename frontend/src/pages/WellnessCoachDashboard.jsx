@@ -23,6 +23,7 @@ import BehaviourInsights from '../components/wellness/BehaviourInsights';
 import HabitInsights from '../components/wellness/HabitInsights';
 import SleepTrends from '../components/wellness/SleepTrends';
 import ChallengePerformance from '../components/wellness/ChallengePerformance';
+import Recommendations from '../components/wellness/Recommendations';
 import WellnessAnalytics from '../components/wellness/WellnessAnalytics';
 import { clientDisplayName } from '../components/wellness/constants';
 
@@ -172,14 +173,14 @@ export default function WellnessCoachDashboard() {
                 />
 
                 <BehaviourInsights
-                  behavioral={dash.behavioral}
+                  behavioral={dash.behaviourPayload}
                   days={dash.days}
                   error={dash.clientErrors.behavioral}
                   onRetry={dash.reloadClient}
                 />
 
                 <HabitInsights
-                  behavioral={dash.behavioral}
+                  behavioral={dash.habitPayload}
                   clientRow={dash.clientRow}
                   days={dash.days}
                   error={dash.clientErrors.behavioral}
@@ -187,7 +188,7 @@ export default function WellnessCoachDashboard() {
                 />
 
                 <SleepTrends
-                  behavioral={dash.behavioral}
+                  behavioral={dash.sleepPayload}
                   clientRow={dash.clientRow}
                   days={dash.days}
                   error={dash.clientErrors.behavioral}
@@ -198,6 +199,12 @@ export default function WellnessCoachDashboard() {
                   challenge={dash.challenge}
                   clientRow={dash.clientRow}
                   error={dash.clientErrors.challenge}
+                  onRetry={dash.reloadClient}
+                />
+
+                <Recommendations
+                  digest={dash.digest}
+                  error={dash.clientErrors.recommendations}
                   onRetry={dash.reloadClient}
                 />
 

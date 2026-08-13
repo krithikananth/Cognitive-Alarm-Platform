@@ -20,13 +20,22 @@ from app.models.alarm import Alarm, AlarmType, ChallengeType, AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
 from app.models.alarm_snooze_event import AlarmSnoozeEvent
 from app.models.challenge_session import ChallengeSession
+from app.models.challenge_delivery import ChallengeDelivery
 from app.services.challenge_service import (
     ChallengeService,
+    DIFFICULTY_LEVELS,
     PRACTICE_ALARM_ID,
     VERIFY_TIME_GRACE_SECONDS,
 )
+from app.services.challenge_delivery_service import ChallengeDeliveryService
 from app.services.attempt_log_service import AttemptLogService
 from app.services.analytics_ingestion_service import AnalyticsIngestionService
+from app.services.learning_pattern_service import (
+    ENGAGEMENT_WAKE_WINDOW,
+    LEARNING_WINDOW,
+    EngagementService,
+    LearningPatternService,
+)
 from app.services.recommendation_cache import RecommendationCache
 from app.services.profile_service import ProfileService
 from app.services.adaptive_scheduling_service import AdaptiveSchedulingService
@@ -39,6 +48,20 @@ from app.schemas.alarm import (
     AlarmListResponse,
     AlarmToggle,
     SnoozeInfoResponse,
+)
+from app.schemas.challenge import (
+    ChallengeAnalysisResponse,
+    ChallengeHistoryResponse,
+    ChallengeLogHealthResponse,
+    ChallengeResponse,
+    ChallengeStatsResponse,
+    ChallengeVerifyResponse,
+    FailWakeResponse,
+    LearningProfileResponse,
+    PracticeVerifyResponse,
+    SnoozeHistoryResponse,
+    WakeConfirmationListResponse,
+    WakefulnessResponse,
 )
 from app.api.deps import get_current_user
 
@@ -76,6 +99,45 @@ def _utc_isoformat(dt: Optional[datetime]) -> Optional[str]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
+
+
+# Weekdays each recurrence pattern may ring on (Mon=0 … Sun=6).
+_ALL_WEEKDAYS = frozenset(range(7))
+_BASE_WEEKDAYS = {
+    AlarmType.DAILY: _ALL_WEEKDAYS,
+    AlarmType.WEEKDAY: frozenset(range(5)),
+    AlarmType.WEEKEND: frozenset({5, 6}),
+    AlarmType.SMART_ADAPTIVE: _ALL_WEEKDAYS,
+}
+
+
+def _allowed_weekdays(alarm: Alarm) -> frozenset:
+    """Resolve which weekdays a recurring alarm may ring on.
+
+    ``days_of_week`` narrows the pattern's base set, which is what turns a
+    daily alarm into a custom-day alarm. A selection that excludes every base
+    day (e.g. a weekday alarm restricted to Sunday) falls back to the base set
+    so an alarm can never become permanently unschedulable.
+    """
+    base = _BASE_WEEKDAYS.get(alarm.alarm_type, _ALL_WEEKDAYS)
+
+    selected = set()
+    for raw in alarm.days_of_week or []:
+        try:
+            day = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= day <= 6:
+            selected.add(day)
+
+    if not selected:
+        return base
+    return frozenset(base & selected) or base
+
+
+# /challenge/analysis reads lifetime attempt history; its completion figures
+# must cover the same span rather than a rolling window.
+ANALYSIS_COMPLETION_DAYS = 3650
 
 router = APIRouter(prefix="/alarms", tags=["Alarm Scheduling"])
 
@@ -122,6 +184,7 @@ def create_alarm(
         alarm_time=alarm_data.alarm_time,
         alarm_type=alarm_data.alarm_type,
         days_of_week=alarm_data.days_of_week,
+        one_time_date=alarm_data.one_time_date,
         snooze_limit=alarm_data.snooze_limit,
         snooze_interval_minutes=alarm_data.snooze_interval_minutes,
         challenge_type=challenge_type,
@@ -215,6 +278,7 @@ def get_upcoming_alarms(
 
 @router.get(
     "/wake-confirmations",
+    response_model=WakeConfirmationListResponse,
     summary="List wake-up confirmation events",
 )
 def list_wake_confirmations(
@@ -256,6 +320,7 @@ def list_wake_confirmations(
 
 @router.get(
     "/snooze-history",
+    response_model=SnoozeHistoryResponse,
     summary="List snooze audit events for the current user",
 )
 def list_snooze_history(
@@ -291,6 +356,7 @@ def list_snooze_history(
 
 @router.get(
     "/wakefulness",
+    response_model=WakefulnessResponse,
     summary="Assess current wakefulness from recent performance",
 )
 def get_wakefulness_assessment(
@@ -423,6 +489,7 @@ def update_alarm(
         )
 
     update_data = alarm_data.model_dump(exclude_unset=True)
+    one_time_date_provided = "one_time_date" in update_data
     one_time_date = update_data.pop("one_time_date", None)
     if "challenge_type" in update_data and update_data["challenge_type"] == ChallengeType.WORD_GAME:
         pass
@@ -434,13 +501,23 @@ def update_alarm(
     for field, value in update_data.items():
         setattr(alarm, field, value)
 
-    # Recalculate next trigger if time or type changed
-    if "alarm_time" in update_data or "alarm_type" in update_data or one_time_date is not None:
+    if one_time_date_provided:
+        alarm.one_time_date = one_time_date
+
+    # Recalculate whenever anything that shapes the schedule changed. The date
+    # is read back off the alarm, so editing an unrelated field (or just the
+    # time) can no longer drop a one-time alarm's date and silently reschedule
+    # it to today/tomorrow.
+    if (
+        "alarm_time" in update_data
+        or "alarm_type" in update_data
+        or "days_of_week" in update_data
+        or one_time_date_provided
+    ):
         user_tz = _user_timezone(db, current_user.id)
         alarm.next_trigger_at = _calculate_next_trigger(
             alarm,
             user_tz=user_tz,
-            one_time_date=one_time_date,
             db=db,
             user_id=current_user.id,
         )
@@ -486,6 +563,9 @@ def delete_alarm(
         synchronize_session=False
     )
     db.query(AlarmChallengeLog).filter(AlarmChallengeLog.alarm_id == alarm_id).delete(
+        synchronize_session=False
+    )
+    db.query(ChallengeDelivery).filter(ChallengeDelivery.alarm_id == alarm_id).delete(
         synchronize_session=False
     )
 
@@ -578,6 +658,9 @@ def snooze_alarm(
     )
     # Anti-snooze: wipe verification progress; next challenge will escalate
     ChallengeService.clear_challenge_session(current_user.id, alarm.id, db)
+    ChallengeDeliveryService.release_pending(
+        db, user_id=current_user.id, alarm_id=alarm.id, commit=False
+    )
 
     # Persist a dedicated snooze audit row (does not change FE contract)
     AttemptLogService.record_snooze(
@@ -599,6 +682,7 @@ def snooze_alarm(
 
 @router.get(
     "/{alarm_id}/challenge",
+    response_model=ChallengeResponse,
     summary="Get cognitive challenge for alarm",
 )
 def get_alarm_challenge(
@@ -613,8 +697,9 @@ def get_alarm_challenge(
       2. Profile adapted difficulty as the initial baseline
          (anchored to user preference; preference itself is never auto-changed)
       3. Strict consecutive-streak adaptive difficulty (±1 around the baseline)
-      4. Anti-snooze difficulty escalation (applied after adaptive)
-      5. Time-of-day softening (easier when groggiest)
+      4. Engagement optimization (±1, from learning state + engagement signals)
+      5. Anti-snooze difficulty escalation (applied last so it always dominates)
+      6. Time-of-day softening (easier when groggiest)
     """
     alarm = (
         db.query(Alarm)
@@ -653,17 +738,38 @@ def get_alarm_challenge(
         ),
     )
     difficulty = adaptation["difficulty"]
-    escalation = int(alarm.total_snoozes or 0)
-    difficulty = ChallengeService.escalate_difficulty(difficulty, escalation)
 
-    # ── Recent performance logs (newest first; type weighting / anti-repeat) ──
-    recent_logs = (
+    # ── Learning patterns + engagement over the wider history window ──
+    pattern_logs = (
         db.query(AlarmChallengeLog)
         .filter(AlarmChallengeLog.user_id == current_user.id)
         .order_by(AlarmChallengeLog.created_at.desc())
-        .limit(25)
+        .limit(LEARNING_WINDOW)
         .all()
     )
+    # Newest-first slice used for type weighting / prompt anti-repeat.
+    recent_logs = pattern_logs[:25]
+    wake_events = (
+        db.query(AlarmWakeEvent)
+        .filter(AlarmWakeEvent.user_id == current_user.id)
+        .order_by(AlarmWakeEvent.triggered_at.desc())
+        .limit(ENGAGEMENT_WAKE_WINDOW)
+        .all()
+    )
+    patterns = LearningPatternService.analyze(pattern_logs, tz_name=user_tz_name)
+    engagement = EngagementService.analyze(
+        pattern_logs,
+        wake_events,
+        learning_state=patterns["learning_state"],
+    )
+    directives = engagement["directives"]
+
+    # Engagement modulates the adaptive level; snooze escalation still wins.
+    difficulty = ChallengeService.apply_engagement_bias(
+        difficulty, directives["difficulty_bias"]
+    )
+    escalation = int(alarm.total_snoozes or 0)
+    difficulty = ChallengeService.escalate_difficulty(difficulty, escalation)
 
     current_hour = datetime.now(_resolve_timezone(user_tz_name)).hour
 
@@ -684,8 +790,20 @@ def get_alarm_challenge(
         exclude_prompts=exclude_prompts or None,
         # Already adapted above from stored counters; avoid double-adapt.
         apply_adaptive_difficulty=False,
+        # Bias is already folded into ``difficulty``; only novelty is left.
+        novelty_boost=directives["novelty_boost"],
+        underused_types=directives["underused_types"],
     )
     challenge["adaptive_difficulty"] = adaptation
+    challenge["engagement_bias"] = directives["difficulty_bias"]
+    challenge["engagement"] = {
+        "state": engagement["state"],
+        "score": engagement["engagement_score"],
+        "difficulty_bias": directives["difficulty_bias"],
+        "novelty_boost": directives["novelty_boost"],
+        "reason": directives["reason"],
+    }
+    challenge["learning_state"] = patterns["learning_state"]
     # Persist ±1 into adapted_difficulty only — never difficulty_preference.
     ProfileService.persist_adaptive_difficulty_if_needed(
         db,
@@ -701,6 +819,14 @@ def get_alarm_challenge(
         db,
         required_correct=alarm.challenge_count,
         escalation_level=escalation,
+    )
+    # Served-challenge half of the lifecycle; without it an unanswered
+    # challenge leaves no trace and completion rate is unmeasurable.
+    ChallengeDeliveryService.record_delivery(
+        db,
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        challenge=challenge,
     )
     return ChallengeService.public_challenge_payload(
         challenge,
@@ -738,6 +864,7 @@ class DismissRequest(BaseModel):
 
 @router.post(
     "/{alarm_id}/verify",
+    response_model=ChallengeVerifyResponse,
     summary="Verify challenge answer",
 )
 def verify_alarm_challenge(
@@ -816,6 +943,14 @@ def verify_alarm_challenge(
         failed_attempts=data.failed_attempts,
         points_earned=score["total_points"],
         commit=True,
+    )
+    ChallengeDeliveryService.resolve_delivery(
+        db,
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        is_correct=is_correct,
+        time_taken_seconds=time_taken,
+        timed_out=timed_out,
     )
 
     required_steps = max(1, int(session.get("required_correct") or alarm.challenge_count or 1))
@@ -1052,6 +1187,7 @@ def dismiss_alarm(
 
 @router.post(
     "/{alarm_id}/fail-wake",
+    response_model=FailWakeResponse,
     summary="Record a final failed wake (abandon active cycle)",
 )
 def fail_wake(
@@ -1205,6 +1341,9 @@ def _fail_wake_internal(
 
     alarm.total_snoozes = 0
     ChallengeService.clear_challenge_session(current_user.id, alarm.id, db)
+    ChallengeDeliveryService.release_pending(
+        db, user_id=current_user.id, alarm_id=alarm.id, commit=False
+    )
 
     db.commit()
     db.refresh(alarm)
@@ -1345,6 +1484,9 @@ def _dismiss_alarm_internal(
 
     alarm.total_snoozes = 0
     ChallengeService.clear_challenge_session(current_user.id, alarm.id, db)
+    ChallengeDeliveryService.release_pending(
+        db, user_id=current_user.id, alarm_id=alarm.id, commit=False
+    )
 
     db.commit()
     db.refresh(alarm)
@@ -1360,6 +1502,7 @@ def _dismiss_alarm_internal(
 
 @router.get(
     "/{alarm_id}/challenge/history",
+    response_model=ChallengeHistoryResponse,
     summary="Get challenge attempt history for an alarm",
 )
 def get_challenge_history(
@@ -1453,6 +1596,7 @@ def _parse_practice_challenge_type(raw: Optional[str]) -> ChallengeType:
 
 @router.post(
     "/challenge/practice",
+    response_model=ChallengeResponse,
     summary="Start a practice cognitive challenge",
 )
 def start_practice_challenge(
@@ -1485,6 +1629,11 @@ def start_practice_challenge(
         .all()
     )
 
+    # Practice keeps the requested difficulty, but still benefits from the
+    # engagement engine's variety pressure when the user did not pick a type.
+    engagement = EngagementService.analyze(recent_logs)
+    directives = engagement["directives"]
+
     user_tz_name = profile.timezone or "UTC"
     current_hour = datetime.now(_resolve_timezone(user_tz_name)).hour
 
@@ -1504,6 +1653,8 @@ def start_practice_challenge(
         exclude_prompts=exclude_prompts or None,
         # Practice should not shift adaptive difficulty from wake streaks.
         apply_adaptive_difficulty=False,
+        novelty_boost=directives["novelty_boost"],
+        underused_types=directives["underused_types"],
     )
 
     ChallengeService.store_challenge_session(
@@ -1527,6 +1678,7 @@ def start_practice_challenge(
 
 @router.post(
     "/challenge/practice/verify",
+    response_model=PracticeVerifyResponse,
     summary="Verify a practice challenge answer",
 )
 def verify_practice_challenge(
@@ -1617,6 +1769,7 @@ def verify_practice_challenge(
 
 @router.get(
     "/challenge/log-health",
+    response_model=ChallengeLogHealthResponse,
     summary="Audit attempt-log cleanliness and queryability",
 )
 def get_challenge_log_health(
@@ -1643,6 +1796,7 @@ def get_challenge_log_health(
 
 @router.get(
     "/challenge/stats",
+    response_model=ChallengeStatsResponse,
     summary="Get challenge performance statistics",
 )
 def get_challenge_stats(
@@ -1731,6 +1885,7 @@ def get_challenge_stats(
 
 @router.get(
     "/challenge/history",
+    response_model=ChallengeHistoryResponse,
     summary="Get all challenge attempt history for the current user",
 )
 def get_user_challenge_history(
@@ -1773,6 +1928,7 @@ def get_user_challenge_history(
 
 @router.get(
     "/challenge/analysis",
+    response_model=ChallengeAnalysisResponse,
     summary="Deep challenge completion analysis and recommendations",
 )
 def get_challenge_analysis(
@@ -1790,7 +1946,11 @@ def get_challenge_analysis(
         .order_by(AlarmChallengeLog.created_at.desc())
         .all()
     )
-    analysis = ChallengeService.analyze_completion(logs)
+    # Lifetime history, so the completion window must be lifetime too.
+    completion = ChallengeDeliveryService.compute_completion_stats(
+        db, current_user.id, ANALYSIS_COMPLETION_DAYS
+    )
+    analysis = ChallengeService.analyze_completion(logs, completion=completion)
 
     # Attach current personalization context
     preferred = []
@@ -1833,12 +1993,84 @@ def get_challenge_analysis(
         )
     else:
         adaptation = ChallengeService.adapt_difficulty(difficulty, logs[:20])
+
+    tz_name = getattr(current_user.profile, "timezone", None) or "UTC"
+    pattern_logs = logs[:LEARNING_WINDOW]
+    wake_events = (
+        db.query(AlarmWakeEvent)
+        .filter(AlarmWakeEvent.user_id == current_user.id)
+        .order_by(AlarmWakeEvent.triggered_at.desc())
+        .limit(ENGAGEMENT_WAKE_WINDOW)
+        .all()
+    )
+    patterns = LearningPatternService.analyze(pattern_logs, tz_name=tz_name)
+    engagement = EngagementService.analyze(
+        pattern_logs, wake_events, learning_state=patterns["learning_state"]
+    )
+
     analysis["personalization"] = {
         "preferred_challenge_types": preferred,
         "difficulty_preference": difficulty,
         "adaptive_difficulty": adaptation,
+        "learning_patterns": patterns,
+        "engagement": engagement,
     }
     return analysis
+
+
+@router.get(
+    "/challenge/learning-profile",
+    response_model=LearningProfileResponse,
+    summary="Learning-pattern profile and engagement directives",
+)
+def get_learning_profile(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the learning profile driving adaptive difficulty for this user.
+
+    Exposes exactly what the challenge engine consumes at ring time: per-type
+    mastery and learning slope, per-difficulty competence, estimated optimal
+    difficulty, time-of-day performance, and the engagement directives that
+    bias difficulty and challenge-type selection.
+    """
+    profile = ProfileService.get_or_create_profile(db, current_user.id)
+    logs = (
+        db.query(AlarmChallengeLog)
+        .filter(AlarmChallengeLog.user_id == current_user.id)
+        .order_by(AlarmChallengeLog.created_at.desc())
+        .limit(LEARNING_WINDOW)
+        .all()
+    )
+    wake_events = (
+        db.query(AlarmWakeEvent)
+        .filter(AlarmWakeEvent.user_id == current_user.id)
+        .order_by(AlarmWakeEvent.triggered_at.desc())
+        .limit(ENGAGEMENT_WAKE_WINDOW)
+        .all()
+    )
+
+    patterns = LearningPatternService.analyze(
+        logs, tz_name=profile.timezone or "UTC"
+    )
+    engagement = EngagementService.analyze(
+        logs, wake_events, learning_state=patterns["learning_state"]
+    )
+
+    baseline = ChallengeService.resolve_baseline_difficulty(profile, None)
+    projected = ChallengeService.apply_engagement_bias(
+        baseline, engagement["directives"]["difficulty_bias"]
+    )
+
+    return {
+        "learning_patterns": patterns,
+        "engagement": engagement,
+        "current_baseline_difficulty": baseline,
+        # What the next alarm challenge centres on before snooze escalation
+        # and time-of-day softening.
+        "projected_difficulty": projected,
+        "difficulty_levels": list(DIFFICULTY_LEVELS),
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1903,6 +2135,13 @@ def _calculate_next_trigger(
     ``alarm.alarm_time`` is interpreted as wall-clock time in the user's
     local timezone, then converted to UTC for storage/comparison.
 
+    One-time alarms fire on their stored ``one_time_date`` (an explicit
+    ``one_time_date`` argument wins, for the create request that supplies it)
+    and return ``None`` once that instant has passed.
+
+    Recurring alarms scan forward for the first allowed weekday; see
+    ``_allowed_weekdays`` for how ``days_of_week`` narrows each pattern.
+
     Smart Adaptive alarms optionally use ``db`` / ``user_id`` to shift the
     ring time from habit, snooze, wake-consistency, and sleep-schedule signals.
     Other alarm types ignore those arguments and keep fixed schedules.
@@ -1911,51 +2150,43 @@ def _calculate_next_trigger(
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(tz)
 
-    if alarm.alarm_type == AlarmType.ONE_TIME and one_time_date is not None:
-        local_dt = datetime.combine(one_time_date, alarm.alarm_time, tzinfo=tz)
-        if local_dt <= now_local:
-            return None
-        return _to_utc_naive(local_dt)
-
-    local_dt = datetime.combine(now_local.date(), alarm.alarm_time, tzinfo=tz)
-
     if alarm.alarm_type == AlarmType.ONE_TIME:
-        if local_dt > now_local:
+        target_date = (
+            one_time_date
+            if one_time_date is not None
+            else getattr(alarm, "one_time_date", None)
+        )
+        if target_date is not None:
+            local_dt = datetime.combine(target_date, alarm.alarm_time, tzinfo=tz)
+            if local_dt <= now_local:
+                return None
             return _to_utc_naive(local_dt)
-        # Past today's wall-clock time with no explicit date → tomorrow
-        return _to_utc_naive(local_dt + timedelta(days=1))
-
-    if alarm.alarm_type == AlarmType.DAILY:
-        if local_dt > now_local:
-            return _to_utc_naive(local_dt)
-        return _to_utc_naive(local_dt + timedelta(days=1))
-
-    if alarm.alarm_type == AlarmType.WEEKDAY:
-        # Monday=0 through Friday=4
-        for offset in range(7):
-            candidate = local_dt + timedelta(days=offset)
-            if candidate > now_local and candidate.weekday() < 5:
-                return _to_utc_naive(candidate)
-        return _to_utc_naive(local_dt + timedelta(days=1))
-
-    if alarm.alarm_type == AlarmType.WEEKEND:
-        # Saturday=5, Sunday=6
-        for offset in range(7):
-            candidate = local_dt + timedelta(days=offset)
-            if candidate > now_local and candidate.weekday() >= 5:
-                return _to_utc_naive(candidate)
-        return _to_utc_naive(local_dt + timedelta(days=1))
-
-    if alarm.alarm_type == AlarmType.SMART_ADAPTIVE:
-        if db is not None and user_id is not None:
-            adapted_local = AdaptiveSchedulingService.compute_next_local_trigger(
-                db, user_id, alarm, now_local, tz
-            )
-            return _to_utc_naive(adapted_local)
-        # Fallback when called without DB context — same as daily at alarm_time
+        # Legacy rows predating stored one-time dates: next occurrence of the
+        # wall-clock time, exactly as before.
+        local_dt = datetime.combine(now_local.date(), alarm.alarm_time, tzinfo=tz)
         if local_dt > now_local:
             return _to_utc_naive(local_dt)
         return _to_utc_naive(local_dt + timedelta(days=1))
 
-    return _to_utc_naive(local_dt + timedelta(days=1))
+    ring_time = alarm.alarm_time
+    if (
+        alarm.alarm_type == AlarmType.SMART_ADAPTIVE
+        and db is not None
+        and user_id is not None
+    ):
+        ring_time = AdaptiveSchedulingService.compute_adapted_alarm_time(
+            db, user_id, alarm
+        )
+
+    local_dt = datetime.combine(now_local.date(), ring_time, tzinfo=tz)
+    allowed = _allowed_weekdays(alarm)
+
+    # Offsets 1-7 always cover every weekday, so a non-empty allowed set
+    # cannot fail to match.
+    for offset in range(8):
+        candidate = local_dt + timedelta(days=offset)
+        if candidate > now_local and candidate.weekday() in allowed:
+            return _to_utc_naive(candidate)
+
+    return None
 

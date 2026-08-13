@@ -17,12 +17,15 @@ from app.models.notification import NotificationType
 from app.models.user import User
 from app.schemas.notification import (
     DeviceTokenRegister,
+    DeviceTokenRemovedResponse,
     DeviceTokenResponse,
+    MarkAllReadResponse,
     NotificationListResponse,
     NotificationMarkRead,
     NotificationPreferenceResponse,
     NotificationPreferenceUpdate,
     NotificationResponse,
+    TestNotificationResponse,
     UnreadCountResponse,
 )
 from app.services.notification_service import NotificationService
@@ -56,6 +59,7 @@ def register_device_token(
 
 @router.delete(
     "/device-token",
+    response_model=DeviceTokenRemovedResponse,
     status_code=status.HTTP_200_OK,
     summary="Unregister FCM device token",
 )
@@ -196,6 +200,7 @@ def get_unread_count(
 
 @router.post(
     "/mark-read",
+    response_model=MarkAllReadResponse,
     status_code=status.HTTP_200_OK,
     summary="Mark notifications as read",
 )
@@ -215,6 +220,7 @@ def mark_read(
 
 @router.post(
     "/test",
+    response_model=TestNotificationResponse,
     status_code=status.HTTP_200_OK,
     summary="Send a test notification",
 )

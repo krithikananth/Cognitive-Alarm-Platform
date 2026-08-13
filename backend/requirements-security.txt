@@ -1,0 +1,11 @@
+# Security tooling — installed separately from the runtime image so scanners
+# never ship to production.
+#
+#   pip install -r requirements-security.txt
+#   python ../scripts/security_scan.py
+#
+# pip-audit  → OWASP A06, known CVEs in the pinned dependency set
+# bandit     → SAST over application source (hardcoded secrets, weak crypto,
+#              subprocess/eval misuse, unsafe deserialization)
+pip-audit==2.7.3
+bandit==1.7.9

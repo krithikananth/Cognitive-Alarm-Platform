@@ -17,6 +17,7 @@ from app.schemas.profile import (
     SleepScheduleUpdate,
     GoalsUpdate,
     HabitPreferencesUpdate,
+    HabitScoreResponse,
 )
 from app.api.deps import get_current_user
 from app.services.habit_score import (
@@ -177,6 +178,7 @@ def update_habit_preferences(
 
 @router.get(
     "/me/habit-score",
+    response_model=HabitScoreResponse,
     summary="Get habit score breakdown",
 )
 def get_habit_score(

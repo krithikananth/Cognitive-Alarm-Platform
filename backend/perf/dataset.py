@@ -30,9 +30,14 @@ from app.models.profile import DifficultyPreference, UserProfile
 from app.models.user import User, UserRole
 
 # Every model module must be imported before ``create_all`` so the metadata is
-# complete; these are referenced only for that side effect.
+# complete; these are referenced only for that side effect. A model missing
+# here creates a database the app cannot serve from: the first request that
+# touches the absent table fails with "no such table".
+from app.models import challenge_delivery as _challenge_delivery  # noqa: F401
 from app.models import challenge_session as _challenge_session  # noqa: F401
 from app.models import notification as _notification  # noqa: F401
+from app.models import recommendation_feedback as _recommendation_feedback  # noqa: F401
+from app.models import revoked_token as _revoked_token  # noqa: F401
 from app.models import system_settings as _system_settings  # noqa: F401
 
 CHALLENGE_TYPES = ["math", "word_game", "memory", "pattern", "logic"]

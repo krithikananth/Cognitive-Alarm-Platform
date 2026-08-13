@@ -32,6 +32,7 @@ export default function BehaviourInsights({ behavioral, days, error, onRetry }) 
   const snooze = behavioral?.snooze_pattern;
   const wake = behavioral?.wake_up_consistency;
   const sleep = behavioral?.sleep_schedule_adherence;
+  const verification = behavioral?.verification_accuracy;
 
   const snoozeTrend = useMemo(() => {
     const base = trendMeta(snooze?.trend);
@@ -50,6 +51,41 @@ export default function BehaviourInsights({ behavioral, days, error, onRetry }) 
   const SnoozeTrendIcon = snoozeTrend.Icon;
   const WakeTrendIcon = wakeTrend.Icon;
   const SleepTrendIcon = sleepTrend.Icon;
+
+  const reductionPeriodLabel = `${snooze?.reduction?.period_days ?? 7} days`;
+
+  const reduction = useMemo(() => {
+    const block = snooze?.reduction;
+    const perWake = (value) => (value != null ? value.toFixed(2) : '—');
+    const comparison =
+      block?.status === 'insufficient_data'
+        ? '—'
+        : `${perWake(block?.previous_snoozes_per_wake)} → ${perWake(
+          block?.current_snoozes_per_wake
+        )}`;
+
+    if (!block || block.status === 'insufficient_data') {
+      return {
+        label: '—',
+        comparison,
+        hint: `Needs at least ${block?.min_wakes_required ?? 3
+          } wake events in the last ${reductionPeriodLabel} and in the ${reductionPeriodLabel} before it`,
+      };
+    }
+    if (block.status === 'no_baseline_snoozes') {
+      return {
+        label: block.current_snoozes === 0 ? 'No snoozes' : 'New snoozing',
+        comparison,
+        hint: `There were no snoozes in the previous ${reductionPeriodLabel}, so a percentage reduction cannot be calculated`,
+      };
+    }
+    const rate = block.reduction_rate;
+    return {
+      label: `${rate > 0 ? '−' : rate < 0 ? '+' : ''}${Math.abs(rate)}%`,
+      comparison,
+      hint: `Change in snoozes per wake-up over the last ${reductionPeriodLabel} versus the ${reductionPeriodLabel} before it. Normalised per wake event so fewer alarms does not read as improvement.`,
+    };
+  }, [snooze, reductionPeriodLabel]);
 
   const toleranceMinutes = wake?.tolerance_minutes ?? sleep?.tolerance_minutes ?? null;
   const toleranceLabel =
@@ -107,7 +143,7 @@ export default function BehaviourInsights({ behavioral, days, error, onRetry }) 
             </div>
           )}
 
-          <div className="grid md:grid-cols-3 gap-4 mb-5">
+          <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-4 mb-5">
             <MetricBlock
               title="Snooze Pattern"
               description="How often this client snoozes before getting up, from recorded snooze events."
@@ -123,6 +159,16 @@ export default function BehaviourInsights({ behavioral, days, error, onRetry }) 
                   'Avg per wake-up',
                   snooze?.avg_snoozes_per_wake ?? 0,
                   'Mean number of snoozes before a verified wake-up',
+                ],
+                [
+                  'Snooze reduction',
+                  reduction.label,
+                  reduction.hint,
+                ],
+                [
+                  'Snoozes per wake-up',
+                  reduction.comparison,
+                  `Snoozes per wake event in the last ${reductionPeriodLabel}, against the ${reductionPeriodLabel} before it`,
                 ],
                 [
                   'Hit snooze limit',
@@ -212,6 +258,44 @@ export default function BehaviourInsights({ behavioral, days, error, onRetry }) 
                   'Avg deviation',
                   sleep?.avg_deviation_minutes != null ? `${sleep.avg_deviation_minutes}m` : '—',
                   'Average gap between actual and preferred wake time',
+                ],
+              ]}
+            />
+            <MetricBlock
+              title="Verification Accuracy"
+              description="Whether the wake-up check reached the right verdict on the answers it collected. Separate from how often the client woke up successfully."
+              rows={[
+                [
+                  'Correct verdicts',
+                  verification?.accuracy_rate != null
+                    ? `${verification.accuracy_rate}%`
+                    : '—',
+                  verification?.status === 'ok'
+                    ? `${verification.correct_decisions} of ${verification.decisions} finished wake-ups were released only after the required consecutive correct answers, and rejected only without them`
+                    : `Needs at least ${verification?.min_decisions_required ?? 3
+                    } finished wake-ups in this period (${verification?.decisions ?? 0} so far)`,
+                ],
+                [
+                  'Confirmed first try',
+                  verification?.first_pass_rate != null
+                    ? `${verification.first_pass_rate}%`
+                    : '—',
+                  'Share of confirmed wake-ups that needed no wrong answer at all — an unambiguous confirmation',
+                ],
+                [
+                  'Answers per wake',
+                  verification?.avg_answers_per_verification ?? '—',
+                  'Answers the check had to collect before confirming a wake-up',
+                ],
+                [
+                  'Released unconfirmed',
+                  verification?.false_verifications ?? 0,
+                  'Wake-ups marked verified without meeting the required number of consecutive correct answers',
+                ],
+                [
+                  'Confirmed but rejected',
+                  verification?.missed_verifications ?? 0,
+                  'Wake-ups that met the requirement but were not marked verified',
                 ],
               ]}
             />

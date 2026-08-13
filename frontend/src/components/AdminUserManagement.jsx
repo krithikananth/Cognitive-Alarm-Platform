@@ -121,11 +121,10 @@ function ConfirmDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className={`flex-1 px-4 py-2 rounded-xl text-white font-medium transition disabled:opacity-50 ${
-              danger
+            className={`flex-1 px-4 py-2 rounded-xl text-white font-medium transition disabled:opacity-50 ${danger
                 ? 'bg-red-600 hover:bg-red-500'
                 : 'bg-primary-600 hover:bg-primary-500'
-            }`}
+              }`}
           >
             {busy ? busyLabel : confirmLabel}
           </button>
@@ -137,7 +136,7 @@ function ConfirmDialog({
 
 // ─── Edit user modal ───
 
-function EditUserModal({ user, isSelf, saving, onSave, onClose }) {
+function EditUserModal({ user, detail, isSelf, saving, onSave, onClose }) {
   const [form, setForm] = useState({
     full_name: user.full_name || '',
     email: user.email || '',
@@ -209,6 +208,13 @@ function EditUserModal({ user, isSelf, saving, onSave, onClose }) {
             <HiOutlineXMark className="w-5 h-5 text-slate-400" />
           </button>
         </div>
+
+        {detail ? (
+          <p className="text-xs text-slate-500 mb-4 rounded-lg border border-surface-700/50 px-3 py-2">
+            {detail.total_alarms ?? 0} alarms · {detail.verified_wakes ?? 0} verified
+            wakes · joined {detail.created_at ? detail.created_at.slice(0, 10) : '—'}
+          </p>
+        ) : null}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
@@ -315,6 +321,7 @@ export default function AdminUserManagement({ onUsersChanged }) {
   const [perPage, setPerPage] = useState(20);
 
   const [editingUser, setEditingUser] = useState(null);
+  const [editingDetail, setEditingDetail] = useState(null);
   const [saving, setSaving] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -395,6 +402,19 @@ export default function AdminUserManagement({ onUsersChanged }) {
     setPage(1);
   };
 
+  // The row comes from a cached page, so re-read the record before editing and
+  // pull the activity detail alongside it.
+  const openEditor = async (row) => {
+    setEditingUser(row);
+    setEditingDetail(null);
+    const [fresh, detail] = await Promise.allSettled([
+      adminAPI.getUser(row.id),
+      adminAPI.getUserDetail(row.id),
+    ]);
+    if (fresh.status === 'fulfilled') setEditingUser(fresh.value.data);
+    if (detail.status === 'fulfilled') setEditingDetail(detail.value.data);
+  };
+
   const handleSaveUser = async (payload) => {
     if (!editingUser) return;
     setSaving(true);
@@ -402,6 +422,7 @@ export default function AdminUserManagement({ onUsersChanged }) {
       await adminAPI.updateUser(editingUser.id, payload);
       toast.success(`Updated ${editingUser.username}`);
       setEditingUser(null);
+      setEditingDetail(null);
       await refreshAfterMutation();
     } catch (err) {
       toast.error(extractError(err, 'Failed to update user'));
@@ -640,25 +661,22 @@ export default function AdminUserManagement({ onUsersChanged }) {
                     <td className="py-3 px-3 text-slate-300">{u.full_name || '—'}</td>
                     <td className="py-3 px-3">
                       <span
-                        className={`px-2 py-0.5 rounded-lg text-[11px] font-semibold uppercase tracking-wider ${
-                          u.role === 'admin'
+                        className={`px-2 py-0.5 rounded-lg text-[11px] font-semibold uppercase tracking-wider ${u.role === 'admin'
                             ? 'bg-primary-500/15 text-primary-400 border border-primary-500/30'
                             : 'bg-surface-700/50 text-slate-400 border border-surface-600/30'
-                        }`}
+                          }`}
                       >
                         {roleLabel(u.role)}
                       </span>
                     </td>
                     <td className="py-3 px-3">
                       <span
-                        className={`inline-flex items-center gap-1.5 text-xs font-medium ${
-                          u.is_active !== false ? 'text-emerald-400' : 'text-red-400'
-                        }`}
+                        className={`inline-flex items-center gap-1.5 text-xs font-medium ${u.is_active !== false ? 'text-emerald-400' : 'text-red-400'
+                          }`}
                       >
                         <span
-                          className={`w-2 h-2 rounded-full ${
-                            u.is_active !== false ? 'bg-emerald-400' : 'bg-red-400'
-                          }`}
+                          className={`w-2 h-2 rounded-full ${u.is_active !== false ? 'bg-emerald-400' : 'bg-red-400'
+                            }`}
                         />
                         {u.is_active !== false ? 'Active' : 'Inactive'}
                       </span>
@@ -675,7 +693,7 @@ export default function AdminUserManagement({ onUsersChanged }) {
                       <div className="flex items-center justify-end gap-1">
                         <button
                           type="button"
-                          onClick={() => setEditingUser(u)}
+                          onClick={() => openEditor(u)}
                           disabled={busy}
                           className="p-2 rounded-lg hover:bg-primary-500/10 transition disabled:opacity-40"
                           title="Edit user"
@@ -775,10 +793,11 @@ export default function AdminUserManagement({ onUsersChanged }) {
         {editingUser ? (
           <EditUserModal
             user={editingUser}
+            detail={editingDetail}
             isSelf={String(editingUser.id) === String(currentUser?.id)}
             saving={saving}
             onSave={handleSaveUser}
-            onClose={() => !saving && setEditingUser(null)}
+            onClose={() => !saving && (setEditingUser(null), setEditingDetail(null))}
           />
         ) : null}
       </AnimatePresence>

@@ -1,8 +1,12 @@
 /**
- * Axios API client with JWT interceptor for auto-refresh.
+ * Axios API client backed by HttpOnly session cookies.
+ *
+ * JWTs are never stored in localStorage/sessionStorage — the backend sets
+ * HttpOnly cookies on login/refresh, so injected scripts cannot read a session.
+ * Expired access cookies are recovered reactively via POST /auth/refresh.
  */
 import axios from 'axios';
-import { jwtDecode } from 'jwt-decode';
+import { REQUEST_ID_HEADER, newRequestId, setLastRequestId } from './requestId';
 
 const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
@@ -10,9 +14,24 @@ const api = axios.create({
   baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
   timeout: 15000,
+  // Required so the browser sends/stores the HttpOnly auth cookies.
+  withCredentials: true,
 });
 
-/** Shared in-flight refresh so concurrent 401s / expiry checks share one call. */
+// ─── Request interceptor: correlate this call with the server's logs ───
+// The backend honours and echoes this id, so a browser error report and the
+// server records for the same action share one traceable value.
+export function withCorrelationId(config = {}) {
+  const requestId = newRequestId();
+  config.headers = config.headers || {};
+  config.headers[REQUEST_ID_HEADER] = requestId;
+  setLastRequestId(requestId);
+  return config;
+}
+
+api.interceptors.request.use(withCorrelationId);
+
+/** Shared in-flight refresh so concurrent 401s share one call. */
 let refreshPromise = null;
 
 const AUTH_SKIP_REFRESH_PATHS = [
@@ -30,96 +49,46 @@ function shouldSkipTokenRefresh(url = '') {
   return AUTH_SKIP_REFRESH_PATHS.some((path) => url.includes(path));
 }
 
-function isAccessTokenValid(token, skewMs = 30000) {
-  if (!token) return false;
-  try {
-    const { exp } = jwtDecode(token);
-    if (!exp) return false;
-    return exp * 1000 > Date.now() + skewMs;
-  } catch {
-    return false;
-  }
+/**
+ * Non-sensitive marker telling the UI a session cookie should exist.
+ * The cookies themselves are HttpOnly and unreadable from JS.
+ */
+const SESSION_FLAG = 'icap_session';
+
+export function markSessionActive() {
+  localStorage.setItem(SESSION_FLAG, '1');
+}
+
+export function hasActiveSession() {
+  return localStorage.getItem(SESSION_FLAG) === '1';
+}
+
+export function clearSessionFlag() {
+  localStorage.removeItem(SESSION_FLAG);
 }
 
 /**
- * Refresh access token. Concurrent callers share one in-flight request.
+ * Ask the backend for a fresh access cookie. The refresh token travels in the
+ * HttpOnly cookie, so nothing sensitive is read or written by JS here.
  */
 async function refreshAccessToken() {
-  const refreshToken = localStorage.getItem('refresh_token');
-  if (!refreshToken) {
-    throw new Error('No refresh token');
-  }
-
   if (!refreshPromise) {
     refreshPromise = axios
-      .post(`${API_BASE}/auth/refresh`, { refresh_token: refreshToken })
-      .then(({ data }) => {
-        localStorage.setItem('access_token', data.access_token);
-        localStorage.setItem('refresh_token', data.refresh_token);
-        return data.access_token;
-      })
+      .post(`${API_BASE}/auth/refresh`, {}, { withCredentials: true })
       .finally(() => {
         refreshPromise = null;
       });
   }
-
   return refreshPromise;
 }
 
-/**
- * Return a usable access token, refreshing once if expired/near-expiry.
- * Concurrent callers await the same refreshPromise (no stampede).
- */
-async function getValidAccessToken() {
-  const accessToken = localStorage.getItem('access_token');
-  if (isAccessTokenValid(accessToken)) {
-    return accessToken;
-  }
-
-  if (!localStorage.getItem('refresh_token')) {
-    return accessToken; // may be missing/expired; caller still attaches if present
-  }
-
-  return refreshAccessToken();
-}
-
 function clearSessionAndRedirect() {
-  localStorage.removeItem('access_token');
-  localStorage.removeItem('refresh_token');
+  clearSessionFlag();
   localStorage.removeItem('user');
   window.location.href = '/login';
 }
 
-// ─── Request interceptor: attach JWT (refresh proactively if expired) ───
-api.interceptors.request.use(
-  async (config) => {
-    if (shouldSkipTokenRefresh(config.url)) {
-      const token = localStorage.getItem('access_token');
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-      return config;
-    }
-
-    try {
-      const token = await getValidAccessToken();
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-    } catch {
-      // Refresh failed here — still attach existing token if any; response
-      // interceptor will clear the session on 401.
-      const token = localStorage.getItem('access_token');
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
-
-// ─── Response interceptor: auto-refresh on 401 ───
+// ─── Response interceptor: refresh the session cookie once on 401 ───
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -136,10 +105,7 @@ api.interceptors.response.use(
       originalRequest._retry = true;
 
       try {
-        // Always refresh on 401 — token may be unexpired locally but rejected
-        // by the server (e.g. SECRET_KEY change). Share in-flight refresh.
-        const accessToken = await refreshAccessToken();
-        originalRequest.headers.Authorization = `Bearer ${accessToken}`;
+        await refreshAccessToken();
         return api(originalRequest);
       } catch (refreshError) {
         clearSessionAndRedirect();
@@ -155,9 +121,13 @@ api.interceptors.response.use(
 export const authAPI = {
   register: (data) => api.post('/auth/register', data),
   login: (data) => api.post('/auth/login', data),
-  refresh: (refreshToken) => api.post('/auth/refresh', { refresh_token: refreshToken }),
+  // No `refresh` helper: the 401 interceptor above must call /auth/refresh on a
+  // bare axios instance, otherwise its own interceptor would recurse.
   logout: () => api.post('/auth/logout'),
+  logoutAll: () => api.post('/auth/logout-all'),
   me: () => api.get('/auth/me'),
+  // The only route that can change an email address; PUT /users/profile cannot.
+  updateMe: (data) => api.put('/auth/me', data),
   forgotPassword: (data) => api.post('/auth/forgot-password', data),
   resetPassword: (data) => api.post('/auth/reset-password', data),
   verifyEmail: (data) => api.post('/auth/verify-email', data),
@@ -176,6 +146,17 @@ export const userAPI = {
   updateGoals: (data) => api.put('/users/profile/goals', data),
   getStats: () => api.get('/users/profile/stats'),
   deleteAccount: () => api.delete('/users/account'),
+};
+
+// ─── Profile resource API (/profiles) ───
+// The raw profile record, which carries fields the /users/profile bundle does
+// not expose: adapted difficulty, consistency score and lifetime counters.
+export const profileAPI = {
+  getMe: () => api.get('/profiles/me'),
+  /** GET /profiles/me/habit-score — weighted habit score with its components */
+  getHabitScore: () => api.get('/profiles/me/habit-score'),
+  /** PATCH /profiles/me/habits — habit preferences (no /users equivalent) */
+  updateHabits: (data) => api.patch('/profiles/me/habits', data),
 };
 
 // ─── Alarm API ───
@@ -200,6 +181,13 @@ export const alarmAPI = {
   getChallengeHistory: (params = {}) =>
     api.get('/alarms/challenge/history', { params }),
   getChallengeAnalysis: () => api.get('/alarms/challenge/analysis'),
+  /** GET /alarms/challenge/learning-profile — learning patterns and engagement */
+  getLearningProfile: () => api.get('/alarms/challenge/learning-profile'),
+  /** GET /alarms/challenge/log-health — attempt-log integrity for the caller */
+  getChallengeLogHealth: () => api.get('/alarms/challenge/log-health'),
+  /** GET /alarms/snooze-history — per-snooze audit rows */
+  getSnoozeHistory: (params = {}) =>
+    api.get('/alarms/snooze-history', { params }),
   getAlarmChallengeHistory: (id, params = {}) =>
     api.get(`/alarms/${id}/challenge/history`, { params }),
   getWakefulness: () => api.get('/alarms/wakefulness'),
@@ -214,6 +202,11 @@ export const recommendationAPI = {
   getSleep: () => api.get('/recommendations/sleep'),
   getWake: () => api.get('/recommendations/wake'),
   getProductivity: () => api.get('/recommendations/productivity'),
+  getRelevance: (params = {}) => api.get('/recommendations/relevance', { params }),
+  sendFeedback: (id, rating) =>
+    api.put(`/recommendations/${encodeURIComponent(id)}/feedback`, { rating }),
+  clearFeedback: (id) =>
+    api.delete(`/recommendations/${encodeURIComponent(id)}/feedback`),
 };
 
 // ─── Behavioral Analytics API (pandas/numpy aggregates) + event ingest ───
@@ -224,8 +217,14 @@ export const analyticsAPI = {
     api.get('/analytics/behavioral/snooze', { params: { days } }),
   getWakeConsistency: (days = 30) =>
     api.get('/analytics/behavioral/wake-consistency', { params: { days } }),
+  getVerificationAccuracy: (days = 30) =>
+    api.get('/analytics/behavioral/verification-accuracy', { params: { days } }),
   getSleepAdherence: (days = 30) =>
     api.get('/analytics/behavioral/sleep-adherence', { params: { days } }),
+  getSleepPatterns: (days = 30) =>
+    api.get('/analytics/behavioral/sleep-patterns', { params: { days } }),
+  getProductivityCorrelation: (days = 30) =>
+    api.get('/analytics/behavioral/productivity-correlation', { params: { days } }),
   getWeeklyTrends: (days = 30) =>
     api.get('/analytics/behavioral/trends/weekly', { params: { days } }),
   getMonthlyTrends: (days = 30) =>
@@ -233,6 +232,8 @@ export const analyticsAPI = {
   getHabitTrends: (days = 30) =>
     api.get('/analytics/behavioral/habits', { params: { days } }),
   getSummary: () => api.get('/analytics/summary'),
+  /** GET /analytics/events — the caller's own recorded events */
+  listEvents: (params = {}) => api.get('/analytics/events', { params }),
   /** POST /analytics/events — single client event ingest */
   postEvent: (event) => api.post('/analytics/events', event),
   /** POST /analytics/events/batch — up to 100 events */
@@ -281,6 +282,8 @@ export const adminAPI = {
   /** GET /admin/users/{id} — deep read-only detail with profile and activity */
   getUserDetail: (userId, params = {}) =>
     api.get(`/admin/users/${userId}`, { params }),
+  /** GET /users/{id} — the plain user record, used to refresh an edit form */
+  getUser: (userId) => api.get(`/users/${userId}`),
   /** PUT /users/{id} — admin edit of full_name, email, role, is_active */
   updateUser: (userId, data) => api.put(`/users/${userId}`, data),
   activateUser: (userId) => api.post(`/users/${userId}/activate`),
@@ -338,6 +341,21 @@ export const dashboardAPI = {
     api.get('/dashboard/challenge-performance', { params: { days } }),
   getProductivity: (days = 30) =>
     api.get('/dashboard/productivity', { params: { days } }),
+};
+
+// ─── System / observability API ───
+export const systemAPI = {
+  /**
+   * GET /system/metrics — admin-only runtime latency measured by this worker.
+   * `top` caps the per-route list to the N slowest routes.
+   */
+  getMetrics: (top) => api.get('/system/metrics', { params: top ? { top } : {} }),
+  /** GET /system/status — public health, version and maintenance state */
+  getStatus: () => api.get('/system/status'),
+  /** GET /system/alerts — admin-only threshold evaluation (read-only, never pages) */
+  getAlerts: () => api.get('/system/alerts'),
+  /** GET /system/logging — admin-only view of the active logging configuration */
+  getLogging: () => api.get('/system/logging'),
 };
 
 // ─── Reports API (PDF / Excel lifestyle reports) ───

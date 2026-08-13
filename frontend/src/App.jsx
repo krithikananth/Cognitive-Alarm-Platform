@@ -6,27 +6,37 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useNavig
 import { Toaster } from 'react-hot-toast';
 import useAuthStore from './store/authStore';
 
-// Pages
+// Pages.
+// Every page is a separate webpack chunk: a visitor on /login must not download
+// the charting library that only the dashboards use. Login is the one eager
+// page because it is the landing route for an anonymous visitor, so lazily
+// loading it would only add a round trip to first paint.
 import Login from './pages/Login';
-import Register from './pages/Register';
-import ForgotPassword from './pages/ForgotPassword';
-import ResetPassword from './pages/ResetPassword';
-import VerifyEmail from './pages/VerifyEmail';
-import OAuthCallback from './pages/OAuthCallback';
-import UserDashboard from './pages/UserDashboard';
-import WellnessCoachDashboard from './pages/WellnessCoachDashboard';
-import AlarmManager from './pages/AlarmManager';
-import Profile from './pages/Profile';
-import Analytics from './pages/Analytics';
-import Reports from './pages/Reports';
-import AdminDashboard from './pages/AdminDashboard';
-import PracticeChallenge from './pages/PracticeChallenge';
-import AccessDenied from './pages/AccessDenied';
-import NotFound from './pages/NotFound';
+import PageFallback from './components/PageFallback';
+
+const Register = React.lazy(() => import('./pages/Register'));
+const ForgotPassword = React.lazy(() => import('./pages/ForgotPassword'));
+const ResetPassword = React.lazy(() => import('./pages/ResetPassword'));
+const VerifyEmail = React.lazy(() => import('./pages/VerifyEmail'));
+const OAuthCallback = React.lazy(() => import('./pages/OAuthCallback'));
+const UserDashboard = React.lazy(() => import('./pages/UserDashboard'));
+const WellnessCoachDashboard = React.lazy(() => import('./pages/WellnessCoachDashboard'));
+const AlarmManager = React.lazy(() => import('./pages/AlarmManager'));
+const Profile = React.lazy(() => import('./pages/Profile'));
+const Analytics = React.lazy(() => import('./pages/Analytics'));
+const Recommendations = React.lazy(() => import('./pages/Recommendations'));
+const Reports = React.lazy(() => import('./pages/Reports'));
+const AdminDashboard = React.lazy(() => import('./pages/AdminDashboard'));
+const PracticeChallenge = React.lazy(() => import('./pages/PracticeChallenge'));
+const AccessDenied = React.lazy(() => import('./pages/AccessDenied'));
+const NotFound = React.lazy(() => import('./pages/NotFound'));
+
 import Layout from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 
 import ActiveAlarmModal from './components/ActiveAlarmModal';
 import { trackAlarmMissed } from './services/analyticsTracker';
+import { hasActiveSession } from './services/api';
 import useAlarmStore from './store/alarmStore';
 import useActiveAlarmStore from './store/activeAlarmStore';
 import {
@@ -114,13 +124,13 @@ function AlarmWatcher() {
   }, [isAuthenticated, location.pathname, location.search, navigate, triggerAlarm]);
 
   // Fetch alarms initially and refresh every 30 seconds.
-  // Require a stored access token so we don't hit /alarms/ before login
-  // finishes writing JWTs (or after a failed refresh cleared them).
+  // Require an active session marker so we don't hit /alarms/ before login
+  // finishes (or after a failed refresh cleared the session).
   React.useEffect(() => {
-    if (!isAuthenticated || !localStorage.getItem('access_token')) return undefined;
+    if (!isAuthenticated || !hasActiveSession()) return undefined;
     fetchAlarms();
     const refreshInterval = setInterval(() => {
-      if (localStorage.getItem('access_token')) {
+      if (hasActiveSession()) {
         fetchAlarms();
       }
     }, 30000);
@@ -194,11 +204,27 @@ function AlarmWatcher() {
   return null;
 }
 
+// Keeps a render failure inside the page that caused it. Re-keying on the
+// pathname clears the fallback as soon as the user navigates elsewhere, so a
+// single broken route can never trap the session.
+function RoutedErrorBoundary({ children }) {
+  const location = useLocation();
+  return (
+    <ErrorBoundary name="route" resetKey={location.pathname}>
+      {children}
+    </ErrorBoundary>
+  );
+}
+
 function App() {
   return (
     <Router>
       <AlarmWatcher />
-      <ActiveAlarmModal />
+      {/* Its own boundary: the ringing modal renders outside the routed tree,
+          so a crash here would otherwise take the whole app down with it. */}
+      <ErrorBoundary name="active-alarm" fallback={null}>
+        <ActiveAlarmModal />
+      </ErrorBoundary>
       <Toaster
         position="top-right"
         toastOptions={{
@@ -213,47 +239,55 @@ function App() {
           error: { iconTheme: { primary: '#ef4444', secondary: '#1e293b' } },
         }}
       />
-      <Routes>
-        {/* Guest Routes */}
-        <Route path="/login" element={<GuestRoute><Login /></GuestRoute>} />
-        <Route path="/register" element={<GuestRoute><Register /></GuestRoute>} />
-        <Route path="/forgot-password" element={<GuestRoute><ForgotPassword /></GuestRoute>} />
-        <Route path="/reset-password" element={<GuestRoute><ResetPassword /></GuestRoute>} />
-        <Route path="/verify-email" element={<VerifyEmail />} />
-        <Route path="/oauth/callback" element={<OAuthCallback />} />
+      <RoutedErrorBoundary>
+        {/* Guest/standalone routes suspend here. Routes inside Layout have
+            their own boundary around <Outlet />, so navigating between pages
+            never blanks the app shell. */}
+        <React.Suspense fallback={<PageFallback />}>
+          <Routes>
+            {/* Guest Routes */}
+            <Route path="/login" element={<GuestRoute><Login /></GuestRoute>} />
+            <Route path="/register" element={<GuestRoute><Register /></GuestRoute>} />
+            <Route path="/forgot-password" element={<GuestRoute><ForgotPassword /></GuestRoute>} />
+            <Route path="/reset-password" element={<GuestRoute><ResetPassword /></GuestRoute>} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
+            <Route path="/oauth/callback" element={<OAuthCallback />} />
 
-        {/* Protected Routes (inside Layout) */}
-        <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-          <Route index element={<HomeRedirect />} />
-          <Route path="dashboard" element={<DashboardRoute />} />
-          <Route
-            path="wellness"
-            element={
-              <RoleRoute allowedRoles={[ROLES.WELLNESS_COACH]}>
-                <WellnessCoachDashboard />
-              </RoleRoute>
-            }
-          />
-          <Route path="practice" element={<PracticeChallenge />} />
-          <Route path="alarms" element={<AlarmManager />} />
-          <Route path="analytics" element={<Analytics />} />
-          <Route path="reports" element={<Reports />} />
-          <Route path="profile" element={<Profile />} />
-          <Route
-            path="admin"
-            element={
-              <RoleRoute allowedRoles={[ROLES.ADMIN]}>
-                <AdminDashboard />
-              </RoleRoute>
-            }
-          />
-          <Route path="access-denied" element={<AccessDenied />} />
+            {/* Protected Routes (inside Layout) */}
+            <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+              <Route index element={<HomeRedirect />} />
+              <Route path="dashboard" element={<DashboardRoute />} />
+              <Route
+                path="wellness"
+                element={
+                  <RoleRoute allowedRoles={[ROLES.WELLNESS_COACH]}>
+                    <WellnessCoachDashboard />
+                  </RoleRoute>
+                }
+              />
+              <Route path="practice" element={<PracticeChallenge />} />
+              <Route path="alarms" element={<AlarmManager />} />
+              <Route path="analytics" element={<Analytics />} />
+              <Route path="recommendations" element={<Recommendations />} />
+              <Route path="reports" element={<Reports />} />
+              <Route path="profile" element={<Profile />} />
+              <Route
+                path="admin"
+                element={
+                  <RoleRoute allowedRoles={[ROLES.ADMIN]}>
+                    <AdminDashboard />
+                  </RoleRoute>
+                }
+              />
+              <Route path="access-denied" element={<AccessDenied />} />
 
-          {/* Unmatched routes: 404 inside the app shell. Guests still hit
-              ProtectedRoute first and are sent to /login. */}
-          <Route path="*" element={<NotFound />} />
-        </Route>
-      </Routes>
+              {/* Unmatched routes: 404 inside the app shell. Guests still hit
+                ProtectedRoute first and are sent to /login. */}
+              <Route path="*" element={<NotFound />} />
+            </Route>
+          </Routes>
+        </React.Suspense>
+      </RoutedErrorBoundary>
     </Router>
   );
 }

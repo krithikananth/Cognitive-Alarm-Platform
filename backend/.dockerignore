@@ -19,3 +19,12 @@ firebase-adminsdk*.json
 serviceAccountKey.json
 Dockerfile
 .dockerignore
+
+# Local-only working trees. The image builds its own virtualenv in the builder
+# stage, so a checked-out one would only be dead weight.
+venv
+.venv
+.e2e
+logs
+htmlcov
+perf/results

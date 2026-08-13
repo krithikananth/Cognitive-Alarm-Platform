@@ -63,16 +63,33 @@ None.
 
 ### INFO-001 — Dual profile APIs
 
-`/api/v1/profiles/me*` and `/api/v1/users/profile*` both exist. SPA uses `/users/*` only. Habit-score SSOT agrees across both surfaces.
+`/api/v1/profiles/me*` and `/api/v1/users/profile*` both exist and are **not**
+duplicates: `/profiles/me` exposes `adapted_difficulty`,
+`wake_up_consistency_score` and the lifetime counters that the `/users/profile`
+bundle does not carry, and `PATCH /profiles/me/goals` is strictly typed where
+`PUT /users/profile/goals` is lenient. The differences are pinned by
+`backend/tests/test_route_aliases.py`. Habit-score SSOT agrees across both
+surfaces.
 
-### INFO-002 — Focused behavioral endpoints unused by Analytics page
+### INFO-002 — Focused behavioral endpoints unused by the SPA — resolved
 
-`Analytics.jsx` calls `GET /analytics/behavioral`. Focused routes are implemented and tested but unused by the UI.
+The focused routes now have production call sites: the dashboard reads
+`/analytics/behavioral/snooze`, `/sleep-adherence` and the weekly/monthly trend
+routes, and `frontend/src/services/api.callSites.test.js` fails the build if any
+declared client method loses its caller or a backend route loses its client
+without a justified exemption.
 
 ---
 
 ## Demo caveats (not bugs)
 
-- Alarm ringing is browser-based: tab must be open; ring window is ~120s past `next_trigger_at`. Use **Test Ring** on Alarms for demos.
-- Password reset / email recovery not shipped.
-- `docker-compose` runs db + redis + backend only; run frontend with `npm start`.
+_Re-verified 2026-08-13 against the current build._
+
+- Alarm ringing works two ways: in-page while a tab is open (ring window ~120s
+  past `next_trigger_at`), and via a server-dispatched push notification when
+  FCM is configured and the browser has granted permission. **Test Ring** on the
+  Alarms page remains the quickest way to demo the wake cycle.
+- ~~Password reset / email recovery not shipped.~~ Shipped — see BUG-002 above.
+- ~~`docker-compose` runs db + redis + backend only.~~ The stack now also builds
+  the frontend and an Nginx edge (TLS on `:8443`, HTTP `:8080` redirecting to
+  HTTPS); only Nginx is published to the host.

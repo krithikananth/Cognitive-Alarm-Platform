@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import event
 
+from app.api.v1.endpoints import admin as admin_module
 from app.models.alarm import Alarm, AlarmChallengeLog
 from app.models.alarm_wake_event import AlarmWakeEvent
 from app.models.analytics_event import AnalyticsEvent
@@ -110,6 +111,45 @@ def test_user_dashboard_endpoints_use_bounded_query_counts(
         f"{path} issued {query_counter['count']} queries; "
         "a jump here usually means a new per-row or per-day query was added"
     )
+
+
+def test_admin_dashboard_user_preview_is_bounded(
+    client, admin_headers, db_session, query_counter
+):
+    """The embedded user array must not grow with the size of the platform.
+
+    It used to return one row per account, so a single dashboard load scaled
+    with the user table in both query work and payload size. It is now a
+    bounded preview; ``/admin/users`` is the paginated surface.
+    """
+    from app.utils.hashing import get_password_hash
+
+    limit = admin_module.DASHBOARD_USER_PREVIEW_LIMIT
+    existing = db_session.query(User).count()
+    for index in range(limit + 5 - existing):
+        db_session.add(
+            User(
+                email=f"preview{index}@example.com",
+                username=f"preview{index}",
+                hashed_password=get_password_hash("PreviewPass123!"),
+                full_name=f"Preview {index}",
+                is_active=True,
+                is_verified=True,
+            )
+        )
+    db_session.commit()
+    total = db_session.query(User).count()
+
+    response = client.get("/api/v1/admin/dashboard", headers=admin_headers)
+    assert response.status_code == 200
+    body = response.json()
+
+    assert len(body["users"]) == limit
+    assert body["users_returned"] == limit
+    assert body["users_truncated"] is True
+    # The whole-population counts must stay whole-population.
+    assert body["total_users"] == total
+    assert sum(body["role_distribution"].values()) == total
 
 
 def test_admin_statistics_query_count_is_independent_of_window(

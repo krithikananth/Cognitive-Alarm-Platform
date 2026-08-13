@@ -1,4 +1,10 @@
-"""QA API inventory: route presence, auth gates, and known client mismatches."""
+"""QA API inventory: route presence, auth gates, and known client mismatches.
+
+This module pins a hand-picked set of GET routes that the frontend depends on,
+plus the habit-score agreement check. Whole-surface coverage — every method,
+response-model policy and OpenAPI drift — lives in ``test_api_contract.py``,
+which derives its expectations from the application rather than a list.
+"""
 
 EXPECTED_AUTHENTICATED_GETS = [
     "/api/v1/auth/me",
@@ -12,13 +18,18 @@ EXPECTED_AUTHENTICATED_GETS = [
     "/api/v1/alarms/challenge/stats",
     "/api/v1/alarms/challenge/analysis",
     "/api/v1/alarms/challenge/history",
+    "/api/v1/alarms/challenge/learning-profile",
     "/api/v1/recommendations",
     "/api/v1/recommendations/daily",
+    "/api/v1/recommendations/relevance",
     "/api/v1/analytics/summary",
     "/api/v1/analytics/behavioral",
     "/api/v1/analytics/behavioral/snooze",
     "/api/v1/analytics/behavioral/wake-consistency",
+    "/api/v1/analytics/behavioral/verification-accuracy",
     "/api/v1/analytics/behavioral/sleep-adherence",
+    "/api/v1/analytics/behavioral/sleep-patterns",
+    "/api/v1/analytics/behavioral/productivity-correlation",
     "/api/v1/analytics/behavioral/trends/weekly",
     "/api/v1/analytics/behavioral/trends/monthly",
     "/api/v1/analytics/behavioral/habits",

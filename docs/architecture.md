@@ -133,6 +133,9 @@ Core alarm management functionality:
 Cognitive challenge generation and evaluation:
 
 - Multiple challenge types (math, logic, memory, pattern, word, riddle, quiz)
+- AI generation via Google Gemini (`services/ai_challenge_provider.py`) when `GEMINI_API_KEY` is set; every payload is tagged `source: "ai" | "procedural"`
+- Deterministic procedural generators are the fallback whenever the provider is disabled, unavailable, times out, or returns content that fails the single-answer / appropriateness validation; a failure trips a short cooldown so a ringing alarm never waits on a broken provider
+- Memory challenges are always procedural (the prompt *is* the digit sequence the user retypes)
 - Per-alarm and profile difficulty preference (`beginner` → `expert`)
 - Attempt logging via `alarm_challenge_logs` (queryable + `/alarms/challenge/log-health` audit)
 - Rule-based adaptive difficulty: raise after N consecutive successes, lower after N consecutive failures (±1 around adapted baseline; user preference is never overwritten)

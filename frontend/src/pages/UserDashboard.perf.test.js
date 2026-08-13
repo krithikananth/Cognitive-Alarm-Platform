@@ -101,6 +101,47 @@ const mockHabitTrend = {
   },
 };
 
+const mockSnoozePattern = {
+  total_snoozes: 140,
+  avg_snoozes_per_wake: 0.6,
+  avg_snooze_number: 1.4,
+  limit_hit_count: 12,
+  limit_hit_rate: 8.6,
+  by_hour: Array.from({ length: 24 }, (_, hour) => ({ hour, count: hour % 7 })),
+  by_weekday: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((weekday, i) => ({
+    weekday,
+    weekday_index: i,
+    count: 15 + i,
+  })),
+  peak_hour: 6,
+  peak_weekday: 'Mon',
+  trend: 'improving',
+  recent_7d_count: 18,
+  previous_7d_count: 24,
+  reduction: {
+    period_days: 7,
+    status: 'ok',
+    direction: 'improving',
+    reduction_rate: 22.5,
+    current_snoozes_per_wake: 0.55,
+    previous_snoozes_per_wake: 0.71,
+  },
+};
+
+const mockSleepAdherence = {
+  preferred_wake_time: '07:00',
+  target_sleep_hours: 8,
+  suggested_bedtime: '23:00',
+  adherence_rate: 74.2,
+  adherent_days: 20,
+  observed_days: 27,
+  avg_deviation_minutes: 18.4,
+  profile_streak_days: 5,
+  profile_adherence_score: 74.2,
+  tolerance_minutes: 30,
+  trend: 'stable',
+};
+
 const mockHistoryEvents = Array.from({ length: 6 }, (_, i) => ({
   id: i + 1,
   alarm_id: 100 + i,
@@ -142,6 +183,13 @@ jest.mock('../services/api', () => ({
   analyticsAPI: {
     getHabitTrends: () => Promise.resolve({ data: mockHabitTrend }),
     getMonthlyTrends: () => Promise.resolve({ data: { series: mockSeries } }),
+    getWeeklyTrends: () => Promise.resolve({ data: { series: mockSeries } }),
+    getSnoozePattern: () => Promise.resolve({ data: mockSnoozePattern }),
+    getSleepAdherence: () => Promise.resolve({ data: mockSleepAdherence }),
+    getSleepPatterns: () => Promise.resolve({ data: null }),
+    getProductivityCorrelation: () => Promise.resolve({ data: null }),
+    getVerificationAccuracy: () =>
+      Promise.resolve({ data: { status: 'insufficient_data', decisions: 0 } }),
   },
 }));
 

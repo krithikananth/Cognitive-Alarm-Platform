@@ -1,18 +1,20 @@
 /**
  * Layout component — sidebar navigation + main content area.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import {
   HiOutlineBell, HiOutlineCog6Tooth, HiOutlineSquares2X2,
   HiOutlineClock, HiOutlineUser, HiOutlineArrowRightOnRectangle,
   HiOutlineBars3, HiOutlineXMark, HiOutlinePuzzlePiece,
   HiOutlineChartBar, HiOutlineTrophy, HiOutlineShieldCheck,
-  HiOutlineDocumentText, HiOutlineSparkles,
+  HiOutlineDocumentText, HiOutlineSparkles, HiOutlineLightBulb,
 } from 'react-icons/hi2';
 import useAuthStore from '../store/authStore';
 import useActiveAlarmStore from '../store/activeAlarmStore';
 import NotificationBell from './NotificationBell';
+import PageFallback from './PageFallback';
+import { systemAPI } from '../services/api';
 import {
   onForegroundMessage,
   requestNotificationPermission,
@@ -23,8 +25,23 @@ import {
 
 export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [platformStatus, setPlatformStatus] = useState(null);
   const { user, logout } = useAuthStore();
   const navigate = useNavigate();
+
+  // Maintenance state is public, so a soft failure here must never block the app.
+  useEffect(() => {
+    let cancelled = false;
+    const request = systemAPI.getStatus();
+    request
+      .then(({ data }) => {
+        if (!cancelled) setPlatformStatus(data);
+      })
+      .catch(() => { });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Wire FCM foreground listener + local pending sync for supported platforms
   useEffect(() => {
@@ -82,6 +99,7 @@ export default function Layout() {
           { to: '/dashboard', icon: HiOutlineSquares2X2, label: 'Dashboard' },
           { to: '/alarms', icon: HiOutlineClock, label: 'Alarms' },
           { to: '/analytics', icon: HiOutlineChartBar, label: 'Challenges' },
+          { to: '/recommendations', icon: HiOutlineLightBulb, label: 'Recommendations' },
           { to: '/reports', icon: HiOutlineDocumentText, label: 'Reports' },
         ]),
       { to: '/profile', icon: HiOutlineUser, label: 'Profile' },
@@ -221,7 +239,21 @@ export default function Layout() {
 
         {/* Page Content */}
         <div className="flex-1 overflow-y-auto p-6">
-          <Outlet />
+          {platformStatus?.maintenance_mode ? (
+            <div
+              role="status"
+              className="mb-4 px-4 py-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-sm text-amber-200"
+            >
+              <strong className="font-semibold">Maintenance mode.</strong>{' '}
+              {platformStatus.maintenance_message ||
+                'Some features may be unavailable while we work on the platform.'}
+            </div>
+          ) : null}
+          {/* Page chunks suspend inside the shell, so the nav stays mounted
+              and interactive while the next route downloads. */}
+          <Suspense fallback={<PageFallback />}>
+            <Outlet />
+          </Suspense>
         </div>
       </main>
     </div>

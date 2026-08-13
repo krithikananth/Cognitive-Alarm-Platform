@@ -39,23 +39,12 @@ SNOOZE_COMPENSATION_FACTOR = 0.6
 
 
 class AdaptiveSchedulingService:
-    """Derive the next local trigger datetime for a Smart Adaptive alarm."""
+    """Derive the adapted ring time for a Smart Adaptive alarm.
 
-    @classmethod
-    def compute_next_local_trigger(
-        cls,
-        db: Session,
-        user_id: int,
-        alarm: Alarm,
-        now_local: datetime,
-        tz: ZoneInfo,
-    ) -> datetime:
-        """Return the next aware local datetime when this adaptive alarm should ring."""
-        adapted = cls.compute_adapted_alarm_time(db, user_id, alarm)
-        local_dt = datetime.combine(now_local.date(), adapted, tzinfo=tz)
-        if local_dt > now_local:
-            return local_dt
-        return local_dt + timedelta(days=1)
+    Only the wall-clock time is decided here; which calendar day it lands on
+    is resolved by ``_calculate_next_trigger``, which also applies the alarm's
+    ``days_of_week`` restriction.
+    """
 
     @classmethod
     def compute_adapted_alarm_time(

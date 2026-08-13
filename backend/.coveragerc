@@ -1,0 +1,33 @@
+# Coverage configuration for the API surface.
+#
+# Scoped deliberately. A single repo-wide percentage is easy to game and hard
+# to act on: it mixes request handlers with background schedulers and
+# third-party glue. The gate here measures the code that serves HTTP —
+# endpoints, dependencies and the response models that describe them — which is
+# exactly what the API contract tests are meant to exercise.
+
+[run]
+source =
+    app/api
+    app/schemas
+branch = True
+omit =
+    */__pycache__/*
+    */tests/*
+
+[report]
+show_missing = True
+skip_covered = False
+precision = 1
+# Measured 90.7% across the full suite. The gate sits below that so ordinary
+# variation does not turn it into noise, while any real drop still fails.
+# Raise it as coverage improves; never lower it to make a build pass.
+fail_under = 85
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    \.\.\.
+
+[html]
+directory = htmlcov

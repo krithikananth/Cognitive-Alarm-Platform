@@ -57,12 +57,27 @@ from app.schemas.system_settings import (
 )
 from app.services.coach_service import CoachService
 from app.services.habit_score import calculate_habit_score
-from app.services.report_export import export_report
+from app.services import aggregate_cache
+from app.services.report_export import content_disposition, export_report
+from app.schemas.admin import (
+    AdminAlarmsResponse,
+    AdminAnalyticsResponse,
+    AdminDashboardResponse,
+    AdminRecommendationsResponse,
+    AdminReportsResponse,
+    AdminStatisticsResponse,
+    AdminUserDetailResponse,
+    AdminUserListResponse,
+)
 from app.services.report_service import resolve_date_window
 from app.services.system_report_service import SystemReportService, SystemReportType
 from app.services.system_settings_service import SystemSettingsService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
+
+# Ceiling on the per-user preview array embedded in GET /admin/dashboard.
+# Without it the payload and the query behind it grow with the user table.
+DASHBOARD_USER_PREVIEW_LIMIT = 50
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -82,6 +97,19 @@ def _safe_division(numerator: float, denominator: float, decimals: int = 1) -> f
     if denominator == 0:
         return 0.0
     return round(numerator / denominator, decimals)
+
+
+def _window_cache_params(days: int, window_start: datetime, window_end: datetime) -> dict:
+    """Cache key inputs for a window-scoped admin aggregate.
+
+    ``window_end`` is deliberately excluded. For a ``?days=N`` query it is
+    ``datetime.now()``, so including it would mint a new key on every request
+    and the cache would never hit. ``(days, window_start)`` already identifies
+    the window in both forms — an explicit range derives its span from the two
+    dates, and a lookback derives its start from ``days`` — so the only thing
+    dropped is sub-TTL movement of "now", which is exactly what the TTL is for.
+    """
+    return {"days": days, "start": window_start.isoformat()}
 
 
 def _lookback_start(days: int) -> datetime:
@@ -175,6 +203,7 @@ def _hour_weekday_exprs(db: Session, column):
 
 @router.get(
     "/dashboard",
+    response_model=AdminDashboardResponse,
     summary="Enhanced admin dashboard statistics",
 )
 def admin_dashboard(
@@ -200,6 +229,11 @@ def admin_dashboard(
     window_start, window_end, days = _resolve_admin_window(
         days=days, start_date=start_date, end_date=end_date
     )
+
+    cache_params = _window_cache_params(days, window_start, window_end)
+    cached = aggregate_cache.read("admin_dashboard", aggregate_cache.PLATFORM_SCOPE, cache_params)
+    if cached is not None:
+        return cached
 
     # ── User counts & role distribution ──
     total_users = db.query(func.count(User.id)).scalar() or 0
@@ -327,11 +361,18 @@ def admin_dashboard(
         for uid, uname, email, vw in top_performers_query
     ]
 
-    # ── Per-user alarm counts (original behaviour preserved) ──
+    # ── Per-user alarm counts (newest accounts, bounded) ──
+    # This array is a preview, not a directory. Returning one row per account
+    # made a single dashboard load scale with the size of the platform — at
+    # 500 users it was already the widest query on the page, and it has no
+    # ceiling at all. `/admin/users` is the paginated surface for the full
+    # list; the aggregate counts above stay whole-population either way.
     user_alarm_counts = (
         db.query(User, func.count(Alarm.id).label("alarm_count"))
         .outerjoin(Alarm, Alarm.user_id == User.id)
         .group_by(User.id)
+        .order_by(User.created_at.desc(), User.id.desc())
+        .limit(DASHBOARD_USER_PREVIEW_LIMIT)
         .all()
     )
 
@@ -348,7 +389,7 @@ def admin_dashboard(
             "total_alarms": alarm_count,
         })
 
-    return {
+    payload = {
         "generated_at": now.isoformat(),
         "period_days": days,
         "period": {
@@ -380,9 +421,17 @@ def admin_dashboard(
             "total_snoozes": snooze_events_in_period,
         },
         "top_performers": top_performers,
-        # Per-user breakdown (original)
+        # Bounded preview of the newest accounts; see /admin/users for the
+        # full, paginated list.
         "users": users_summary,
+        "users_returned": len(users_summary),
+        "users_truncated": total_users > len(users_summary),
+        "users_preview_limit": DASHBOARD_USER_PREVIEW_LIMIT,
     }
+    aggregate_cache.write(
+        "admin_dashboard", aggregate_cache.PLATFORM_SCOPE, cache_params, payload
+    )
+    return payload
 
 
 # ── 2. GET /admin/users — Paginated, Filterable User List ───────────────
@@ -390,6 +439,7 @@ def admin_dashboard(
 
 @router.get(
     "/users",
+    response_model=AdminUserListResponse,
     summary="Paginated admin user list with aggregated stats",
 )
 def admin_list_users(
@@ -551,6 +601,7 @@ def admin_list_users(
 
 @router.get(
     "/users/{user_id}",
+    response_model=AdminUserDetailResponse,
     summary="Admin deep user detail",
 )
 def admin_get_user_detail(
@@ -726,6 +777,7 @@ def admin_get_user_detail(
 
 @router.get(
     "/statistics",
+    response_model=AdminStatisticsResponse,
     summary="Platform-wide statistics and growth trends",
 )
 def admin_statistics(
@@ -749,6 +801,13 @@ def admin_statistics(
     window_start, window_end, days = _resolve_admin_window(
         days=days, start_date=start_date, end_date=end_date
     )
+
+    cache_params = _window_cache_params(days, window_start, window_end)
+    cached = aggregate_cache.read(
+        "admin_statistics", aggregate_cache.PLATFORM_SCOPE, cache_params
+    )
+    if cached is not None:
+        return cached
 
     # ── Registration trend (daily counts in period) ──
     registration_trend = _daily_trend(
@@ -880,7 +939,7 @@ def admin_statistics(
         d["correct"] for d in challenge_by_type.values()
     )
 
-    return {
+    payload = {
         "generated_at": now.isoformat(),
         "period_days": days,
         "period": {
@@ -914,6 +973,10 @@ def admin_statistics(
             "by_dismiss_method": dismiss_methods,
         },
     }
+    aggregate_cache.write(
+        "admin_statistics", aggregate_cache.PLATFORM_SCOPE, cache_params, payload
+    )
+    return payload
 
 
 # ── 5. GET /admin/recommendations — Recommendation Monitoring ───────────
@@ -921,6 +984,7 @@ def admin_statistics(
 
 @router.get(
     "/recommendations",
+    response_model=AdminRecommendationsResponse,
     summary="Recommendation monitoring and signal overview",
 )
 def admin_recommendations(
@@ -1087,6 +1151,7 @@ def admin_recommendations(
 
 @router.get(
     "/alarms",
+    response_model=AdminAlarmsResponse,
     summary="Cross-user alarm monitoring",
 )
 def admin_alarms(
@@ -1248,6 +1313,7 @@ def admin_alarms(
 
 @router.get(
     "/analytics",
+    response_model=AdminAnalyticsResponse,
     summary="Platform analytics event overview",
 )
 def admin_analytics(
@@ -1270,6 +1336,13 @@ def admin_analytics(
     window_start, window_end, days = _resolve_admin_window(
         days=days, start_date=start_date, end_date=end_date
     )
+
+    cache_params = _window_cache_params(days, window_start, window_end)
+    cached = aggregate_cache.read(
+        "admin_analytics", aggregate_cache.PLATFORM_SCOPE, cache_params
+    )
+    if cached is not None:
+        return cached
 
     # ── Total events ──
     total_events = db.query(func.count(AnalyticsEvent.id)).scalar() or 0
@@ -1328,7 +1401,7 @@ def admin_analytics(
         db, AnalyticsEvent.created_at, window_start, days, "events"
     )
 
-    return {
+    payload = {
         "generated_at": now.isoformat(),
         "period_days": days,
         "period": {
@@ -1345,6 +1418,10 @@ def admin_analytics(
         "by_entity_type": by_entity_type,
         "ingestion_trend": ingestion_trend,
     }
+    aggregate_cache.write(
+        "admin_analytics", aggregate_cache.PLATFORM_SCOPE, cache_params, payload
+    )
+    return payload
 
 
 # ── 8. GET /admin/reports — System Health & Audit Report ─────────────────
@@ -1352,6 +1429,7 @@ def admin_analytics(
 
 @router.get(
     "/reports",
+    response_model=AdminReportsResponse,
     summary="System health and audit report",
 )
 def admin_reports(
@@ -1560,7 +1638,7 @@ def export_system_report(
         content=content,
         media_type=media_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": content_disposition(filename),
         },
     )
 

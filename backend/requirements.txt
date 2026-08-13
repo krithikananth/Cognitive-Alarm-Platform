@@ -1,17 +1,21 @@
-fastapi==0.115.0
+fastapi==0.116.1
+# Pinned explicitly (FastAPI allows <0.41.0): 0.38.6 carries several DoS and
+# multipart advisories. Keep this pin in step with the FastAPI range.
+starlette==0.47.2
 uvicorn[standard]==0.32.0
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 pydantic==2.10.0
 pydantic-settings==2.6.0
-python-jose[cryptography]==3.3.0
+python-jose[cryptography]==3.4.0
 passlib[bcrypt]==1.7.4
-python-multipart==0.0.17
+python-multipart==0.0.31
 alembic==1.14.0
 
-pytest==8.3.0
+pytest==9.0.3
+pytest-cov==7.0.0
 httpx==0.28.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 email-validator==2.2.0
 pytz==2024.2
 google-generativeai==0.8.3

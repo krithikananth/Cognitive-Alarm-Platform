@@ -268,6 +268,7 @@ class ReportService:
             },
             "wake_stats": wake_stats,
             "wake_up_consistency": consistency,
+            "verification_accuracy": overview.get("verification_accuracy"),
             "snooze_pattern": overview.get("snooze_pattern"),
             "weekly_trends": overview.get("weekly_trends"),
         }
@@ -314,7 +315,13 @@ class ReportService:
         window_end: datetime,
     ) -> Tuple[Dict[str, Any], bool]:
         productivity = compute_productivity_insights(
-            db, user_id, days, cutoff=window_start, window_end=window_end
+            db,
+            user_id,
+            days,
+            cutoff=window_start,
+            window_end=window_end,
+            # Exported reports keep their existing section shape
+            include_correlations=False,
         )
         is_empty = (productivity.get("verified_wakes") or 0) == 0 and (
             productivity.get("challenge_accuracy") or 0

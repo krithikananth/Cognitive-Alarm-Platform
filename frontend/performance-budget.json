@@ -1,0 +1,10 @@
+{
+  "$comment": "Gzipped byte ceilings enforced by scripts/check-bundle-size.js. Raise a budget only together with a measurement that justifies it.",
+  "budgets": {
+    "initialJsGzipKB": 200,
+    "totalJsGzipKB": 420,
+    "cssGzipKB": 30,
+    "largestLazyChunkGzipKB": 120
+  },
+  "requireLazyChunks": 8
+}

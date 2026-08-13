@@ -250,6 +250,11 @@ class AuthService:
 
         user.hashed_password = get_password_hash(new_password)
         db.commit()
+
+        # A password change must drop every session issued with the old one.
+        from app.services.token_service import TokenRevocationService
+
+        TokenRevocationService.revoke_all_for_user(db, user, reason="password_reset")
         return "Password has been reset successfully. You can now sign in."
 
     @staticmethod

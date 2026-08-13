@@ -101,6 +101,8 @@ _TYPE_PREF_FIELD = {
     NotificationType.BEDTIME_REMINDER: "bedtime_reminder_enabled",
     NotificationType.WAKE_REMINDER: "wake_reminder_enabled",
     NotificationType.HABIT_ALERT: "habit_alerts_enabled",
+    NotificationType.CHALLENGE_REMINDER: "challenge_reminders_enabled",
+    NotificationType.PROGRESS_UPDATE: "progress_updates_enabled",
     NotificationType.MOTIVATIONAL: "motivational_enabled",
 }
 
@@ -110,6 +112,8 @@ _FREQUENCY_ALLOWED = {
         NotificationType.BEDTIME_REMINDER,
         NotificationType.WAKE_REMINDER,
         NotificationType.HABIT_ALERT,
+        NotificationType.CHALLENGE_REMINDER,
+        NotificationType.PROGRESS_UPDATE,
         NotificationType.MOTIVATIONAL,
     },
     "essential": {
@@ -142,6 +146,31 @@ _MAX_ERROR_LEN = 500
 #: Ceiling on exponential retry backoff so a retry is never parked for a day.
 _MAX_RETRY_DELAY_SECONDS = 6 * 60 * 60
 
+#: A challenge reminder is a practice nudge, so it only fires once the user has
+#: gone this long without attempting a challenge.
+CHALLENGE_IDLE_DAYS = 2
+#: Minimum gap between two challenge reminders. Wider than the daily scheduling
+#: sweep so a user who stays idle is nudged periodically, never nagged daily.
+CHALLENGE_REMINDER_COOLDOWN_HOURS = 72
+#: Local hour the practice nudge is delivered at (evening prep for tomorrow).
+CHALLENGE_REMINDER_LOCAL_HOUR = 19
+
+#: Progress recaps summarise a rolling week and are sent at most once per week.
+PROGRESS_PERIOD_DAYS = 7
+#: Local hour the weekly recap is delivered at.
+PROGRESS_LOCAL_HOUR = 9
+#: Streak lengths worth calling out explicitly in a progress recap.
+STREAK_MILESTONES = (3, 7, 14, 30, 60, 100, 180, 365)
+
+#: Statuses that mean a notification of this type already exists for a period.
+#: ``FAILED`` is excluded so a cancelled row never blocks a fresh schedule.
+_LIVE_STATUSES = (
+    NotificationStatus.PENDING,
+    NotificationStatus.SENT,
+    NotificationStatus.DELIVERED,
+    NotificationStatus.READ,
+)
+
 
 def _truncate_error(message: Any) -> str:
     """Collapse an error to a single line that fits ``last_error``."""
@@ -158,6 +187,18 @@ def _resolve_tz(tz_name: Optional[str]) -> ZoneInfo:
 
 def _utc_naive_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _next_local_hour_utc(
+    profile: Optional[UserProfile], hour: int
+) -> datetime:
+    """Return the next occurrence of ``hour`` in the user's tz, as naive UTC."""
+    tz = _resolve_tz(profile.timezone if profile else None)
+    now_local = datetime.now(tz)
+    target = datetime.combine(now_local.date(), time(hour, 0), tzinfo=tz)
+    if target < now_local:
+        target += timedelta(days=1)
+    return target.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 class NotificationService:
@@ -644,6 +685,238 @@ class NotificationService:
             channel=NotificationChannel.PUSH,
             status=NotificationStatus.PENDING,
             scheduled_at=_utc_naive_now(),
+        )
+        db.add(notif)
+        db.commit()
+        db.refresh(notif)
+        return notif
+
+    # ── Challenge Practice Reminders ─────────────────────────────
+
+    @classmethod
+    def schedule_challenge_reminder(
+        cls,
+        db: Session,
+        user_id: int,
+    ) -> Optional[Notification]:
+        """Nudge a user who has stopped practising cognitive challenges.
+
+        Fires only after ``CHALLENGE_IDLE_DAYS`` without an attempt, and only
+        for users who actually use the product (an active alarm or a prior
+        attempt). At most one per ``CHALLENGE_REMINDER_COOLDOWN_HOURS``.
+        """
+        from app.models.alarm import AlarmChallengeLog
+
+        prefs = cls._get_or_create_preferences(db, user_id)
+        if not cls._is_type_enabled(prefs, NotificationType.CHALLENGE_REMINDER):
+            cls.cancel_pending_by_types(
+                db, user_id, [NotificationType.CHALLENGE_REMINDER]
+            )
+            return None
+
+        now = _utc_naive_now()
+        recent = (
+            db.query(Notification)
+            .filter(
+                Notification.user_id == user_id,
+                Notification.notification_type
+                == NotificationType.CHALLENGE_REMINDER,
+                Notification.status.in_(_LIVE_STATUSES),
+                Notification.created_at
+                >= now - timedelta(hours=CHALLENGE_REMINDER_COOLDOWN_HOURS),
+            )
+            .first()
+        )
+        if recent:
+            return recent if recent.status == NotificationStatus.PENDING else None
+
+        last_attempt = (
+            db.query(func.max(AlarmChallengeLog.created_at))
+            .filter(AlarmChallengeLog.user_id == user_id)
+            .scalar()
+        )
+        if last_attempt is not None and last_attempt.tzinfo is not None:
+            last_attempt = last_attempt.astimezone(timezone.utc).replace(
+                tzinfo=None
+            )
+
+        # Still practising — a reminder would be noise.
+        if last_attempt is not None and last_attempt >= now - timedelta(
+            days=CHALLENGE_IDLE_DAYS
+        ):
+            return None
+
+        if last_attempt is None:
+            has_active_alarm = (
+                db.query(Alarm.id)
+                .filter(Alarm.user_id == user_id, Alarm.is_active.is_(True))
+                .first()
+                is not None
+            )
+            if not has_active_alarm:
+                # No alarms and no history yet — nothing to remind about.
+                return None
+            days_idle: Optional[int] = None
+            title = "Try Your First Challenge 🧩"
+            body = (
+                "Cognitive challenges are what make your alarm impossible to "
+                "sleep through. Practise one now so tomorrow's wake-up is easy."
+            )
+        else:
+            days_idle = max(1, (now - last_attempt).days)
+            title = "Keep Your Edge Sharp 🧩"
+            body = (
+                f"It's been {days_idle} days since your last challenge. "
+                "A quick practice round keeps your morning reflexes fast."
+            )
+
+        profile = (
+            db.query(UserProfile)
+            .filter(UserProfile.user_id == user_id)
+            .first()
+        )
+        # FCM stringifies every data value, so null keys are omitted entirely.
+        data: Dict[str, Any] = {
+            "url": "/practice",
+            **cls._sound_payload(prefs),
+        }
+        if last_attempt is not None:
+            data["days_since_last_attempt"] = days_idle
+            data["last_attempt_at"] = last_attempt.isoformat()
+
+        notif = Notification(
+            user_id=user_id,
+            notification_type=NotificationType.CHALLENGE_REMINDER,
+            title=title,
+            body=body,
+            data=data,
+            channel=NotificationChannel.PUSH,
+            status=NotificationStatus.PENDING,
+            scheduled_at=_next_local_hour_utc(
+                profile, CHALLENGE_REMINDER_LOCAL_HOUR
+            ),
+        )
+        db.add(notif)
+        db.commit()
+        db.refresh(notif)
+        return notif
+
+    # ── Weekly Progress Updates ──────────────────────────────────
+
+    @classmethod
+    def schedule_progress_update(
+        cls,
+        db: Session,
+        user_id: int,
+    ) -> Optional[Notification]:
+        """Recap the user's real activity over the last week.
+
+        Sent at most once per ``PROGRESS_PERIOD_DAYS`` and only when the window
+        contains verified wake-ups or challenge attempts — an empty recap is
+        not progress. Streak milestones and personal bests are called out.
+        """
+        prefs = cls._get_or_create_preferences(db, user_id)
+        if not cls._is_type_enabled(prefs, NotificationType.PROGRESS_UPDATE):
+            cls.cancel_pending_by_types(
+                db, user_id, [NotificationType.PROGRESS_UPDATE]
+            )
+            return None
+
+        now = _utc_naive_now()
+        recent = (
+            db.query(Notification)
+            .filter(
+                Notification.user_id == user_id,
+                Notification.notification_type
+                == NotificationType.PROGRESS_UPDATE,
+                Notification.status.in_(_LIVE_STATUSES),
+                Notification.created_at
+                >= now - timedelta(days=PROGRESS_PERIOD_DAYS),
+            )
+            .first()
+        )
+        if recent:
+            return recent if recent.status == NotificationStatus.PENDING else None
+
+        profile = (
+            db.query(UserProfile)
+            .filter(UserProfile.user_id == user_id)
+            .first()
+        )
+        if not profile:
+            return None
+
+        from app.services.dashboard_aggregations import (
+            compute_challenge_performance,
+            compute_wake_stats,
+        )
+        from app.services.habit_score import (
+            calculate_habit_score_for_user,
+            format_habit_score,
+        )
+
+        wake = compute_wake_stats(db, user_id, PROGRESS_PERIOD_DAYS)
+        challenge = compute_challenge_performance(
+            db, user_id, PROGRESS_PERIOD_DAYS
+        )
+        verified = int(wake.get("verified_wakes") or 0)
+        attempts = int(challenge.get("total_attempts") or 0)
+        if verified == 0 and attempts == 0:
+            return None
+
+        habit = calculate_habit_score_for_user(db, user_id, profile)
+        habit_score = habit.get("habit_score", 0.0)
+        streak_days = int(habit.get("streak_days", 0) or 0)
+        best_streak = int(profile.best_streak or 0)
+        accuracy = float(challenge.get("accuracy") or 0.0)
+
+        milestone = streak_days if streak_days in STREAK_MILESTONES else None
+        if milestone:
+            title = f"{milestone}-Day Streak Unlocked 🏆"
+        elif streak_days > 1 and streak_days >= best_streak:
+            title = "New Personal Best 🥇"
+        else:
+            title = "Your Weekly Progress 📊"
+
+        parts: List[str] = []
+        if verified:
+            parts.append(
+                f"{verified} verified wake-up{'' if verified == 1 else 's'}"
+            )
+        if attempts:
+            parts.append(
+                f"{attempts} challenge{'' if attempts == 1 else 's'} "
+                f"at {accuracy:.0f}% accuracy"
+            )
+        streak_note = f" · {streak_days}-day streak" if streak_days else ""
+        body = (
+            f"Last {PROGRESS_PERIOD_DAYS} days: {', '.join(parts)}. "
+            f"Habit score {format_habit_score(habit_score)}{streak_note}."
+        )
+
+        data: Dict[str, Any] = {
+            "period_days": PROGRESS_PERIOD_DAYS,
+            "verified_wakes": verified,
+            "challenge_attempts": attempts,
+            "challenge_accuracy": accuracy,
+            "habit_score": habit_score,
+            "streak_days": streak_days,
+            "best_streak": best_streak,
+            "url": "/analytics",
+            **cls._sound_payload(prefs),
+        }
+        if milestone:
+            data["milestone"] = milestone
+
+        notif = Notification(
+            user_id=user_id,
+            notification_type=NotificationType.PROGRESS_UPDATE,
+            title=title,
+            body=body,
+            data=data,
+            channel=NotificationChannel.PUSH,
+            status=NotificationStatus.PENDING,
+            scheduled_at=_next_local_hour_utc(profile, PROGRESS_LOCAL_HOUR),
         )
         db.add(notif)
         db.commit()
@@ -1583,6 +1856,10 @@ class NotificationService:
                 disabled_types.append(NotificationType.WAKE_REMINDER)
             elif field == "habit_alerts_enabled" and value is False:
                 disabled_types.append(NotificationType.HABIT_ALERT)
+            elif field == "challenge_reminders_enabled" and value is False:
+                disabled_types.append(NotificationType.CHALLENGE_REMINDER)
+            elif field == "progress_updates_enabled" and value is False:
+                disabled_types.append(NotificationType.PROGRESS_UPDATE)
             elif field == "motivational_enabled" and value is False:
                 disabled_types.append(NotificationType.MOTIVATIONAL)
             elif field == "wake_reminder_minutes_before" and value != old:
@@ -1674,6 +1951,16 @@ class NotificationService:
             and cls._is_type_enabled(prefs, NotificationType.HABIT_ALERT)
         ):
             cls.schedule_habit_alert(db, user_id)
+        if (
+            normalized.get("challenge_reminders_enabled") is True
+            and cls._is_type_enabled(prefs, NotificationType.CHALLENGE_REMINDER)
+        ):
+            cls.schedule_challenge_reminder(db, user_id)
+        if (
+            normalized.get("progress_updates_enabled") is True
+            and cls._is_type_enabled(prefs, NotificationType.PROGRESS_UPDATE)
+        ):
+            cls.schedule_progress_update(db, user_id)
         if (
             normalized.get("motivational_enabled") is True
             and not reschedule_motivational

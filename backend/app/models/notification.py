@@ -36,6 +36,8 @@ class NotificationType(str, enum.Enum):
     WAKE_REMINDER = "wake_reminder"
     ALARM_TRIGGER = "alarm_trigger"
     HABIT_ALERT = "habit_alert"
+    CHALLENGE_REMINDER = "challenge_reminder"
+    PROGRESS_UPDATE = "progress_update"
     MOTIVATIONAL = "motivational"
     ANNOUNCEMENT = "announcement"
 
@@ -228,6 +230,8 @@ class NotificationPreference(Base):
         wake_reminder_enabled: Send pre-alarm wake reminders.
         wake_reminder_minutes_before: Minutes before alarm trigger.
         habit_alerts_enabled: Alert on declining habit metrics.
+        challenge_reminders_enabled: Nudge to practise a cognitive challenge.
+        progress_updates_enabled: Weekly progress / milestone recap.
         motivational_enabled: Daily motivational notification.
         motivational_time: Preferred time for motivational messages.
         quiet_hours_start: No-send window start.
@@ -262,6 +266,12 @@ class NotificationPreference(Base):
 
     # ── Habit alerts ──────────────────────────────────────────────
     habit_alerts_enabled = Column(Boolean, default=True, nullable=False)
+
+    # ── Challenge practice reminders ──────────────────────────────
+    challenge_reminders_enabled = Column(Boolean, default=True, nullable=False)
+
+    # ── Weekly progress recap ─────────────────────────────────────
+    progress_updates_enabled = Column(Boolean, default=True, nullable=False)
 
     # ── Daily motivational ────────────────────────────────────────
     motivational_enabled = Column(Boolean, default=True, nullable=False)
