@@ -1,7 +1,7 @@
 """Session revocation support (logout + password-reset invalidation).
 
 Revision ID: 20260811_session_revocation
-Revises: 20260810_admin_stats_covering_idx
+Revises: 20260810_admin_stats_idx
 Create Date: 2026-08-11
 
 Additive-only:
@@ -24,7 +24,7 @@ from sqlalchemy import inspect
 
 
 revision: str = "20260811_session_revocation"
-down_revision: Union[str, None] = "20260810_admin_stats_covering_idx"
+down_revision: Union[str, None] = "20260810_admin_stats_idx"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

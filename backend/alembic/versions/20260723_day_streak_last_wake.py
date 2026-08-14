@@ -1,7 +1,7 @@
 """Add last_successful_wake_date for calendar Day Streak tracking.
 
 Revision ID: 20260723_day_streak_last_wake
-Revises: 20260720_adaptive_streak_counters
+Revises: 20260720_adaptive_streaks
 Create Date: 2026-07-23
 
 Additive-only migration. Stores the local calendar date of the user's last
@@ -19,7 +19,7 @@ from sqlalchemy import inspect
 
 
 revision: str = "20260723_day_streak_last_wake"
-down_revision: Union[str, None] = "20260720_adaptive_streak_counters"
+down_revision: Union[str, None] = "20260720_adaptive_streaks"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

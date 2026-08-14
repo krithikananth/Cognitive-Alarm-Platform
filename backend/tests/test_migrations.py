@@ -25,6 +25,9 @@ from app.db.base import Base
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
+# Width alembic gives ``alembic_version.version_num`` when it creates the table.
+VERSION_NUM_MAX_LENGTH = 32
+
 # Tables the Wake-Up Verification module cannot work without
 WAKE_VERIFICATION_TABLES = {
     "alarm_wake_events",
@@ -89,6 +92,21 @@ class TestMigrationChainStructure:
             assert not isinstance(revision.down_revision, tuple), (
                 f"{revision.revision} is a merge point"
             )
+
+    def test_revision_ids_fit_the_version_column(self):
+        """Alembic creates ``alembic_version.version_num`` as VARCHAR(32).
+
+        SQLite ignores the declared length, so an over-long id passes every
+        local run and only fails on Postgres, at deploy time, halfway through
+        the upgrade.
+        """
+        script = ScriptDirectory.from_config(_alembic_config("sqlite://"))
+        oversized = {
+            revision.revision: len(revision.revision)
+            for revision in script.walk_revisions()
+            if len(revision.revision) > VERSION_NUM_MAX_LENGTH
+        }
+        assert not oversized, f"revision ids longer than 32 chars: {oversized}"
 
 
 class TestCleanDatabaseProvisioning:

@@ -1,6 +1,6 @@
 """Add covering indexes for the admin statistics aggregates.
 
-Revision ID: 20260810_admin_stats_covering_idx
+Revision ID: 20260810_admin_stats_idx
 Revises: 20260809_alarm_dispatch
 Create Date: 2026-08-10
 
@@ -33,7 +33,7 @@ from alembic import op
 from sqlalchemy import inspect
 
 
-revision: str = "20260810_admin_stats_covering_idx"
+revision: str = "20260810_admin_stats_idx"
 down_revision: Union[str, None] = "20260809_alarm_dispatch"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

@@ -1,6 +1,6 @@
 """Add adaptive-difficulty streak watermarks on user_profiles.
 
-Revision ID: 20260723_adaptive_streak_watermarks
+Revision ID: 20260723_streak_watermarks
 Revises: 20260723_day_streak_last_wake
 Create Date: 2026-07-23
 
@@ -18,7 +18,7 @@ from alembic import op
 from sqlalchemy import inspect
 
 
-revision: str = "20260723_adaptive_streak_watermarks"
+revision: str = "20260723_streak_watermarks"
 down_revision: Union[str, None] = "20260723_day_streak_last_wake"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

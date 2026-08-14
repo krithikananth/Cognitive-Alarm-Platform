@@ -1,6 +1,6 @@
 """Add consecutive adaptive-difficulty streak counters on user_profiles.
 
-Revision ID: 20260720_adaptive_streak_counters
+Revision ID: 20260720_adaptive_streaks
 Revises: 20260716_analytics_ingestion
 Create Date: 2026-07-20
 
@@ -17,7 +17,9 @@ from alembic import op
 from sqlalchemy import inspect
 
 
-revision: str = "20260720_adaptive_streak_counters"
+# Keep ids <= 32 chars: alembic_version.version_num is VARCHAR(32) and Postgres
+# rejects anything longer, while SQLite silently accepts it.
+revision: str = "20260720_adaptive_streaks"
 down_revision: Union[str, None] = "20260716_analytics_ingestion"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

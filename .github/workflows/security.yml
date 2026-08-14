@@ -73,8 +73,10 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install pytest
-        run: pip install pytest
+      # tests/conftest.py imports app.main at collection time, so pytest alone
+      # cannot even collect this module.
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
 
       # Builds the real nginx image and speaks real TLS to it. The runners
       # already provide a Docker engine; the suite skips if one is missing.

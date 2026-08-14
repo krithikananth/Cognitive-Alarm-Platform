@@ -1,7 +1,7 @@
 """Add adapted_difficulty on user_profiles (separate from preference).
 
 Revision ID: 20260723_adapted_difficulty
-Revises: 20260723_adaptive_streak_watermarks
+Revises: 20260723_streak_watermarks
 Create Date: 2026-07-23
 
 Additive-only migration. Profile Preference (``difficulty_preference``) stays
@@ -19,7 +19,7 @@ from sqlalchemy import inspect, text
 
 
 revision: str = "20260723_adapted_difficulty"
-down_revision: Union[str, None] = "20260723_adaptive_streak_watermarks"
+down_revision: Union[str, None] = "20260723_streak_watermarks"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
