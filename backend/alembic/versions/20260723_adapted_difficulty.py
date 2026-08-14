@@ -53,19 +53,23 @@ def upgrade() -> None:
         bind.execute(
             text(
                 "UPDATE user_profiles "
-                "SET adapted_difficulty = difficulty_preference"
+                "SET adapted_difficulty = CAST(difficulty_preference AS TEXT)"
             )
         )
     else:
         # Repair lowercase .value leftovers from early VARCHAR default 'medium'.
         # Exact lowercase only — do not touch valid names like MEDIUM/HARD.
+        # CAST is load-bearing on Postgres: the baseline creates both columns as
+        # the ``difficultypreference`` enum, and neither TRIM nor a comparison
+        # against non-label literals is defined for an enum. SQLite stores the
+        # same column as VARCHAR, so it accepts the uncast form and hides this.
         bind.execute(
             text(
                 "UPDATE user_profiles "
                 "SET adapted_difficulty = difficulty_preference "
                 "WHERE adapted_difficulty IS NULL "
-                "OR TRIM(adapted_difficulty) = '' "
-                "OR adapted_difficulty IN "
+                "OR TRIM(CAST(adapted_difficulty AS TEXT)) = '' "
+                "OR CAST(adapted_difficulty AS TEXT) IN "
                 "('beginner','easy','medium','hard','expert')"
             )
         )

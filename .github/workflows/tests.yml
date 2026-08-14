@@ -30,6 +30,65 @@ jobs:
         working-directory: backend
         run: python -m pytest -q --cov --cov-report=term-missing
 
+  # tests/test_migrations.py provisions SQLite, which has no enum types and
+  # ignores VARCHAR lengths, so a migration can be dialect-invalid and still
+  # pass every other job here. This walks the same chain on the engine the
+  # deployment actually runs, and is the only place that catches it before
+  # `docker compose up`.
+  migrations-postgres:
+    name: Migrations against PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: icap_db
+          POSTGRES_USER: icap_user
+          POSTGRES_PASSWORD: ci-postgres-password-not-for-production
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U icap_user -d icap_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://icap_user:ci-postgres-password-not-for-production@localhost:5432/icap_db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Upgrade a clean database to head
+        working-directory: backend
+        run: python -m alembic upgrade head
+
+      - name: The migrated schema has every table the models declare
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import os
+
+          from sqlalchemy import create_engine, inspect
+
+          # app.models.__init__ is empty, so importing the package registers
+          # nothing; app.main is what pulls in every model module.
+          import app.main  # noqa: F401
+          from app.db.base import Base
+
+          engine = create_engine(os.environ["DATABASE_URL"])
+          present = set(inspect(engine).get_table_names())
+          missing = set(Base.metadata.tables) - present
+          assert not missing, f"migrations did not create: {sorted(missing)}"
+          print(f"{len(present)} tables present, no drift")
+          PY
+
   frontend:
     name: Frontend unit tests and production build
     runs-on: ubuntu-latest
