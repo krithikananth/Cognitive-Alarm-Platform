@@ -1,0 +1,83 @@
+name: security
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # Weekly, so a CVE published against an unchanged dependency is still found.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-and-sast:
+    name: Dependency + SAST scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install security tooling
+        run: pip install -r backend/requirements-security.txt
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run pip-audit, bandit and npm audit
+        run: python scripts/security_scan.py
+
+  security-tests:
+    name: OWASP security test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run the security suites
+        working-directory: backend
+        run: >-
+          python -m pytest -q
+          tests/test_security_owasp.py
+          tests/test_auth_security.py
+          tests/test_rbac.py
+          tests/test_rbac_matrix.py
+
+  edge-runtime:
+    name: Edge TLS/HSTS/CSP runtime verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pytest
+        run: pip install pytest
+
+      # Builds the real nginx image and speaks real TLS to it. The runners
+      # already provide a Docker engine; the suite skips if one is missing.
+      - name: Verify the edge at runtime
+        working-directory: backend
+        run: python -m pytest tests/test_tls_runtime.py -q

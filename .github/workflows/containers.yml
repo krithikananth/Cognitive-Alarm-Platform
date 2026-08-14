@@ -1,0 +1,87 @@
+name: containers
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke-test:
+    name: Build images and smoke-test the stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Write a throwaway .env
+        run: |
+          cat > .env <<'EOF'
+          PUBLIC_URL=https://localhost:8443
+          HTTP_PORT=8080
+          HTTPS_PORT=8443
+          POSTGRES_DB=icap_db
+          POSTGRES_USER=icap_user
+          POSTGRES_PASSWORD=ci-postgres-password-not-for-production
+          REDIS_PASSWORD=ci-redis-password-not-for-production
+          SECRET_KEY=ci-container-smoke-test-secret-key-not-for-production
+          ENVIRONMENT=production
+          AI_CHALLENGE_ENABLED=false
+          TLS_COMMON_NAME=localhost
+          EOF
+
+      # Builds all three images. A duplicate stage name, an unresolvable
+      # `COPY --from`, or a bundle over budget fails here rather than in a
+      # deployment.
+      - name: Build every image
+        run: docker compose build
+
+      # --wait blocks until every healthcheck passes, so an image that starts
+      # and immediately dies fails the job instead of being smoke-tested.
+      - name: Start the stack
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: The edge redirects plain HTTP to HTTPS
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/)
+          test "$code" = "308" || { echo "expected 308, got $code"; exit 1; }
+
+      - name: The edge health probe answers over plain HTTP
+        run: curl -sf http://localhost:8080/nginx-health
+
+      - name: The SPA is served over TLS
+        run: |
+          curl -skf https://localhost:8443/ -o /dev/null -D headers.txt
+          grep -qi '^strict-transport-security:' headers.txt
+
+      - name: The API answers through the edge
+        run: curl -skf https://localhost:8443/api/v1/system/status | grep -q '"maintenance_mode"'
+
+      - name: The backend health probe answers through the edge
+        run: curl -skf https://localhost:8443/health
+
+      - name: API documentation stays closed in production
+        run: |
+          for path in docs redoc openapi.json; do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:8443/$path")
+            test "$code" = "404" || { echo "/$path returned $code"; exit 1; }
+          done
+
+      # The backend runs on a read-only root filesystem; if the log volume were
+      # misconfigured, logging would degrade silently to stdout.
+      - name: The backend writes its rotated log to the mounted volume
+        run: docker compose exec -T backend sh -c 'test -s /app/logs/icap.log'
+
+      - name: Show service state on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

@@ -1,0 +1,198 @@
+name: performance
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # Weekly full-size run: the medium dataset is too slow for every push but
+    # is the size the documented numbers were taken at.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Dataset profile for the PostgreSQL load test
+        type: choice
+        default: small
+        options: [small, medium, large]
+
+permissions:
+  contents: read
+
+env:
+  # Not a secret: every job here builds a throwaway database from scratch.
+  PERF_SECRET_KEY: ci-performance-harness-secret-key-not-for-production
+
+jobs:
+  frontend-bundle-budget:
+    name: Frontend bundle budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # INLINE_RUNTIME_CHUNK=false matches the production image, so the budget
+      # is measured against the bytes users actually download.
+      - name: Build
+        working-directory: frontend
+        env:
+          CI: "true"
+          INLINE_RUNTIME_CHUNK: "false"
+          GENERATE_SOURCEMAP: "false"
+        run: npm run build
+
+      - name: Enforce the bundle budget
+        working-directory: frontend
+        run: npm run check:bundle-size
+
+      # The nginx image serves brotli_static/gzip_static, which silently falls
+      # back to on-the-fly compression if the siblings are missing.
+      - name: Verify precompressed assets exist
+        working-directory: frontend
+        run: node scripts/precompress.js --verify
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-build-manifest
+          path: frontend/build/asset-manifest.json
+          retention-days: 14
+
+  backend-perf-guards:
+    name: Backend performance regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run the performance regression suites
+        working-directory: backend
+        env:
+          SECRET_KEY: ${{ env.PERF_SECRET_KEY }}
+        run: >-
+          python -m pytest -q
+          tests/test_asset_delivery.py
+          tests/test_dashboard_performance.py
+          tests/test_aggregate_cache.py
+          tests/test_api_latency.py
+          tests/test_challenge_generation_latency.py
+          tests/test_concurrency_capacity.py
+
+  postgres-load-test:
+    name: PostgreSQL live-server load test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: icap_perf
+          POSTGRES_USER: icap_perf
+          POSTGRES_PASSWORD: icap_perf_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U icap_perf -d icap_perf"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PERF_DATABASE_URL: postgresql+psycopg2://icap_perf:icap_perf_ci@localhost:5432/icap_perf
+      SECRET_KEY: ci-performance-harness-secret-key-not-for-production
+      ENVIRONMENT: development
+      # The capacity ramp peaks at 25 users; the pool must not be the ceiling.
+      DB_POOL_SIZE: "30"
+      DB_MAX_OVERFLOW: "30"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Resolve dataset profile
+        id: profile
+        run: |
+          profile="${{ inputs.profile }}"
+          if [ -z "$profile" ]; then
+            if [ "${{ github.event_name }}" = "schedule" ]; then profile=medium; else profile=small; fi
+          fi
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+          echo "Using dataset profile: $profile"
+
+      # Seeds PostgreSQL and measures single-request cost with real query plans
+      # (EXPLAIN ANALYZE), which is what SQLite could never provide.
+      - name: Benchmark against PostgreSQL
+        working-directory: backend
+        run: >-
+          python -m perf.benchmark
+          --database-url "$PERF_DATABASE_URL"
+          --profile ${{ steps.profile.outputs.profile }}
+          --iterations 5
+          --explain
+          --label ci-pg-benchmark
+
+      - name: Start the API against PostgreSQL
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ env.PERF_DATABASE_URL }}
+          LOG_LEVEL: WARNING
+          FCM_ENABLED: "false"
+          RATE_LIMIT_ENABLED: "false"
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 \
+            --workers 4 --log-level warning > uvicorn.log 2>&1 &
+          echo $! > uvicorn.pid
+
+      # Real sockets, real middleware, real login — against real PostgreSQL.
+      # --skip-seed reuses the dataset the benchmark step already loaded.
+      - name: Capacity ramp against the live server
+        working-directory: backend
+        run: >-
+          python -m perf.capacity
+          --database-url "$PERF_DATABASE_URL"
+          --base-url http://127.0.0.1:8000
+          --skip-seed
+          --profile ${{ steps.profile.outputs.profile }}
+          --levels 1 5 10 25
+          --rounds 2
+          --sla-p95-ms 1500
+          --require-capacity 5
+          --label ci-pg-live-capacity
+
+      - name: Stop the API
+        if: always()
+        working-directory: backend
+        run: |
+          if [ -f uvicorn.pid ]; then kill "$(cat uvicorn.pid)" || true; fi
+          echo "--- uvicorn log (tail) ---"
+          tail -n 50 uvicorn.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pg-perf-results-${{ steps.profile.outputs.profile }}
+          path: backend/perf/results/
+          retention-days: 30
