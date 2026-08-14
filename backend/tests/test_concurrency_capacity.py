@@ -19,6 +19,7 @@ database level. It does not establish a production capacity ceiling — that is
 what ``perf/capacity.py`` measures, against Postgres, with a real server.
 """
 
+import os
 import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -54,8 +55,21 @@ READ_PATHS = [
 #: as a collapse rather than queueing. Generous: 20 users on one SQLite
 #: connection are expected to queue.
 DEGRADATION_ALLOWANCE = 60.0
+#: Threads per core the allowance above was calibrated on (20 users, 8 cores).
+#: The single-user baseline is measured serially, so it cannot see CPU
+#: contention; a 2-core CI runner contends ~4x harder for the same work and
+#: would read as a collapse. `_degradation_allowance` rescales for that, while
+#: HARD_CEILING_MS still bounds the absolute latency on every machine.
+REFERENCE_THREADS_PER_CPU = CONCURRENT_USERS / 8
 #: Nothing here may take longer than this on any machine.
 HARD_CEILING_MS = 15000.0
+
+
+def _degradation_allowance() -> float:
+    oversubscription = CONCURRENT_USERS / (os.cpu_count() or 1)
+    return DEGRADATION_ALLOWANCE * max(
+        1.0, oversubscription / REFERENCE_THREADS_PER_CPU
+    )
 
 
 @pytest.fixture(scope="module")
@@ -253,10 +267,12 @@ class TestConcurrentUsers:
         assert loaded_p95 <= HARD_CEILING_MS, (
             f"p95 under {CONCURRENT_USERS} users was {loaded_p95:.0f}ms"
         )
-        assert loaded_p95 <= baseline_p95 * DEGRADATION_ALLOWANCE, (
+        allowance = _degradation_allowance()
+        assert loaded_p95 <= baseline_p95 * allowance, (
             f"p95 went from {baseline_p95:.1f}ms single-user to "
             f"{loaded_p95:.1f}ms under {CONCURRENT_USERS} users "
-            f"({loaded_p95 / baseline_p95:.1f}x)"
+            f"({loaded_p95 / baseline_p95:.1f}x, allowed {allowance:.1f}x on "
+            f"{os.cpu_count()} cores)"
         )
 
     def test_throughput_is_reported_and_non_trivial(self, load_client, load_users):

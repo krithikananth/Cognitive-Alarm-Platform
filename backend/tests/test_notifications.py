@@ -941,8 +941,14 @@ class TestFCMDelivery:
         assert result["success_count"] == 0
         assert result["failure_count"] == 2
         assert set(result["failed_tokens"]) == {"token1", "token2"}
-        # Every failed token is classified as either retryable or invalid.
-        assert result["retryable"] or result["invalid_tokens"]
+        if result.get("unavailable_reason") == fcm_service.REASON_DISABLED:
+            # Push switched off by config: retrying cannot help and the tokens
+            # are not bad, so the reason code carries the whole explanation.
+            assert not result["retryable"]
+            assert result["invalid_tokens"] == []
+        else:
+            # Every failed token is classified as either retryable or invalid.
+            assert result["retryable"] or result["invalid_tokens"]
 
     def test_send_to_user_devices_no_tokens(self, db, test_user):
         """A user with no active tokens is reported, not counted as failure."""
