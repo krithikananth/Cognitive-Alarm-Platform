@@ -97,6 +97,8 @@ const UNCALLED_ROUTES = {
     'POST /api/v1/system/client-errors': 'reported with fetch(keepalive) in services/errorReporting.js',
     'GET /api/v1/system/metrics/prometheus': 'scrape target for the monitoring stack',
     'GET /api/v1/users': 'admin listing superseded by /admin/users; same population pinned by test_route_aliases.py',
+    'GET /api/v1/alarms/schedule': 'native-client only: the Android app expands occurrences to arm OS-level alarms, while the web app rings from the service-worker push',
+    'POST /api/v1/alarms/{alarm_id}/offline-wake': 'native-client only: flushes dismissals the Android app recorded with no connectivity; the browser is never the offline ring surface',
     'PUT /api/v1/profiles/me': 'bulk profile write; every field is reachable through the /users/profile* routes the app uses',
     'PATCH /api/v1/profiles/me/goals': 'typed List[str] variant of PUT /users/profile/goals',
     'PATCH /api/v1/profiles/me/sleep-schedule': 'typed variant of PUT /users/profile/sleep-schedule',

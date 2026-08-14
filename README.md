@@ -390,6 +390,7 @@ Authentication accepts **either** the HttpOnly session cookies set at login
 | [Security Review](docs/SECURITY_REVIEW.md)                    | Findings, fixes and the advisory register                              |
 | [RBAC Checklist](docs/SECURITY_RBAC_CHECKLIST.md)             | Role/permission verification matrix                                    |
 | [QA Bug Report](docs/QA_BUG_REPORT.md)                        | QA findings and their resolutions                                      |
+| [Mobile App Spec](docs/MOBILE_APP_SPEC.md)                    | Phase A plan for the Android React Native client (not yet implemented) |
 
 ---
 

@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "ICAP Alarm",
+    "slug": "icap-alarm",
+    "scheme": "icapalarm",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "platforms": ["android"],
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.icap.alarm",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "android.permission.USE_EXACT_ALARM",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.USE_FULL_SCREEN_INTENT",
+        "android.permission.WAKE_LOCK",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.VIBRATE",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+      ],
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
+    },
+    "plugins": [
+      "expo-dev-client",
+      "expo-status-bar",
+      "expo-secure-store",
+      "expo-build-properties",
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging"
+    ],
+    "extra": {
+      "apiBaseUrl": "http://localhost:8000/api/v1"
+    }
+  }
+}

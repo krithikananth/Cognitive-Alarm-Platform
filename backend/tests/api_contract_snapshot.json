@@ -220,6 +220,14 @@
         "Alarm Scheduling"
       ]
     },
+    "GET /api/v1/alarms/schedule": {
+      "path_params": [],
+      "response_model": "AlarmScheduleResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
     "GET /api/v1/alarms/snooze-history": {
       "path_params": [],
       "response_model": "SnoozeHistoryResponse",
@@ -851,6 +859,16 @@
         "alarm_id"
       ],
       "response_model": "FailWakeResponse",
+      "status_code": null,
+      "tags": [
+        "Alarm Scheduling"
+      ]
+    },
+    "POST /api/v1/alarms/{alarm_id}/offline-wake": {
+      "path_params": [
+        "alarm_id"
+      ],
+      "response_model": "OfflineWakeResponse",
       "status_code": null,
       "tags": [
         "Alarm Scheduling"

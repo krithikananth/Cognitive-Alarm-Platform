@@ -55,6 +55,12 @@ _INIT_RETRY_COOLDOWN_SECONDS = 60
 
 _FIREBASE_APP_NAME = "icap-notifications"
 
+#: Notifee channel the Android client creates for alarm rings. The channel
+#: owns the looping sound and full-screen-intent behaviour, so the message
+#: must name it or Android falls back to the default channel and the ring is
+#: silent and dismissable.
+ANDROID_ALARM_CHANNEL_ID = "icap-alarm"
+
 _init_lock = threading.Lock()
 _firebase_app = None
 _last_init_attempt_at: float = 0.0
@@ -286,6 +292,43 @@ def _webpush_config(title: str, body: str, payload: Dict[str, str]):
     )
 
 
+def _android_config(title: str, body: str, payload: Dict[str, str]):
+    """Android overrides for notifications that must ring like an alarm.
+
+    Returned only for payloads flagged ``requires_interaction`` (alarm rings),
+    so every other notification keeps Firebase's default Android handling.
+
+    Three things matter for a ring to survive a locked, dozing device:
+    ``priority="high"`` (wakes the device instead of being batched until the
+    next maintenance window), the dedicated ``icap-alarm`` channel that the
+    native client configures with a looping sound and a full-screen intent,
+    and ``ttl=0`` — an alarm that could not be delivered *now* is worthless a
+    minute later and must not be replayed as a stale ring.
+    """
+    if str(payload.get("requires_interaction", "")).lower() not in (
+        "true",
+        "1",
+    ):
+        return None
+
+    from firebase_admin import messaging  # type: ignore
+
+    return messaging.AndroidConfig(
+        priority="high",
+        ttl=0,
+        collapse_key=payload.get("notification_id") or None,
+        notification=messaging.AndroidNotification(
+            title=title,
+            body=body,
+            channel_id=ANDROID_ALARM_CHANNEL_ID,
+            priority="max",
+            visibility="public",
+            sticky=True,
+            tag=payload.get("notification_id") or None,
+        ),
+    )
+
+
 class FCMService:
     """Firebase Cloud Messaging delivery layer."""
 
@@ -406,6 +449,7 @@ class FCMService:
                 notification=notification,
                 tokens=list(tokens),
                 data=payload,
+                android=_android_config(title, body, payload),
                 webpush=_webpush_config(title, body, payload),
             )
             response = messaging.send_each_for_multicast(

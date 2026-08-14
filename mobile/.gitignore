@@ -1,0 +1,32 @@
+# Expo / React Native
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native build output (android/ itself is committed after prebuild)
+android/.gradle/
+android/.idea/
+android/local.properties
+android/app/build/
+android/build/
+*.keystore
+!debug.keystore
+*.apk
+*.aab
+
+# Firebase / secrets — never commit
+google-services.json
+GoogleService-Info.plist
+
+# Metro
+.metro-health-check*
+
+# Logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store

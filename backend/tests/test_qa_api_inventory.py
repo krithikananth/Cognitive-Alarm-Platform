@@ -15,6 +15,7 @@ EXPECTED_AUTHENTICATED_GETS = [
     "/api/v1/profiles/me/habit-score",
     "/api/v1/alarms/",
     "/api/v1/alarms/upcoming",
+    "/api/v1/alarms/schedule",
     "/api/v1/alarms/challenge/stats",
     "/api/v1/alarms/challenge/analysis",
     "/api/v1/alarms/challenge/history",

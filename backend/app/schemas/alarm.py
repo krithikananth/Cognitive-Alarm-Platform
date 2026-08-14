@@ -275,3 +275,103 @@ class SnoozeInfoResponse(BaseModel):
         ...,
         description="True when snooze is blocked (limit reached or limit is 0)",
     )
+
+
+def _utc_offset_iso(value: datetime) -> str:
+    """Serialize a stored (UTC-naive) datetime with an explicit ``+00:00``."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+class AlarmOccurrence(BaseModel):
+    """One concrete ring instant expanded from a recurring alarm.
+
+    Carries everything a native client needs to arm an OS-level alarm and
+    render the ring screen without a second round trip.
+    """
+
+    alarm_id: int
+    trigger_at: datetime = Field(
+        ..., description="Ring instant in UTC with an explicit offset"
+    )
+    title: str
+    challenge_type: ChallengeType
+    challenge_count: int
+    challenge_difficulty: str = "medium"
+    snooze_limit: int
+    snooze_interval_minutes: int
+    volume: int
+    vibrate: bool
+
+    @field_serializer("trigger_at")
+    def serialize_trigger_at(self, value: datetime) -> str:
+        return _utc_offset_iso(value)
+
+
+class AlarmScheduleResponse(BaseModel):
+    """Expanded ring instants for every active alarm over a horizon."""
+
+    generated_at: datetime = Field(
+        ..., description="When the server computed this expansion (UTC)"
+    )
+    horizon_days: int = Field(
+        ..., ge=1, description="Number of days the expansion covers"
+    )
+    occurrences: List[AlarmOccurrence] = Field(
+        default_factory=list,
+        description="Ring instants ordered by trigger time",
+    )
+
+    @field_serializer("generated_at")
+    def serialize_generated_at(self, value: datetime) -> str:
+        return _utc_offset_iso(value)
+
+
+class OfflineWakeRequest(BaseModel):
+    """A dismissal a device recorded while it had no connectivity.
+
+    The challenge was generated and checked on the device, so the answer
+    cannot be verified server-side. The resulting wake event is therefore
+    always recorded as unverified — this is a trust boundary, not a bug.
+    """
+
+    triggered_at: datetime = Field(
+        ..., description="When the alarm rang, in UTC"
+    )
+    dismissed_at: Optional[datetime] = Field(
+        None,
+        description=(
+            "When the on-device challenge was solved, in UTC. "
+            "Defaults to triggered_at."
+        ),
+    )
+    challenges_required: int = Field(1, ge=0, le=10)
+    challenges_completed: int = Field(0, ge=0, le=100)
+    failed_attempts: int = Field(0, ge=0, le=1000)
+    snooze_count: int = Field(0, ge=0, le=100)
+
+
+class OfflineWakeResponse(BaseModel):
+    """Outcome of flushing one queued offline dismissal."""
+
+    status: str = Field(
+        ..., description="'recorded' for a new event, 'duplicate' for a replay"
+    )
+    wake_event_id: int
+    alarm_id: int
+    dismiss_method: str
+    verified: bool = Field(
+        False,
+        description="Always false — on-device verification is not trusted",
+    )
+    triggered_at: datetime
+    dismissed_at: datetime
+    next_trigger_at: Optional[datetime] = None
+    message: str
+
+    @field_serializer("triggered_at", "dismissed_at", "next_trigger_at")
+    def serialize_utc_datetimes(self, value: Optional[datetime]) -> Optional[str]:
+        if value is None:
+            return None
+        return _utc_offset_iso(value)

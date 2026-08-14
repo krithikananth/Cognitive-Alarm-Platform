@@ -44,9 +44,13 @@ from app.services.notification_scheduler import refresh_user_notifications
 from app.schemas.alarm import (
     AlarmCreate,
     AlarmUpdate,
+    AlarmOccurrence,
     AlarmResponse,
     AlarmListResponse,
+    AlarmScheduleResponse,
     AlarmToggle,
+    OfflineWakeRequest,
+    OfflineWakeResponse,
     SnoozeInfoResponse,
 )
 from app.schemas.challenge import (
@@ -138,6 +142,18 @@ def _allowed_weekdays(alarm: Alarm) -> frozenset:
 # /challenge/analysis reads lifetime attempt history; its completion figures
 # must cover the same span rather than a rolling window.
 ANALYSIS_COMPLETION_DAYS = 3650
+
+# Occurrence expansion for GET /schedule. A week is the native client's
+# default sync horizon; the cap bounds both the day scan and the payload.
+SCHEDULE_DEFAULT_DAYS = 7
+SCHEDULE_MAX_DAYS = 30
+SCHEDULE_MAX_OCCURRENCES_PER_ALARM = 200
+
+# How far back a queued offline dismissal may be dated, and how far a device
+# clock may run ahead before the report is rejected as unusable.
+OFFLINE_WAKE_MAX_AGE_DAYS = 30
+OFFLINE_WAKE_MAX_CLOCK_SKEW = timedelta(minutes=5)
+OFFLINE_WAKE_DISMISS_METHOD = "offline_challenge"
 
 router = APIRouter(prefix="/alarms", tags=["Alarm Scheduling"])
 
@@ -274,6 +290,71 @@ def get_upcoming_alarms(
         .all()
     )
     return alarms
+
+
+@router.get(
+    "/schedule",
+    response_model=AlarmScheduleResponse,
+    summary="Expand upcoming alarm occurrences",
+)
+def get_alarm_schedule(
+    days: int = Query(
+        SCHEDULE_DEFAULT_DAYS,
+        ge=1,
+        le=SCHEDULE_MAX_DAYS,
+        description="Horizon, in days, to expand occurrences over",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Expand every active alarm into concrete ring instants.
+
+    Unlike ``/upcoming`` — which returns alarms whose single stored
+    ``next_trigger_at`` falls in a window — this returns *every* occurrence in
+    the horizon, so a native client can arm one OS-level alarm per ring
+    without re-implementing the recurrence rules in the client and drifting
+    from the server.
+    """
+    now_utc = datetime.now(timezone.utc)
+    horizon_end = _to_utc_naive(now_utc + timedelta(days=days))
+    user_tz = _user_timezone(db, current_user.id)
+
+    alarms = (
+        db.query(Alarm)
+        .filter(Alarm.user_id == current_user.id, Alarm.is_active == True)
+        .order_by(Alarm.alarm_time, Alarm.id)
+        .all()
+    )
+
+    occurrences = [
+        AlarmOccurrence(
+            alarm_id=alarm.id,
+            trigger_at=trigger_at,
+            title=alarm.title,
+            challenge_type=alarm.challenge_type,
+            challenge_count=alarm.challenge_count,
+            challenge_difficulty=alarm.challenge_difficulty,
+            snooze_limit=alarm.snooze_limit,
+            snooze_interval_minutes=alarm.snooze_interval_minutes,
+            volume=alarm.volume,
+            vibrate=alarm.vibrate,
+        )
+        for alarm in alarms
+        for trigger_at in _expand_occurrences(
+            alarm,
+            user_tz=user_tz,
+            horizon_end=horizon_end,
+            db=db,
+            user_id=current_user.id,
+        )
+    ]
+    occurrences.sort(key=lambda o: (o.trigger_at, o.alarm_id))
+
+    return AlarmScheduleResponse(
+        generated_at=now_utc,
+        horizon_days=days,
+        occurrences=occurrences,
+    )
 
 
 @router.get(
@@ -1243,6 +1324,180 @@ def fail_wake(
     return _fail_wake_internal(alarm, current_user, db, session=session)
 
 
+@router.post(
+    "/{alarm_id}/offline-wake",
+    response_model=OfflineWakeResponse,
+    summary="Flush a dismissal recorded while the device was offline",
+)
+def record_offline_wake(
+    alarm_id: int,
+    body: OfflineWakeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record a wake the device handled without connectivity.
+
+    The challenge was generated *and checked* on the device, so the server
+    has no evidence the user actually solved anything. The wake event is
+    therefore always written with ``verified=False`` and
+    ``dismiss_method="offline_challenge"``: it appears in the audit trail and
+    keeps the schedule moving, but it never feeds the habit score, streaks,
+    wake-consistency or the dismissal counters, all of which key on verified
+    wakes. This is a documented trust boundary, not a bug.
+
+    Replaying the same queued item is safe — a wake already recorded for the
+    same ring instant is returned unchanged rather than duplicated.
+    """
+    alarm = (
+        db.query(Alarm)
+        .filter(Alarm.id == alarm_id, Alarm.user_id == current_user.id)
+        .first()
+    )
+    if not alarm:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Alarm not found",
+        )
+
+    now = _to_utc_naive(datetime.now(timezone.utc))
+    triggered_at = _to_utc_naive(body.triggered_at)
+    dismissed_at = (
+        _to_utc_naive(body.dismissed_at)
+        if body.dismissed_at is not None
+        else triggered_at
+    )
+
+    # The device clock is untrusted: a future-dated or ancient report would
+    # silently corrupt every dashboard window it lands in.
+    latest_allowed = now + OFFLINE_WAKE_MAX_CLOCK_SKEW
+    if triggered_at > latest_allowed or dismissed_at > latest_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Offline wake timestamps cannot be in the future.",
+        )
+    if dismissed_at < triggered_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="dismissed_at cannot precede triggered_at.",
+        )
+    if triggered_at < now - timedelta(days=OFFLINE_WAKE_MAX_AGE_DAYS):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Offline wake is older than "
+                f"{OFFLINE_WAKE_MAX_AGE_DAYS} days and can no longer be synced."
+            ),
+        )
+
+    existing = (
+        db.query(AlarmWakeEvent)
+        .filter(
+            AlarmWakeEvent.user_id == current_user.id,
+            AlarmWakeEvent.alarm_id == alarm.id,
+            AlarmWakeEvent.dismiss_method == OFFLINE_WAKE_DISMISS_METHOD,
+            AlarmWakeEvent.triggered_at == triggered_at,
+        )
+        .first()
+    )
+    if existing:
+        return OfflineWakeResponse(
+            status="duplicate",
+            wake_event_id=existing.id,
+            alarm_id=alarm.id,
+            dismiss_method=OFFLINE_WAKE_DISMISS_METHOD,
+            verified=False,
+            triggered_at=existing.triggered_at,
+            dismissed_at=existing.dismissed_at or existing.triggered_at,
+            next_trigger_at=alarm.next_trigger_at,
+            message="This offline wake was already synced.",
+        )
+
+    required = max(1, int(body.challenges_required or 0))
+    completed = min(int(body.challenges_completed or 0), required)
+
+    wake_event = AlarmWakeEvent(
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        triggered_at=triggered_at,
+        dismissed_at=dismissed_at,
+        dismiss_method=OFFLINE_WAKE_DISMISS_METHOD,
+        challenges_required=required,
+        challenges_completed=completed,
+        consecutive_correct=completed,
+        failed_attempts=int(body.failed_attempts or 0),
+        snooze_count_at_dismiss=int(body.snooze_count or 0),
+        time_to_dismiss_seconds=int(
+            (dismissed_at - triggered_at).total_seconds()
+        ),
+        # Unmeasurable off-device — inventing a score would make an
+        # unverifiable dismissal look like a graded wake.
+        wakefulness_score=None,
+        wakefulness_level=None,
+        verified=False,
+    )
+    db.add(wake_event)
+    db.flush()
+
+    AnalyticsIngestionService.emit_alarm_dismissed(
+        db,
+        user_id=current_user.id,
+        alarm_id=alarm.id,
+        wake_event_id=wake_event.id,
+        dismiss_method=OFFLINE_WAKE_DISMISS_METHOD,
+        snooze_count=int(body.snooze_count or 0),
+        wakefulness_score=None,
+        wakefulness_level=None,
+        time_to_dismiss_seconds=wake_event.time_to_dismiss_seconds,
+        commit=False,
+    )
+
+    # Only advance when the stored trigger is still the ring being reported;
+    # if it already moved on, a newer cycle owns the schedule.
+    advanced = (
+        alarm.next_trigger_at is None or alarm.next_trigger_at <= triggered_at
+    )
+    if advanced:
+        user_tz = _user_timezone(db, current_user.id)
+        if alarm.alarm_type == AlarmType.ONE_TIME:
+            alarm.is_active = False
+            alarm.next_trigger_at = None
+        else:
+            alarm.next_trigger_at = _calculate_next_trigger(
+                alarm, user_tz=user_tz, db=db, user_id=current_user.id
+            )
+        alarm.last_triggered_at = triggered_at
+        alarm.total_snoozes = 0
+        ChallengeService.clear_challenge_session(
+            current_user.id, alarm.id, db
+        )
+        ChallengeDeliveryService.release_pending(
+            db, user_id=current_user.id, alarm_id=alarm.id, commit=False
+        )
+
+    db.commit()
+    db.refresh(alarm)
+    db.refresh(wake_event)
+
+    if advanced:
+        RecommendationCache.invalidate_user(current_user.id)
+        refresh_user_notifications(current_user.id)
+
+    return OfflineWakeResponse(
+        status="recorded",
+        wake_event_id=wake_event.id,
+        alarm_id=alarm.id,
+        dismiss_method=OFFLINE_WAKE_DISMISS_METHOD,
+        verified=False,
+        triggered_at=wake_event.triggered_at,
+        dismissed_at=wake_event.dismissed_at,
+        next_trigger_at=alarm.next_trigger_at,
+        message=(
+            "Offline wake recorded as unverified — the challenge was checked "
+            "on the device, so it does not count as a verified wake."
+        ),
+    )
+
+
 def _fail_wake_internal(
     alarm: Alarm,
     current_user: User,
@@ -2189,4 +2444,54 @@ def _calculate_next_trigger(
             return _to_utc_naive(candidate)
 
     return None
+
+
+def _expand_occurrences(
+    alarm: Alarm,
+    *,
+    user_tz: str,
+    horizon_end: datetime,
+    db: Optional[Session] = None,
+    user_id: Optional[int] = None,
+    limit: int = SCHEDULE_MAX_OCCURRENCES_PER_ALARM,
+) -> list[datetime]:
+    """List an alarm's ring instants up to ``horizon_end`` (UTC-naive, ascending).
+
+    The first occurrence comes straight from ``_calculate_next_trigger`` so
+    one-time dates and smart-adaptive time shifts are honoured exactly as the
+    stored ``next_trigger_at`` would be. Later ones repeat that occurrence's
+    *local wall-clock* time on each subsequent allowed weekday, which is what
+    keeps a 07:00 alarm at 07:00 across a DST transition.
+    """
+    first = _calculate_next_trigger(
+        alarm, user_tz=user_tz, db=db, user_id=user_id
+    )
+    if first is None or first > horizon_end:
+        return []
+
+    occurrences = [first]
+    if alarm.alarm_type == AlarmType.ONE_TIME:
+        return occurrences
+
+    tz = _resolve_timezone(user_tz)
+    first_local = first.replace(tzinfo=timezone.utc).astimezone(tz)
+    ring_time = first_local.time()
+    allowed = _allowed_weekdays(alarm)
+
+    # +2 covers the local/UTC offset plus the partial day the first
+    # occurrence starts in, so the last eligible day is never dropped.
+    for offset in range(1, (horizon_end - first).days + 3):
+        local_dt = datetime.combine(
+            first_local.date() + timedelta(days=offset), ring_time, tzinfo=tz
+        )
+        if local_dt.weekday() not in allowed:
+            continue
+        candidate = _to_utc_naive(local_dt)
+        if candidate > horizon_end:
+            break
+        occurrences.append(candidate)
+        if len(occurrences) >= limit:
+            break
+
+    return occurrences
 
