@@ -35,6 +35,7 @@
       "expo-status-bar",
       "expo-secure-store",
       "expo-build-properties",
+      "./plugins/withNotifeeRepository",
       "@react-native-firebase/app",
       "@react-native-firebase/messaging"
     ],
