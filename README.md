@@ -22,16 +22,10 @@
 
 ## 🔗 Live Deployment
 
-<p align="center">
-  <a href="https://cap-frontend-buva.onrender.com"><img src="https://img.shields.io/badge/Web_App-Launch-blueviolet?style=for-the-badge&logo=react&logoColor=white" alt="Launch the web app"/></a>
-  <a href="https://icap-backend-y7g6.onrender.com"><img src="https://img.shields.io/badge/API-Open-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="Open the API"/></a>
-</p>
-
-<p align="center">
-  <strong>Web app</strong> <a href="https://cap-frontend-buva.onrender.com">cap-frontend-buva.onrender.com</a>
-  &nbsp;·&nbsp;
-  <strong>API</strong> <a href="https://icap-backend-y7g6.onrender.com">icap-backend-y7g6.onrender.com</a>
-</p>
+| Service           | URL                                    |
+| ----------------- | -------------------------------------- |
+| **Web app (SPA)** | https://cap-frontend-buva.onrender.com |
+| **API (backend)** | https://icap-backend-y7g6.onrender.com |
 
 ---
 
