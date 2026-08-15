@@ -1,0 +1,137 @@
+# Render Blueprint — Intelligent Cognitive Alarm Platform
+# Deploy: https://dashboard.render.com/blueprints -> New Blueprint Instance
+#
+# Creates three services:
+#   icap-db        Postgres (free tier EXPIRES 30 DAYS after creation - see README notes)
+#   icap-backend   FastAPI + APScheduler, always-on Docker web service
+#   icap-frontend  CRA static site, proxies /api/* to the backend so auth
+#                  cookies stay same-origin (SameSite=lax works, no CORS)
+
+databases:
+  - name: icap-db
+    databaseName: icap_db
+    user: icap
+    plan: free
+    region: singapore
+
+services:
+  # ---------------------------------------------------------------- backend
+  - type: web
+    name: icap-backend
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    # Mirrors the docker-compose CMD, but binds $PORT as Render requires.
+    dockerCommand: >-
+      sh -c "python -c 'from app.main import Base, engine; Base.metadata.create_all(bind=engine)'
+      && alembic upgrade head
+      && exec uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=*"
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: icap-db
+          property: connectionString
+
+      # Free Postgres has no managed pooling; keep the pool small.
+      - key: DB_POOL_SIZE
+        value: "5"
+      - key: DB_MAX_OVERFLOW
+        value: "5"
+
+      # Same-origin via the frontend's /api/* rewrite, so lax cookies are fine.
+      - key: AUTH_COOKIE_SAMESITE
+        value: lax
+      - key: AUTH_COOKIE_SECURE
+        value: "true"
+
+      # Set these in the dashboard to your frontend URL once it exists.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+
+      # Render's filesystem is ephemeral; log to stdout instead of /app/logs.
+      - key: LOG_TO_FILE
+        value: "false"
+      - key: LOG_FORMAT
+        value: json
+      - key: LOG_LEVEL
+        value: INFO
+
+      - key: REDIS_ENABLED
+        value: "false"
+      - key: AGGREGATE_CACHE_ENABLED
+        value: "false"
+
+      - key: ALARM_DISPATCH_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+
+      # Optional integrations - fill in the dashboard, leave blank to disable.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FCM_ENABLED
+        value: "false"
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false
+      - key: METRICS_SCRAPE_TOKEN
+        generateValue: true
+      - key: INITIAL_ADMIN_EMAIL
+        sync: false
+      - key: INITIAL_ADMIN_USERNAME
+        sync: false
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
+
+  # --------------------------------------------------------------- frontend
+  - type: web
+    name: icap-frontend
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./frontend/build
+    rootDir: frontend
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # CRA fails the build on lint warnings when CI is truthy.
+      - key: CI
+        value: "false"
+      - key: REACT_APP_API_URL
+        value: /api/v1
+      - key: REACT_APP_FIREBASE_API_KEY
+        sync: false
+      - key: REACT_APP_FIREBASE_PROJECT_ID
+        sync: false
+      - key: REACT_APP_FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: REACT_APP_FIREBASE_APP_ID
+        sync: false
+      - key: REACT_APP_FIREBASE_VAPID_KEY
+        sync: false
+    routes:
+      # Order matters: API proxy must precede the SPA catch-all.
+      # Update the host if Render suffixes the backend name.
+      - type: rewrite
+        source: /api/*
+        destination: https://icap-backend.onrender.com/api/*
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
