@@ -126,12 +126,11 @@ services:
         sync: false
     routes:
       # Order matters: API proxy must precede the SPA catch-all.
-      # REPLACE the destination host with your real backend URL from the Render
-      # dashboard. Left unresolvable on purpose: a wrong-but-live host would
-      # silently proxy credentials to whoever owns it.
+      # Keeps the SPA and API same-origin so HttpOnly auth cookies work with
+      # SameSite=lax. Host is suffixed because bare icap-backend was taken.
       - type: rewrite
         source: /api/*
-        destination: https://REPLACE-WITH-YOUR-BACKEND-URL.invalid/api/*
+        destination: https://icap-backend-y7g6.onrender.com/api/*
       - type: rewrite
         source: /*
         destination: /index.html
