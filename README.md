@@ -16,7 +16,6 @@
   <a href="https://redis.io/"><img src="https://img.shields.io/badge/Redis-Cache-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis"/></a>
   <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"/></a>
-  <img src="https://img.shields.io/badge/Status-Milestones_1--5_&_7_Complete-brightgreen?style=flat-square" alt="Status"/>
 </p>
 
 ---
@@ -25,9 +24,9 @@
 
 The **Intelligent Cognitive Alarm Platform (ICAP)** is a next-generation alarm system that goes beyond simple wake-up calls. It combines cognitive challenges, personalized difficulty scaling, and sleep analytics to help users build healthier morning routines and sharpen their minds from the moment they wake up.
 
-Unlike traditional alarm apps, ICAP requires users to solve cognitive challenges — math problems, memory puzzles, pattern recognition tasks — before the alarm can be dismissed. The platform tracks wake behavior, adapts challenge difficulty over time, scores daily habits, and surfaces coaching recommendations on the dashboard.
+Unlike traditional alarm apps, ICAP requires users to solve cognitive challenges — math problems, memory puzzles, pattern recognition tasks — before the alarm can be dismissed. The platform tracks wake behavior, adapts challenge difficulty over time, scores daily habits, and provides coaching recommendations on the dashboard.
 
-The platform ships three roles — **user**, **wellness coach** and **administrator** — each with its own workspace, and a full observability, security and reporting surface.
+The platform supports three roles — User, Wellness Coach, and Administrator — each with its own workspace, along with dedicated security, observability and reporting features.
 
 > 👤 New here? Start with the **[User Guide](docs/USER_GUIDE.md)**.
 > 📡 Integrating? See the **[API Reference](docs/api_documentation.md)**.
@@ -53,7 +52,7 @@ ICAP follows a **modular monolith** architecture built with FastAPI, designed to
 │                   (FastAPI + Uvicorn)                        │
 ├──────────┬───────────┬───────────┬────────────┬─────────────┤
 │  Auth    │  Alarm    │ Challenge │ Analytics  │ Recommend.  │
-│ Service  │  Service  │  Engine   │  Engine    │  Engine     │
+│ Module   │  Module   │  Module   │   Module   │   Module    │
 ├──────────┴───────────┴───────────┴────────────┴─────────────┤
 │        APScheduler jobs (alarm dispatch, notifications,      │
 │                 metric alerts, daily scheduling)             │
@@ -71,7 +70,7 @@ ICAP follows a **modular monolith** architecture built with FastAPI, designed to
 
 ## ✨ Features
 
-### Milestone 1 — Auth, Users & Foundation
+### Milestone 1 — Project Setup, Auth, Profiles & Alarm Scheduling
 
 - [x] **User Authentication** — Secure registration, login, and JWT sessions carried in HttpOnly cookies
 - [x] **Session Revocation** — Logout and password reset invalidate outstanding access/refresh tokens server-side
@@ -85,55 +84,49 @@ ICAP follows a **modular monolith** architecture built with FastAPI, designed to
 - [x] **Docker Support** — One-command development setup
 - [x] **Health Checks** — Liveness and readiness endpoints
 - [x] **CORS Configuration** — Configurable cross-origin resource sharing
-
-### Milestone 2 — Alarms, Scheduling & Attempt Logging
-
 - [x] **Alarm CRUD** — Create, update, toggle, and delete alarms
 - [x] **Scheduling Engine** — Daily, weekday, weekend, one-time, and smart-adaptive schedules
 - [x] **Snooze Policies** — Configurable snooze limits and intervals
 - [x] **Challenge Linkage** — Per-alarm challenge type, count, and difficulty
-- [x] **Wake / Snooze Audit Logs** — Queryable wake and snooze event history
-- [x] **Challenge Attempt Logs** — Clean, indexed attempt history with log-health audit
+- [x] **Difficulty Preferences** — Profile-level and per-alarm difficulty (`beginner` → `expert`)
+- [x] **Server-Side Alarm Dispatch** — Scheduler pushes a ring notification even when no tab is open, and rolls over unattended alarms
 
-### Milestone 3 — Challenges, Habit Score & Recommendations
+### Milestone 2 — Cognitive Challenges & Wake-Up Verification
 
 - [x] **Cognitive Challenge Engine** — Math, logic, memory, pattern, word, riddle, and quiz challenges
 - [x] **AI Challenge Generation** — Google Gemini generates puzzles when `GEMINI_API_KEY` is set; procedural generators are the deterministic fallback and every challenge reports its `source` (`ai` / `procedural`)
-- [x] **Difficulty Preferences** — Profile-level and per-alarm difficulty (`beginner` → `expert`)
+- [x] **Wake-Up Verification** — Multi-step and consecutive-correct challenge cycles with a verification token required to dismiss
+- [x] **Anti-Snooze Workflows** — `snooze_limit = 0` refuses snoozing; each snooze escalates the next challenge's difficulty
+- [x] **Wake / Snooze Audit Logs** — Queryable wake and snooze event history
+- [x] **Challenge Attempt Logs** — Clean, indexed attempt history with log-health audit
+
+### Milestone 3 — Adaptive Intelligence, Habit Scoring & Recommendations
+
 - [x] **Adaptive Difficulty** — Rule-based raise/lower from consecutive success/failure streaks
+- [x] **Learning Pattern Analysis** — Mastery by challenge type, learning state, engagement level and its 14-day improvement
+- [x] **Adaptation Effectiveness** — Measures whether difficulty changes actually moved the user toward the target accuracy band
 - [x] **Analytics Ingestion** — Single and batch event ingest plus summary endpoints
 - [x] **Behavioral Analytics** — Snooze patterns, wake consistency, sleep adherence, trends (pandas/numpy)
+- [x] **Sleep Pattern Analytics** — Recorded (`sleep.started` / `sleep.ended`) sleep sessions preferred over estimates; regularity, social jetlag, sleep debt
+- [x] **Behaviour ↔ Productivity Correlations** — Pearson/Spearman with a significance test, no SciPy dependency
 - [x] **Habit Score** — Weighted formula: Wake Consistency 35% · Challenge Completion 25% · Snooze Reduction 20% · Sleep Adherence 20%
+- [x] **Challenge Completion Rate** — Separate delivery ledger, so unanswered and timed-out challenges are counted (not just accuracy)
+- [x] **Snooze Reduction Rate** — Snoozes per wake-up compared against the previous period
+- [x] **Productivity Improvement Rate** — Period-over-period deltas for readiness, routine, accuracy and wakefulness
 - [x] **Recommendation Engine** — Rule-based sleep, wake, habit, and productivity suggestions
+- [x] **Recommendation Relevance** — Thumbs up/down/dismiss feedback, relevance rate and engine-confidence gap
 - [x] **Redis Recommendation Cache** — Cached coaching results with TTL and invalidation
 - [x] **React Dashboard** — Habit-score widget, recommendation cards, analytics views, preference settings
 
-### Milestone 4 — Wake Verification, Sleep Insights & Notifications
-
-- [x] **Wake-Up Verification** — Multi-step and consecutive-correct challenge cycles with a verification token required to dismiss
-- [x] **Anti-Snooze Workflows** — `snooze_limit = 0` refuses snoozing; each snooze escalates the next challenge's difficulty
-- [x] **Server-Side Alarm Dispatch** — Scheduler pushes a ring notification even when no tab is open, and rolls over unattended alarms
-- [x] **Sleep Pattern Analytics** — Recorded (`sleep.started` / `sleep.ended`) sleep sessions preferred over estimates; regularity, social jetlag, sleep debt
-- [x] **Behaviour ↔ Productivity Correlations** — Pearson/Spearman with a significance test, no SciPy dependency
-- [x] **Notification Engine** — Bedtime, wake, habit, challenge, progress, motivational and announcement notifications with quiet hours, frequency tiers and FCM push
-- [x] **Lifestyle Reports** — Habit, wake, challenge, productivity and sleep reports with PDF/Excel export
-
-### Milestone 5 — Roles, Coaching & Administration
+### Milestone 4 — Dashboards, Reports, Testing & Deployment
 
 - [x] **Wellness Coach Workspace** — Roster KPIs, search/filter/sort, per-client behaviour, habit, sleep and challenge analytics
 - [x] **Coach Assignment Management** — Admin UI and APIs to grant and revoke a coach's access to a client
 - [x] **Admin Console** — User management, platform analytics, alarm/habit/recommendation overviews, system reports, announcements
 - [x] **Maintenance Mode** — Blocks non-admin writes with `503` and shows a banner in the SPA
 - [x] **Role-Based Routing** — Per-role navigation, guarded routes, Access Denied and 404 pages
-
-### Milestone 7 — Advanced Personalization & Measurement
-
-- [x] **Learning Pattern Analysis** — Mastery by challenge type, learning state, engagement level and its 14-day improvement
-- [x] **Adaptation Effectiveness** — Measures whether difficulty changes actually moved the user toward the target accuracy band
-- [x] **Challenge Completion Rate** — Separate delivery ledger, so unanswered and timed-out challenges are counted (not just accuracy)
-- [x] **Snooze Reduction Rate** — Snoozes per wake-up compared against the previous period
-- [x] **Productivity Improvement Rate** — Period-over-period deltas for readiness, routine, accuracy and wakefulness
-- [x] **Recommendation Relevance** — Thumbs up/down/dismiss feedback, relevance rate and engine-confidence gap
+- [x] **Notification Engine** — Bedtime, wake, habit, challenge, progress, motivational and announcement notifications with quiet hours, frequency tiers and FCM push
+- [x] **Lifestyle Reports** — Habit, wake, challenge, productivity and sleep reports with PDF/Excel export
 
 ### Platform Engineering
 
@@ -683,14 +676,10 @@ PostgreSQL. Dependency scanning and the TLS edge job run via
 
 | Milestone   | Focus Area                              | Status         |
 | ----------- | --------------------------------------- | -------------- |
-| **M1** 🔐   | Auth, Users, Profiles, DevOps           | 🟢 Completed   |
-| **M2** ⏰   | Alarm CRUD, Scheduling, Attempt Logs    | 🟢 Completed   |
-| **M3** 🧩   | Challenges, Habit Score, Recommendations| 🟢 Completed   |
-| **M4** 📊   | Wake Verification, Sleep Insights & Notifications | 🟢 Completed |
-| **M5** 🌐   | Frontend Enhancements, Coach & Admin Workspaces | 🟢 Completed (PWA/offline not shipped) |
-| **M6** 📱   | Mobile App (React Native)               | 🔵 Planned     |
-| **M7** 🎯   | Advanced Personalization & Measurement  | 🟢 Completed   |
-| **M8** 🚀   | Production Deploy & Scaling             | 🟡 In progress — hardened Docker/TLS stack and CI pipelines; cloud deployment artifacts and horizontal scaling are not in the repo |
+| **M1** 🔐   | Week 1–2 — Project Setup, Auth, Profiles & Alarm Scheduling | 🟢 Completed |
+| **M2** 🧩   | Week 3–4 — Cognitive Challenges & Wake-Up Verification | 🟢 Completed |
+| **M3** 🎯   | Week 5–6 — Adaptive Intelligence, Habit Scoring & Recommendations | 🟢 Completed |
+| **M4** 🚀   | Week 7–8 — Dashboards, Reports, Testing & Deployment | 🟡 In progress — hardened Docker/TLS stack and CI pipelines; cloud deployment artifacts and horizontal scaling are not in the repo |
 
 **Known gaps.** These are deliberate and tracked, not silent omissions:
 
