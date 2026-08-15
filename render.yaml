@@ -23,11 +23,9 @@ services:
     region: singapore
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    # Mirrors the docker-compose CMD, but binds $PORT as Render requires.
-    dockerCommand: >-
-      sh -c "python -c 'from app.main import Base, engine; Base.metadata.create_all(bind=engine)'
-      && alembic upgrade head
-      && exec uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=*"
+    # Must stay a single bare token: Render re-tokenizes this through a shell,
+    # which mangles inline quotes and operators. Logic lives in start.sh.
+    dockerCommand: sh /app/start.sh
     healthCheckPath: /health
     envVars:
       - key: ENVIRONMENT
@@ -108,7 +106,11 @@ services:
         value: /api/v1
       - key: REACT_APP_FIREBASE_API_KEY
         sync: false
+      - key: REACT_APP_FIREBASE_AUTH_DOMAIN
+        sync: false
       - key: REACT_APP_FIREBASE_PROJECT_ID
+        sync: false
+      - key: REACT_APP_FIREBASE_STORAGE_BUCKET
         sync: false
       - key: REACT_APP_FIREBASE_MESSAGING_SENDER_ID
         sync: false
