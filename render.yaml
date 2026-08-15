@@ -50,6 +50,8 @@ services:
         value: "true"
 
       # Set these in the dashboard to your frontend URL once it exists.
+      # CORS_ORIGINS is a List[str], so pydantic-settings JSON-decodes it before
+      # validators run — it must be a JSON array: ["https://your-app.onrender.com"]
       - key: CORS_ORIGINS
         sync: false
       - key: FRONTEND_URL
@@ -94,7 +96,8 @@ services:
     name: icap-frontend
     runtime: static
     buildCommand: npm ci && npm run build
-    staticPublishPath: ./frontend/build
+    # Relative to rootDir, not the repo root.
+    staticPublishPath: ./build
     rootDir: frontend
     envVars:
       - key: NODE_VERSION
