@@ -95,8 +95,10 @@ services:
         sync: false
 
   # --------------------------------------------------------------- frontend
+  # Created manually in the dashboard, not by this blueprint. Kept here so the
+  # settings are recorded; verify no duplicate static site exists before sync.
   - type: web
-    name: icap-frontend
+    name: cap-frontend
     runtime: static
     buildCommand: npm ci && npm run build
     # Relative to rootDir, not the repo root.
