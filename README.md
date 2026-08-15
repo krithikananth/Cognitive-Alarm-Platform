@@ -22,10 +22,16 @@
 
 ## 🔗 Live Deployment
 
-| Service           | URL                                    |
-| ----------------- | -------------------------------------- |
-| **Web app (SPA)** | https://cap-frontend-buva.onrender.com |
-| **API (backend)** | https://icap-backend-y7g6.onrender.com |
+<p align="center">
+  <a href="https://cap-frontend-buva.onrender.com"><img src="https://img.shields.io/badge/Web_App-Launch-blueviolet?style=for-the-badge&logo=react&logoColor=white" alt="Launch the web app"/></a>
+  <a href="https://icap-backend-y7g6.onrender.com"><img src="https://img.shields.io/badge/API-Open-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="Open the API"/></a>
+</p>
+
+<p align="center">
+  <strong>Web app</strong> <a href="https://cap-frontend-buva.onrender.com">cap-frontend-buva.onrender.com</a>
+  &nbsp;·&nbsp;
+  <strong>API</strong> <a href="https://icap-backend-y7g6.onrender.com">icap-backend-y7g6.onrender.com</a>
+</p>
 
 ---
 
@@ -136,6 +142,7 @@ ICAP follows a **modular monolith** architecture built with FastAPI, designed to
 - [x] **Role-Based Routing** — Per-role navigation, guarded routes, and Access Denied and 404 pages
 - [x] **Notification Engine** — Bedtime, wake, habit, challenge, progress, motivational, and announcement notifications with quiet hours, frequency tiers, and FCM push
 - [x] **Lifestyle Reports** — Habit, wake, challenge, productivity, and sleep reports with PDF/Excel export
+- [x] **Frontend & Backend Deployment** — SPA and API deployed on Render (see [Live Deployment](#-live-deployment))
 
 ### Platform Engineering
 
