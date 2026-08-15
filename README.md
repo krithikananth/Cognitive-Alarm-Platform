@@ -2,7 +2,9 @@
   <img src="https://img.shields.io/badge/🧠_ICAP-Intelligent_Cognitive_Alarm_Platform-blueviolet?style=for-the-badge" alt="ICAP Banner"/>
 </p>
 
-<h1 align="center">🧠 Intelligent Cognitive Alarm Platform</h1>
+<h1 align="center">Infosys Springboard Virtual Internship 7.0</h1>
+
+<h2 align="center">🧠 Intelligent Cognitive Alarm Platform</h2>
 
 <p align="center">
   <em>Wake up smarter. Challenge your mind. Own your mornings.</em>
