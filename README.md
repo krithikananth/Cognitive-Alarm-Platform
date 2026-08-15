@@ -20,13 +20,22 @@
 
 ---
 
+## 🔗 Live Deployment
+
+| Service           | URL                                    |
+| ----------------- | -------------------------------------- |
+| **Web app (SPA)** | https://cap-frontend-buva.onrender.com |
+| **API (backend)** | https://icap-backend-y7g6.onrender.com |
+
+---
+
 ## 📖 About
 
 The **Intelligent Cognitive Alarm Platform (ICAP)** is a next-generation alarm system that goes beyond simple wake-up calls. It combines cognitive challenges, personalized difficulty scaling, and sleep analytics to help users build healthier morning routines and sharpen their minds from the moment they wake up.
 
 Unlike traditional alarm apps, ICAP requires users to solve cognitive challenges — math problems, memory puzzles, pattern recognition tasks — before the alarm can be dismissed. The platform tracks wake behavior, adapts challenge difficulty over time, scores daily habits, and provides coaching recommendations on the dashboard.
 
-The platform supports three roles — User, Wellness Coach, and Administrator — each with its own workspace, along with dedicated security, observability and reporting features.
+The platform supports three roles — User, Wellness Coach, and Administrator — each with its own workspace, along with dedicated security, observability, and reporting features.
 
 > 👤 New here? Start with the **[User Guide](docs/USER_GUIDE.md)**.
 > 📡 Integrating? See the **[API Reference](docs/api_documentation.md)**.
@@ -89,52 +98,52 @@ ICAP follows a **modular monolith** architecture built with FastAPI, designed to
 - [x] **Snooze Policies** — Configurable snooze limits and intervals
 - [x] **Challenge Linkage** — Per-alarm challenge type, count, and difficulty
 - [x] **Difficulty Preferences** — Profile-level and per-alarm difficulty (`beginner` → `expert`)
-- [x] **Server-Side Alarm Dispatch** — Scheduler pushes a ring notification even when no tab is open, and rolls over unattended alarms
+- [x] **Server-Side Alarm Dispatch** — The scheduler pushes a ring notification even when no tab is open, and rolls over unattended alarms
 
 ### Milestone 2 — Cognitive Challenges & Wake-Up Verification
 
 - [x] **Cognitive Challenge Engine** — Math, logic, memory, pattern, word, riddle, and quiz challenges
-- [x] **AI Challenge Generation** — Google Gemini generates puzzles when `GEMINI_API_KEY` is set; procedural generators are the deterministic fallback and every challenge reports its `source` (`ai` / `procedural`)
-- [x] **Wake-Up Verification** — Multi-step and consecutive-correct challenge cycles with a verification token required to dismiss
-- [x] **Anti-Snooze Workflows** — `snooze_limit = 0` refuses snoozing; each snooze escalates the next challenge's difficulty
+- [x] **AI Challenge Generation** — Google Gemini generates puzzles when `GEMINI_API_KEY` is set; procedural generators are the deterministic fallback, and every challenge reports its `source` (`ai` / `procedural`)
+- [x] **Wake-Up Verification** — Multi-step and consecutive-correct challenge cycles that require a verification token before an alarm can be dismissed
+- [x] **Anti-Snooze Workflows** — Setting `snooze_limit = 0` blocks snoozing; each snooze escalates the next challenge's difficulty
 - [x] **Wake / Snooze Audit Logs** — Queryable wake and snooze event history
-- [x] **Challenge Attempt Logs** — Clean, indexed attempt history with log-health audit
+- [x] **Challenge Attempt Logs** — Indexed attempt history with a log-health audit
 
 ### Milestone 3 — Adaptive Intelligence, Habit Scoring & Recommendations
 
-- [x] **Adaptive Difficulty** — Rule-based raise/lower from consecutive success/failure streaks
-- [x] **Learning Pattern Analysis** — Mastery by challenge type, learning state, engagement level and its 14-day improvement
-- [x] **Adaptation Effectiveness** — Measures whether difficulty changes actually moved the user toward the target accuracy band
+- [x] **Adaptive Difficulty** — Rule-based difficulty changes driven by consecutive success and failure streaks
+- [x] **Learning Pattern Analysis** — Tracks mastery by challenge type, learning state, engagement level, and 14-day improvement
+- [x] **Adaptation Effectiveness** — Measures whether difficulty changes moved the user toward the target accuracy band
 - [x] **Analytics Ingestion** — Single and batch event ingest plus summary endpoints
-- [x] **Behavioral Analytics** — Snooze patterns, wake consistency, sleep adherence, trends (pandas/numpy)
-- [x] **Sleep Pattern Analytics** — Recorded (`sleep.started` / `sleep.ended`) sleep sessions preferred over estimates; regularity, social jetlag, sleep debt
-- [x] **Behaviour ↔ Productivity Correlations** — Pearson/Spearman with a significance test, no SciPy dependency
+- [x] **Behavioral Analytics** — Snooze patterns, wake consistency, sleep adherence, and trends (pandas/numpy)
+- [x] **Sleep Pattern Analytics** — Uses recorded `sleep.started` / `sleep.ended` sessions in preference to estimates; covers regularity, social jetlag, and sleep debt
+- [x] **Behaviour ↔ Productivity Correlations** — Pearson/Spearman with a significance test, and no SciPy dependency
 - [x] **Habit Score** — Weighted formula: Wake Consistency 35% · Challenge Completion 25% · Snooze Reduction 20% · Sleep Adherence 20%
-- [x] **Challenge Completion Rate** — Separate delivery ledger, so unanswered and timed-out challenges are counted (not just accuracy)
+- [x] **Challenge Completion Rate** — A separate delivery ledger, so unanswered and timed-out challenges are counted, not just accuracy
 - [x] **Snooze Reduction Rate** — Snoozes per wake-up compared against the previous period
-- [x] **Productivity Improvement Rate** — Period-over-period deltas for readiness, routine, accuracy and wakefulness
+- [x] **Productivity Improvement Rate** — Period-over-period deltas for readiness, routine, accuracy, and wakefulness
 - [x] **Recommendation Engine** — Rule-based sleep, wake, habit, and productivity suggestions
-- [x] **Recommendation Relevance** — Thumbs up/down/dismiss feedback, relevance rate and engine-confidence gap
+- [x] **Recommendation Relevance** — Thumbs up/down/dismiss feedback, relevance rate, and engine-confidence gap
 - [x] **Redis Recommendation Cache** — Cached coaching results with TTL and invalidation
 - [x] **React Dashboard** — Habit-score widget, recommendation cards, analytics views, preference settings
 
 ### Milestone 4 — Dashboards, Reports, Testing & Deployment
 
-- [x] **Wellness Coach Workspace** — Roster KPIs, search/filter/sort, per-client behaviour, habit, sleep and challenge analytics
+- [x] **Wellness Coach Workspace** — Roster KPIs, search/filter/sort, and per-client behaviour, habit, sleep, and challenge analytics
 - [x] **Coach Assignment Management** — Admin UI and APIs to grant and revoke a coach's access to a client
-- [x] **Admin Console** — User management, platform analytics, alarm/habit/recommendation overviews, system reports, announcements
+- [x] **Admin Console** — User management, platform analytics, alarm/habit/recommendation overviews, system reports, and announcements
 - [x] **Maintenance Mode** — Blocks non-admin writes with `503` and shows a banner in the SPA
-- [x] **Role-Based Routing** — Per-role navigation, guarded routes, Access Denied and 404 pages
-- [x] **Notification Engine** — Bedtime, wake, habit, challenge, progress, motivational and announcement notifications with quiet hours, frequency tiers and FCM push
-- [x] **Lifestyle Reports** — Habit, wake, challenge, productivity and sleep reports with PDF/Excel export
+- [x] **Role-Based Routing** — Per-role navigation, guarded routes, and Access Denied and 404 pages
+- [x] **Notification Engine** — Bedtime, wake, habit, challenge, progress, motivational, and announcement notifications with quiet hours, frequency tiers, and FCM push
+- [x] **Lifestyle Reports** — Habit, wake, challenge, productivity, and sleep reports with PDF/Excel export
 
 ### Platform Engineering
 
-- [x] **Structured Logging** — JSON logs, rotating files, per-request correlation id echoed as `X-Request-ID`
-- [x] **Runtime Metrics & Alerting** — Per-route p50/p95/p99, `X-Process-Time`, threshold alerts, Prometheus exposition
-- [x] **Security Hardening** — TLS + HSTS + CSP at the edge, OWASP test suite, dependency/SAST scanning in CI
+- [x] **Structured Logging** — JSON logs, rotating files, and a per-request correlation ID echoed as `X-Request-ID`
+- [x] **Runtime Metrics & Alerting** — Per-route p50/p95/p99, `X-Process-Time`, threshold alerts, and Prometheus exposition
+- [x] **Security Hardening** — TLS + HSTS + CSP at the edge, an OWASP test suite, and dependency/SAST scanning in CI
 - [x] **API Contract Testing** — Snapshot-based drift detection over all 132 routes, plus a coverage gate on the API surface
-- [x] **Browser E2E** — Playwright journeys against a real backend + SPA
+- [x] **Browser E2E** — Playwright journeys against a real backend and SPA
 
 ---
 
@@ -210,9 +219,9 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
-The defaults run against a local SQLite file (`backend/icap.db`), and Redis is
-optional — if it is unreachable, recommendations are recomputed on each request.
-No external services are required to start. See the
+By default the app runs against a local SQLite file (`backend/icap.db`), and
+Redis is optional — if it is unreachable, recommendations are recomputed on each
+request. No external services are needed to start. See the
 [Environment Variables](#-environment-variables) section for all available
 options.
 
@@ -244,7 +253,7 @@ npm install
 npm start
 ```
 
-The web app will be available at `http://localhost:3000` and talks to
+The web app runs at `http://localhost:3000` and calls
 `http://localhost:8000/api/v1` by default. Override that with
 `REACT_APP_API_URL` in `frontend/.env` if your API runs elsewhere.
 
@@ -262,7 +271,7 @@ docker compose up --build -d
 ```
 
 Open `https://localhost` (or your configured `PUBLIC_URL`). Only Nginx is
-published to the host — PostgreSQL, Redis, the API and the frontend origin stay
+published to the host — PostgreSQL, Redis, the API, and the frontend origin stay
 on isolated Docker networks. Backend migrations run automatically before the API
 starts.
 
@@ -277,7 +286,8 @@ warn until you mount a CA-issued certificate.
 ## 📡 API Endpoints
 
 The API exposes **132 routes** under `/api/v1` (plus `GET /` and `GET /health`).
-The tables below are a starting point; the full reference lives in
+The hosted API base URL is `https://icap-backend-y7g6.onrender.com`.
+The tables below are a starting point; the complete reference is in
 [docs/api_documentation.md](docs/api_documentation.md).
 
 Authentication accepts **either** the HttpOnly session cookies set at login
@@ -319,12 +329,12 @@ Authentication accepts **either** the HttpOnly session cookies set at login
 | PATCH  | `/api/v1/alarms/{id}/toggle`          | Enable / disable alarm              | 🔑            |
 | GET    | `/api/v1/alarms/{id}/challenge`       | Get the active challenge            | 🔑            |
 | POST   | `/api/v1/alarms/{id}/verify`          | Verify a challenge answer           | 🔑            |
-| POST   | `/api/v1/alarms/{id}/dismiss`         | Verified dismiss                    | 🔑            |
+| POST   | `/api/v1/alarms/{id}/dismiss`         | Verified dismissal                  | 🔑            |
 | POST   | `/api/v1/alarms/{id}/snooze`          | Snooze alarm                        | 🔑            |
 | POST   | `/api/v1/alarms/{id}/fail-wake`       | Abandon the wake cycle              | 🔑            |
 | POST   | `/api/v1/alarms/challenge/practice`   | Start a practice challenge          | 🔑            |
 | GET    | `/api/v1/alarms/challenge/history`    | Challenge attempt history           | 🔑            |
-| GET    | `/api/v1/alarms/challenge/log-health` | Attempt-log cleanliness audit       | 🔑            |
+| GET    | `/api/v1/alarms/challenge/log-health` | Attempt-log health audit            | 🔑            |
 
 ### Dashboard, Analytics & Recommendations
 
@@ -374,13 +384,13 @@ Authentication accepts **either** the HttpOnly session cookies set at login
 
 | Document                                                     | What it covers                                                        |
 | ------------------------------------------------------------ | --------------------------------------------------------------------- |
-| [User Guide](docs/USER_GUIDE.md)                              | Every product flow for users, wellness coaches and administrators      |
-| [API Reference](docs/api_documentation.md)                    | Auth, conventions, all 132 routes, rate limits, errors                 |
+| [User Guide](docs/USER_GUIDE.md)                              | Every product flow for users, wellness coaches, and administrators     |
+| [API Reference](docs/api_documentation.md)                    | Auth, conventions, all 132 routes, rate limits, and errors             |
 | [Architecture](docs/architecture.md)                          | System design and module boundaries                                    |
 | [Database Design](docs/database_design.md)                    | Schema and relationships                                               |
-| [Authentication Flow](docs/AUTHENTICATION_FLOW.md)            | Login, refresh, OAuth and session revocation                           |
+| [Authentication Flow](docs/AUTHENTICATION_FLOW.md)            | Login, refresh, OAuth, and session revocation                          |
 | [Performance](docs/PERFORMANCE.md)                            | Measured latency and capacity results                                  |
-| [Security Review](docs/SECURITY_REVIEW.md)                    | Findings, fixes and the advisory register                              |
+| [Security Review](docs/SECURITY_REVIEW.md)                    | Findings, fixes, and the advisory register                             |
 | [RBAC Checklist](docs/SECURITY_RBAC_CHECKLIST.md)             | Role/permission verification matrix                                    |
 | [QA Bug Report](docs/QA_BUG_REPORT.md)                        | QA findings and their resolutions                                      |
 | [Mobile App Spec](docs/MOBILE_APP_SPEC.md)                    | Phase A plan for the Android React Native client (not yet implemented) |
@@ -475,7 +485,7 @@ intelligent-cognitive-alarm-platform/
 
 ## 🔐 Environment Variables
 
-The tables below cover the variables you are most likely to set. The complete
+The tables below list the variables you are most likely to set. The full
 templates are `.env.example` (Docker stack) and `backend/.env.example` (local
 backend); `frontend/.env.example` covers the browser build.
 
@@ -502,23 +512,23 @@ backend); `frontend/.env.example` covers the browser build.
 | `AUTH_COOKIE_ENABLED`          | Issue HttpOnly session cookies              | `true`               |
 | `ACCESS_COOKIE_NAME`           | Access-token cookie name                    | `icap_access_token`  |
 | `REFRESH_COOKIE_NAME`          | Refresh-token cookie name                   | `icap_refresh_token` |
-| `AUTH_COOKIE_SECURE`           | Force `Secure`; mandatory in production      | derived from `ENVIRONMENT` |
+| `AUTH_COOKIE_SECURE`           | Force the `Secure` flag; required in production | derived from `ENVIRONMENT` |
 | `AUTH_COOKIE_SAMESITE`         | Cookie `SameSite` policy                    | `lax`                |
-| `RATE_LIMIT_ENABLED`           | Login / password-reset limiting              | `true`               |
+| `RATE_LIMIT_ENABLED`           | Login and password-reset rate limiting       | `true`               |
 | `LOGIN_MAX_ATTEMPTS`           | Failed logins per account before lockout     | `5`                  |
-| `LOGIN_IP_MAX_ATTEMPTS`        | Failed logins per caller address             | `20`                 |
+| `LOGIN_IP_MAX_ATTEMPTS`        | Failed logins per client address             | `20`                 |
 | `LOGIN_LOCKOUT_SECONDS`        | Lockout duration                             | `900`                |
-| `PASSWORD_RESET_MAX_REQUESTS`  | Reset/verification emails per window         | `3`                  |
+| `PASSWORD_RESET_MAX_REQUESTS`  | Reset and verification emails per window     | `3`                  |
 
 ### Docker edge & data services
 
 | Variable            | Description                                                | Default            |
 | ------------------- | ---------------------------------------------------------- | ------------------ |
-| `PUBLIC_URL`        | Public origin. **Use your `https://` origin** — the edge redirects HTTP to HTTPS | `https://localhost` (compose fallback) |
+| `PUBLIC_URL`        | Public origin. **Use your `https://` origin**, because the edge redirects HTTP to HTTPS | `https://localhost` (compose fallback) |
 | `HTTP_PORT`         | Host port mapped to Nginx `:8080` (redirects to HTTPS)      | `80`               |
 | `HTTPS_PORT`        | Host port mapped to Nginx `:8443` (TLS)                     | `443`              |
 | `TLS_COMMON_NAME`   | CN/SAN of the fallback self-signed certificate              | `localhost`        |
-| `CDN_BASE_URL`      | CDN origin for hashed `/static` assets (build-time)         | — (same-origin)    |
+| `CDN_BASE_URL`      | CDN origin for hashed `/static` assets (set at build time)  | — (same-origin)    |
 | `POSTGRES_DB`       | PostgreSQL database name                                    | `icap_db`          |
 | `POSTGRES_USER`     | PostgreSQL user                                             | `icap_user`        |
 | `POSTGRES_PASSWORD` | PostgreSQL password (URL-safe)                              | — (required)       |
@@ -531,26 +541,26 @@ backend); `frontend/.env.example` covers the browser build.
 
 | Variable                         | Description                                              | Default              |
 | -------------------------------- | -------------------------------------------------------- | -------------------- |
-| `SMTP_HOST` / `SMTP_*`           | Outbound email. When unset, verification and reset links are written to the log instead | — |
+| `SMTP_HOST` / `SMTP_*`           | Outbound email. When unset, verification and reset links are written to the log | — |
 | `OAUTH2_GOOGLE_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | Google sign-in                    | —                    |
 | `GEMINI_API_KEY`                 | Enables AI-generated challenges                           | —                    |
 | `AI_CHALLENGE_ENABLED`           | Master switch for AI generation                           | `true`               |
 | `FCM_ENABLED`                    | Firebase Cloud Messaging push delivery                    | `false` (compose)    |
-| `FIREBASE_CREDENTIALS_JSON`      | Base64 service-account JSON (private server credential)   | —                    |
+| `FIREBASE_CREDENTIALS_JSON`      | Base64-encoded service-account JSON (private server credential) | —              |
 | `ALARM_DISPATCH_ENABLED`         | Server-side alarm ring dispatch                           | `true`               |
-| `ALARM_DISPATCH_INTERVAL_SECONDS`| Due-alarm sweep cadence                                   | `20`                 |
-| `NOTIFICATION_PROCESSING_INTERVAL_SECONDS` | Notification queue drain cadence                | `60`                 |
-| `LOG_LEVEL` / `LOG_FORMAT`       | `INFO` and `json` \| `console`                            | `INFO` / `json`      |
-| `LOG_TO_FILE` / `LOG_DIR`        | Rotating file logging (degrades to stdout if unwritable)  | `true` / `logs`      |
-| `LOG_TO_CONSOLE`                 | stdout logging; `false` keeps the dev terminal quiet      | `true`               |
+| `ALARM_DISPATCH_INTERVAL_SECONDS`| Interval between due-alarm sweeps                          | `20`                 |
+| `NOTIFICATION_PROCESSING_INTERVAL_SECONDS` | Interval between notification queue drains      | `60`                 |
+| `LOG_LEVEL` / `LOG_FORMAT`       | Log verbosity and output format (`json` \| `console`)      | `INFO` / `json`      |
+| `LOG_TO_FILE` / `LOG_DIR`        | Rotating file logging (falls back to stdout if the directory is not writable) | `true` / `logs` |
+| `LOG_TO_CONSOLE`                 | stdout logging; set `false` to keep the dev terminal quiet | `true`               |
 | `METRICS_ALERTS_ENABLED`         | Evaluate threshold alerts on measured metrics             | `true`               |
 | `METRICS_ALERT_P95_MS`           | p95 latency alert threshold                               | `400`                |
 | `METRICS_ALERT_WEBHOOK_URL`      | Optional outbound alert webhook                           | —                    |
 | `METRICS_SCRAPE_TOKEN`           | Bearer token for `/system/metrics/prometheus`             | — (admins only)      |
 
-Browser Firebase values (`REACT_APP_FIREBASE_*`) are build arguments and are
+The browser Firebase values (`REACT_APP_FIREBASE_*`) are build arguments and
 public identifiers. `FIREBASE_CREDENTIALS_JSON` is a private server credential —
-use base64 and never a browser key.
+encode it as base64 and never use a browser key here.
 
 ---
 
@@ -576,14 +586,15 @@ docker compose down
 docker compose down -v
 ```
 
-Hardening applied by the stack: containers run with `no-new-privileges` and a
-read-only root filesystem, the API's rotated logs live on a named volume, and
-Nginx serves TLS 1.2/1.3 only with HSTS, a `script-src 'self'` CSP,
-`X-Frame-Options: DENY` and a `404` for the API documentation routes.
+The stack applies several hardening defaults: containers run with
+`no-new-privileges` and a read-only root filesystem, the API's rotated logs live
+on a named volume, and Nginx serves TLS 1.2/1.3 only, with HSTS, a
+`script-src 'self'` CSP, `X-Frame-Options: DENY`, and a `404` for the API
+documentation routes.
 
 For an internet-facing deployment, mount a CA-issued certificate over
-`/etc/nginx/tls` (or terminate TLS at a load balancer in front of `:8443`) and
-set `PUBLIC_URL` plus `OAUTH2_GOOGLE_REDIRECT_URI` to the resulting HTTPS URLs.
+`/etc/nginx/tls` (or terminate TLS at a load balancer in front of `:8443`), then
+set `PUBLIC_URL` and `OAUTH2_GOOGLE_REDIRECT_URI` to the resulting HTTPS URLs.
 
 ---
 
@@ -618,7 +629,7 @@ pytest tests/test_security_owasp.py -q
 Open `htmlcov/index.html` to view the coverage report in your browser.
 
 > The TLS edge tests (`tests/test_tls_runtime.py`) build and run the real Nginx
-> image. They **skip** when Docker is unavailable, or when
+> image. They are **skipped** when Docker is unavailable or when
 > `ICAP_SKIP_EDGE_TESTS=1` is set.
 
 ```bash
@@ -655,9 +666,9 @@ pytest tests/test_asset_delivery.py tests/test_dashboard_performance.py \
 ```
 
 All of the above run automatically via `.github/workflows/performance.yml`,
-which additionally runs a capacity ramp against a live server backed by real
+which also runs a capacity ramp against a live server backed by real
 PostgreSQL. Dependency scanning and the TLS edge job run via
-`.github/workflows/security.yml`. Harness usage is in
+`.github/workflows/security.yml`. Harness usage is documented in
 [`backend/perf/README.md`](backend/perf/README.md); measured results are in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
@@ -679,17 +690,7 @@ PostgreSQL. Dependency scanning and the TLS edge job run via
 | **M1** 🔐   | Week 1–2 — Project Setup, Auth, Profiles & Alarm Scheduling | 🟢 Completed |
 | **M2** 🧩   | Week 3–4 — Cognitive Challenges & Wake-Up Verification | 🟢 Completed |
 | **M3** 🎯   | Week 5–6 — Adaptive Intelligence, Habit Scoring & Recommendations | 🟢 Completed |
-| **M4** 🚀   | Week 7–8 — Dashboards, Reports, Testing & Deployment | 🟡 In progress — hardened Docker/TLS stack and CI pipelines; cloud deployment artifacts and horizontal scaling are not in the repo |
-
-**Known gaps.** These are deliberate and tracked, not silent omissions:
-
-- No React Native / mobile client; the SPA is not an installable PWA and has no
-  offline mode (the only service worker handles FCM push).
-- Adaptation and recommendations are **rule-based** — there is no trained ML
-  model in the repository.
-- Rate limiting and the metrics reservoirs are **in-process**, so they are
-  per-worker rather than cluster-wide.
-- No cloud (AWS/Azure) deployment manifests.
+| **M4** 🚀   | Week 7–8 — Dashboards, Reports, Testing & Deployment | 🟢 Completed |
 
 > Milestone 3 demo notes and attempt-log audit steps:
 > [docs/MILESTONE_3_CLOSEOUT.md](docs/MILESTONE_3_CLOSEOUT.md) (historical
@@ -736,10 +737,6 @@ This project follows [Conventional Commits](https://www.conventionalcommits.org/
 This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
 
 ---
-
-<p align="center">
-  Built with ❤️ by <strong>Krithik Ananth</strong>
-</p>
 
 <p align="center">
   <a href="#-intelligent-cognitive-alarm-platform">⬆ Back to Top</a>
