@@ -79,6 +79,21 @@ services:
         value: "true"
 
       # Optional integrations - fill in the dashboard, leave blank to disable.
+      # Google sign-in stays disabled (the SPA is bounced back to /login with
+      # "Google sign-in is not configured") until BOTH id and secret are set.
+      - key: OAUTH2_GOOGLE_CLIENT_ID
+        sync: false
+      - key: OAUTH2_GOOGLE_CLIENT_SECRET
+        sync: false
+      # Must point at the FRONTEND origin, not the backend one: the static
+      # site rewrites /api/* to the backend, so the callback's Set-Cookie
+      # lands on the same origin the SPA runs on. Sending Google straight to
+      # icap-backend-*.onrender.com would drop both the oauth state cookie and
+      # the session cookies on a different host. Register the exact same value
+      # in Google Cloud Console -> Credentials -> Authorized redirect URIs.
+      #   https://cap-frontend-buva.onrender.com/api/v1/auth/oauth/google/callback
+      - key: OAUTH2_GOOGLE_REDIRECT_URI
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: FCM_ENABLED
