@@ -35,6 +35,7 @@ module.exports = ({ config }) => {
     plugins: [
       ...withCleartext(plugins, apiBaseUrl.startsWith('http://')),
       './plugins/withNotifeeRepository',
+      './plugins/withAlarmSound',
     ],
     extra: {
       ...config.extra,

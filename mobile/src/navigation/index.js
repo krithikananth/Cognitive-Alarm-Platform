@@ -21,8 +21,8 @@ const screenOptions = {
   contentStyle: { backgroundColor: '#0f172a' },
 };
 
-// Root navigator. Alarm CRUD, ring and permission screens are still placeholders
-// (spec tasks 5-8); only the auth flow is real.
+// Root navigator. Ring, dashboard, profile and permission screens are still
+// placeholders (spec tasks 7-10); auth and alarm management are real.
 export default function RootNavigator() {
   const status = useAuthStore((state) => state.status);
   const restore = useAuthStore((state) => state.restore);

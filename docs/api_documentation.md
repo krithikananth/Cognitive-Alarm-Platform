@@ -532,7 +532,6 @@ deliberately — it exposes fields the `/users/profile` bundle does not.
 | DELETE | `/api/v1/alarms/{alarm_id}`        | Delete (`204`)                                    |
 | PATCH  | `/api/v1/alarms/{alarm_id}/toggle` | `{"is_active": true}` / `{"is_active": false}`    |
 | GET    | `/api/v1/alarms/upcoming`          | Next triggers (`hours_ahead`, 1–168, default 24)  |
-| GET    | `/api/v1/alarms/schedule`          | Expand occurrences (`days`, 1–30, default 7)      |
 
 **`POST /api/v1/alarms/`**
 
@@ -572,39 +571,6 @@ The response (`AlarmResponse`) adds `id`, `user_id`, `is_active`,
 `next_trigger_at`, `last_triggered_at`, `total_dismissals`, `total_snoozes`,
 `created_at` and `updated_at`.
 
-**`GET /api/v1/alarms/schedule?days=7` → `AlarmScheduleResponse`**
-
-Built for native clients that arm OS-level alarms. `/upcoming` returns alarms
-whose single stored `next_trigger_at` falls in a window; this returns *every*
-ring instant in the horizon, so a device can schedule one exact alarm per
-occurrence without re-implementing the recurrence rules and drifting from the
-server. Inactive alarms are excluded, and occurrences are ordered by
-`trigger_at`.
-
-```json
-{
-  "generated_at": "2026-08-14T10:00:00+00:00",
-  "horizon_days": 7,
-  "occurrences": [
-    {
-      "alarm_id": 42,
-      "trigger_at": "2026-08-15T01:30:00+00:00",
-      "title": "Morning Alarm",
-      "challenge_type": "math",
-      "challenge_count": 1,
-      "challenge_difficulty": "medium",
-      "snooze_limit": 3,
-      "snooze_interval_minutes": 5,
-      "volume": 80,
-      "vibrate": true
-    }
-  ]
-}
-```
-
-Each ring keeps its **local wall-clock** time, so occurrences either side of a
-DST transition have different UTC offsets. `days` outside `1–30` is `422`.
-
 ### 7.2 The wake cycle
 
 ```
@@ -613,7 +579,6 @@ POST /alarms/{id}/verify        → submit an answer (repeat for multi-step)
 POST /alarms/{id}/dismiss       → dismiss using the verification token
 POST /alarms/{id}/snooze        → snooze (difficulty escalates)
 POST /alarms/{id}/fail-wake     → abandon the cycle
-POST /alarms/{id}/offline-wake  → flush a dismissal made with no connectivity
 ```
 
 | Method | Path                                    | Description                                                       |
@@ -623,36 +588,7 @@ POST /alarms/{id}/offline-wake  → flush a dismissal made with no connectivity
 | POST   | `/api/v1/alarms/{alarm_id}/dismiss`     | Dismiss with `{"verification_token": "..."}`                       |
 | POST   | `/api/v1/alarms/{alarm_id}/snooze`      | Snooze; `400` when the limit is reached or anti-snooze is on       |
 | POST   | `/api/v1/alarms/{alarm_id}/fail-wake`   | Record a failed wake; `400` with no open cycle, `409` once verified |
-| POST   | `/api/v1/alarms/{alarm_id}/offline-wake` | Flush a dismissal recorded with no connectivity — always **unverified** |
 | GET    | `/api/v1/alarms/{alarm_id}/snooze-info` | Snooze count/limit, escalation level, next difficulty              |
-
-**`POST /api/v1/alarms/{alarm_id}/offline-wake` → `OfflineWakeResponse`**
-
-```json
-{
-  "triggered_at": "2026-08-15T01:30:00+00:00",
-  "dismissed_at": "2026-08-15T01:30:45+00:00",
-  "challenges_required": 1,
-  "challenges_completed": 1,
-  "failed_attempts": 0,
-  "snooze_count": 0
-}
-```
-
-An offline challenge is generated and checked **on the device**, so the server
-has no evidence the user solved anything. The resulting `AlarmWakeEvent` is
-always written with `verified: false` and
-`dismiss_method: "offline_challenge"`: it is auditable and it advances the
-alarm's schedule, but it never feeds the habit score, streaks, wake
-consistency or the dismissal counters, all of which key on verified wakes.
-This is a deliberate trust boundary.
-
-Replaying a queued item is safe — a wake already recorded for the same ring
-instant comes back as `"status": "duplicate"` with the original
-`wake_event_id`. Timestamps in the future (beyond 5 minutes of clock skew),
-a `dismissed_at` before `triggered_at`, or a ring older than 30 days are
-rejected with `400`.
-
 
 **`GET /alarms/{alarm_id}/challenge` → `ChallengeResponse`**
 
