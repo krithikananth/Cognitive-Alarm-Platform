@@ -2,6 +2,7 @@ const appJson = require('../app.json');
 const appConfig = require('../app.config');
 
 const { ALARM_CHANNEL_ID } = require('../src/alarm/channel');
+const { applyLockScreenAttributes } = require('../plugins/withLockScreenActivity');
 
 // Permissions the alarm engine cannot work without (spec §7).
 const REQUIRED_PERMISSIONS = [
@@ -72,5 +73,48 @@ describe('cleartext exception', () => {
 describe('alarm channel', () => {
   it('matches the channel id the backend FCM config will target', () => {
     expect(ALARM_CHANNEL_ID).toBe('icap-alarm');
+  });
+});
+
+describe('lock-screen activity plugin', () => {
+  const mainActivityManifest = () => ({
+    manifest: {
+      application: [
+        {
+          activity: [
+            { $: { 'android:name': '.MainActivity', 'android:launchMode': 'singleTask' } },
+          ],
+        },
+      ],
+    },
+  });
+
+  it('marks MainActivity as showWhenLocked and turnScreenOn', () => {
+    const manifest = mainActivityManifest();
+
+    applyLockScreenAttributes(manifest);
+
+    expect(manifest.manifest.application[0].activity[0].$).toMatchObject({
+      'android:showWhenLocked': 'true',
+      'android:turnScreenOn': 'true',
+    });
+  });
+
+  it('keeps the attributes the prebuild template already set', () => {
+    const manifest = mainActivityManifest();
+
+    applyLockScreenAttributes(manifest);
+
+    // singleTask is what lets the full-screen intent reuse the running task
+    // instead of stacking a second activity behind the ring screen.
+    expect(manifest.manifest.application[0].activity[0].$['android:launchMode']).toBe(
+      'singleTask'
+    );
+  });
+
+  it('is registered so prebuild cannot regenerate the manifest without it', () => {
+    const resolved = appConfig({ config: appJson.expo });
+
+    expect(resolved.plugins).toContain('./plugins/withLockScreenActivity');
   });
 });

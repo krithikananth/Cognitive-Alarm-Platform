@@ -54,4 +54,39 @@ export async function fetchSchedule({ days = 7 } = {}) {
     return data;
 }
 
+/**
+ * `GET /alarms/{id}/challenge` — the next puzzle for a ringing alarm.
+ *
+ * The payload never carries `answer`; the session lives server-side, so the
+ * device cannot be tricked into revealing it (spec §6.3).
+ */
+export async function fetchChallenge(alarmId) {
+    const { data } = await api.get(`/alarms/${alarmId}/challenge`);
+    return data;
+}
+
+/**
+ * `POST /alarms/{id}/verify` — submit an answer.
+ *
+ * Three outcomes: 200 `step_complete` (more steps to go), 200 `dismissed`
+ * (wake verified, alarm auto-dismissed), or 400 for a wrong answer or a
+ * timeout — which axios raises, so callers must treat 400 as flow control
+ * rather than as a failure.
+ */
+export async function verifyChallenge(alarmId, payload) {
+    const { data } = await api.post(`/alarms/${alarmId}/verify`, payload);
+    return data;
+}
+
+/** `POST /alarms/{id}/snooze` — 400 once `total_snoozes` reaches `snooze_limit`. */
+export async function snoozeAlarm(alarmId) {
+    const { data } = await api.post(`/alarms/${alarmId}/snooze`);
+    return data;
+}
+
+/** `POST /alarms/{id}/fail-wake` — abandon the cycle; records an unverified wake. */
+export async function failWake(alarmId) {
+    const { data } = await api.post(`/alarms/${alarmId}/fail-wake`);
+    return data;
+}
 

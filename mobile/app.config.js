@@ -36,6 +36,7 @@ module.exports = ({ config }) => {
       ...withCleartext(plugins, apiBaseUrl.startsWith('http://')),
       './plugins/withNotifeeRepository',
       './plugins/withAlarmSound',
+      './plugins/withLockScreenActivity',
     ],
     extra: {
       ...config.extra,

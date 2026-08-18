@@ -4,10 +4,12 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import useAlarmSync from './src/alarm/useAlarmSync';
+import useRingEvents from './src/alarm/handlers';
 import RootNavigator from './src/navigation';
 
 export default function App() {
   useAlarmSync();
+  useRingEvents();
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />

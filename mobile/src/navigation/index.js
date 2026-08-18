@@ -12,6 +12,7 @@ import ProfileScreen from '../screens/ProfileScreen';
 import RegisterScreen from '../screens/RegisterScreen';
 import RingScreen from '../screens/RingScreen';
 import useAuthStore, { AUTH_STATUS } from '../store/authStore';
+import useRingStore, { selectIsRinging } from '../store/ringStore';
 
 const Stack = createNativeStackNavigator();
 
@@ -21,11 +22,12 @@ const screenOptions = {
   contentStyle: { backgroundColor: '#0f172a' },
 };
 
-// Root navigator. Ring, dashboard, profile and permission screens are still
-// placeholders (spec tasks 7-10); auth and alarm management are real.
+// Root navigator. Dashboard, profile and permission screens are still
+// placeholders (spec tasks 8-10); auth, alarm management and the ring are real.
 export default function RootNavigator() {
   const status = useAuthStore((state) => state.status);
   const restore = useAuthStore((state) => state.restore);
+  const isRinging = useRingStore(selectIsRinging);
 
   useEffect(() => {
     restore();
@@ -43,23 +45,29 @@ export default function RootNavigator() {
     <NavigationContainer>
       <Stack.Navigator screenOptions={screenOptions}>
         {status === AUTH_STATUS.AUTHENTICATED ? (
-          <Stack.Group>
-            <Stack.Screen
-              name="AlarmList"
-              component={AlarmListScreen}
-              options={{ title: 'Alarms' }}
-            />
-            <Stack.Screen name="AlarmEdit" component={AlarmEditScreen} />
-            <Stack.Screen name="Dashboard" component={DashboardScreen} />
-            <Stack.Screen name="Profile" component={ProfileScreen} />
-            <Stack.Screen name="Permissions" component={PermissionsScreen} />
+          isRinging ? (
+            // Rendering the ring as the *only* route is what makes it
+            // inescapable: there is no back stack to pop and no gesture target.
+            // It also removes the cold-start race a navigation ref would have,
+            // since the store is already set before the tree mounts.
             <Stack.Screen
               name="Ring"
               component={RingScreen}
-              // The ring must not be escapable with a swipe or the header back arrow.
               options={{ headerShown: false, gestureEnabled: false }}
             />
-          </Stack.Group>
+          ) : (
+            <Stack.Group>
+              <Stack.Screen
+                name="AlarmList"
+                component={AlarmListScreen}
+                options={{ title: 'Alarms' }}
+              />
+              <Stack.Screen name="AlarmEdit" component={AlarmEditScreen} />
+              <Stack.Screen name="Dashboard" component={DashboardScreen} />
+              <Stack.Screen name="Profile" component={ProfileScreen} />
+              <Stack.Screen name="Permissions" component={PermissionsScreen} />
+            </Stack.Group>
+          )
         ) : (
           <Stack.Group screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Login" component={LoginScreen} />
