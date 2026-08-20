@@ -60,7 +60,7 @@ jobs:
         working-directory: frontend
         run: node scripts/precompress.js --verify
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: frontend-build-manifest
@@ -190,7 +190,7 @@ jobs:
           echo "--- uvicorn log (tail) ---"
           tail -n 50 uvicorn.log || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: pg-perf-results-${{ steps.profile.outputs.profile }}
