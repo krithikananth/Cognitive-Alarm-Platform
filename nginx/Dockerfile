@@ -1,4 +1,4 @@
-FROM nginx:1.27-alpine
+FROM nginx:1.30-alpine
 
 # openssl provides the fallback self-signed certificate when no CA-issued one
 # is mounted, so the edge is never reachable over plaintext by accident.
