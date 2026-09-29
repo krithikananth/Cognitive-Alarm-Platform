@@ -1,7 +1,7 @@
 fastapi==0.116.1
 # Pinned explicitly (FastAPI allows <0.41.0): 0.38.6 carries several DoS and
 # multipart advisories. Keep this pin in step with the FastAPI range.
-starlette==0.47.2
+starlette==1.6.0
 uvicorn[standard]==0.32.0
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
